@@ -1,0 +1,18 @@
+http:
+  middlewares:
+    headers-security:
+      headers:
+        contentTypeNosniff: true
+        browserXssFilter: true
+        frameDeny: true
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        referrerPolicy: strict-origin-when-cross-origin
+        contentSecurityPolicy: "frame-ancestors 'none'"
+        customResponseHeaders:
+          X-Robots-Tag: "noindex,nofollow"
+          X-Permitted-Cross-Domain-Policies: "none"
+          Cross-Origin-Opener-Policy: "same-origin"
+          Cross-Origin-Resource-Policy: "same-origin"
+          Server: ""

@@ -2,7 +2,7 @@
 
 Informační systém SJV na `sjv.serveftp.org`: sběr odečtů měřidel (wM-Bus), aplikace pro členy a správu, zálohy. Běží jako Docker stack v samostatném Incus kontejneru.
 
-Stav: etapa B1 (kostra repozitáře a instalační infrastruktura). Aplikace, Docker Compose, databáze, MQTT ani zálohy zatím nejsou implementované.
+Stav: etapa B1b (instalační základ, Traefik a CrowdSec). Aplikace, databáze, MQTT ani zálohy zatím nejsou implementované.
 
 ## Dokumentace
 
@@ -23,10 +23,13 @@ Stav: etapa B1 (kostra repozitáře a instalační infrastruktura). Aplikace, Do
 ## Rychlý přehled
 
 ```bash
-sudo ./scripts/init.sh        # adresáře a kopie .env.example do stacku
-sudo ./scripts/update-env.sh  # vytvoří nebo doplní /docker-data/stacks/infrastructure-sjv/.env
-sudo ./scripts/check-env.sh   # ověří .env, nic nemění
-./scripts/test.sh             # offline testy, bez rootu
+sudo ./scripts/init.sh                  # adresáře a kopie souborů bez tajemství
+sudo ./scripts/update-env.sh            # vytvoří nebo doplní runtime .env
+sudo ./scripts/check-env.sh             # ověří .env, nic nemění
+sudo ./scripts/create-dashboard-user.sh # heslo dashboardu, mimo Git
+sudo ./scripts/deploy.sh                # sítě, Traefik a CrowdSec
+sudo ./scripts/post-deploy.sh           # registrace bouncer klíče, klíč se nevypíše
+./scripts/test.sh                       # offline testy, bez rootu a bez Docker démona
 ```
 
 Podrobnosti jsou v [docs/operations.md](docs/operations.md).

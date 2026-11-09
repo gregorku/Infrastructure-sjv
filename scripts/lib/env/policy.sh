@@ -28,6 +28,9 @@ declare -gA ENV_POLICY=(
     [TRAEFIK_ACME_EMAIL]=user
     [TRAEFIK_ADMIN_PUBLISH]=user
     [ADMIN_IP_ALLOWLIST]=user
+    [TRAEFIK_IMAGE]=framework
+    [CROWDSEC_IMAGE]=framework
+    [CROWDSEC_BOUNCER_PLUGIN]=framework
 
     [PG_DB]=framework
     [PG_BOOTSTRAP_USER]=framework

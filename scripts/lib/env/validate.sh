@@ -298,6 +298,22 @@ env_check_smtp() {
     [[ "${env_smtp_ref[MAIL_FROM]}" =~ ${ENV_EMAIL_RE} ]] || env_err "MAIL_FROM must be an email address when SMTP_HOST is set."
 }
 
+env_check_images() {
+    local -n env_image_ref="$1"
+    local image plugin
+    image="${env_image_ref[TRAEFIK_IMAGE]}"
+    if ! env_image_ref_ok "${image}" || [[ "${image}" != docker.io/library/traefik:*@sha256:* ]]; then
+        env_err "TRAEFIK_IMAGE must be docker.io/library/traefik:<tag>@sha256:<64 hex digits>."
+    fi
+    image="${env_image_ref[CROWDSEC_IMAGE]}"
+    if ! env_image_ref_ok "${image}" || [[ "${image}" != docker.io/crowdsecurity/crowdsec:*@sha256:* ]]; then
+        env_err "CROWDSEC_IMAGE must be docker.io/crowdsecurity/crowdsec:<tag>@sha256:<64 hex digits>."
+    fi
+    plugin="${env_image_ref[CROWDSEC_BOUNCER_PLUGIN]}"
+    [[ "${plugin}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+        || env_err "CROWDSEC_BOUNCER_PLUGIN must be a vX.Y.Z version."
+}
+
 # Usage: env_validate ARRAY_NAME
 # Returns 0 when ENV_ERRORS is empty after all checks.
 env_validate() {
@@ -313,6 +329,9 @@ env_validate() {
         [[ -v "env_val_ref[${key}]" ]] || env_err "Missing variable: ${key}"
     done
     for key in "${present_keys[@]}"; do
+        if [[ "${key}" == *BOUNCER_KEY* ]]; then
+            env_err "Bouncer keys are not stored in .env: ${key}"
+        fi
         [[ -z "${key}" || -v "ENV_POLICY[${key}]" ]] || env_err "Unknown variable ${key}. Remove it or add it to the policy."
     done
     if (( ${#ENV_ERRORS[@]} > 0 )); then
@@ -352,6 +371,7 @@ env_validate() {
     done
     (( found == 1 )) || env_err "MQTT_HOSTNAME must be one of: ${MQTT_HOSTNAME_ALLOWED[*]}."
 
+    env_check_images "$1"
     env_check_networks "$1"
     env_check_proxy_and_tls "$1"
     env_check_accounts "$1"

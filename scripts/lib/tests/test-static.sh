@@ -71,7 +71,7 @@ static_test_forbidden() {
         'download piped into a shell|(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba)?sh'
         'world-writable or recursive chmod|chmod[[:space:]]+(-R|[0-7]{2,3}[2367]([[:space:]]|$)|a\+w|o\+w)'
         "sudo|${cmd_pos}sudo([[:space:]]|\$)"
-        "Docker commands (B1 must not start or change containers)|${cmd_pos}docker([[:space:]]|\$)"
+        "Docker commands outside scripts/lib/deploy/docker.sh|${cmd_pos}docker([[:space:]]|\$)"
         "external infrastructure commands|${cmd_pos}(zfs|zpool|incus|nixos-rebuild|restic|rest-server|wg|wg-quick|nft|iptables|systemctl)([[:space:]]|\$)"
         'secret variable printed|(echo|printf|info|ok|warn|error|fail)[^#]*\$\{?[A-Z_]*(PASSWORD|SECRET|TOKEN)'
         'source of an .env file|(source|\.)[[:space:]]+[^[:space:]]*\.env([[:space:]]|"|$)'
@@ -105,6 +105,9 @@ static_test_forbidden() {
         label="${entry%%|*}"
         regex="${entry#*|}"
         hits="$(static_grep_code "${regex}" "${files[@]}")"
+        if [[ "${label}" == Docker\ commands* ]]; then
+            hits="$(printf '%s\n' "${hits}" | grep -v '^scripts/lib/deploy/docker.sh:' || true)"
+        fi
         if [[ -z "${hits}" ]]; then
             t_pass "no ${label}"
         else
@@ -112,6 +115,34 @@ static_test_forbidden() {
             printf '    %s\n' "${hits}"
         fi
     done
+
+    local line bad_docker=()
+    while IFS= read -r line; do
+        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*(timeout[[:space:]].*[[:space:]])?docker[[:space:]] ]] || continue
+        [[ "${line}" =~ ^[[:space:]]*docker[[:space:]]+network[[:space:]]+inspect([[:space:]]|$) ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*docker[[:space:]]+network[[:space:]]+ls([[:space:]]|$) ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*docker[[:space:]]+network[[:space:]]+create([[:space:]]|$) ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*docker[[:space:]]+inspect([[:space:]]|$) ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*docker[[:space:]]+exec([[:space:]]|$) ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*docker[[:space:]]+restart([[:space:]]|$) ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*docker[[:space:]]+compose([[:space:]]|$) ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*timeout[[:space:]].*[[:space:]]docker[[:space:]]+exec[[:space:]] ]] && continue
+        bad_docker+=("${line}")
+    done < "${REPO_ROOT}/scripts/lib/deploy/docker.sh"
+    if (( ${#bad_docker[@]} == 0 )); then
+        t_pass "docker.sh only uses inspect, create, exec, restart and compose"
+    else
+        t_fail "docker.sh has an unexpected docker invocation"
+        printf '    %s\n' "${bad_docker[@]}"
+    fi
+    hits="$(static_grep_code 'network[[:space:]]+rm|network[[:space:]]+remove|compose[[:space:]]+down|compose[[:space:]]+rm|--privileged|docker[[:space:]]+system|docker[[:space:]]+volume|docker[[:space:]]+run' "${files[@]}")"
+    if [[ -z "${hits}" ]]; then
+        t_pass "no Docker socket, volume, prune or container removal"
+    else
+        t_fail "found a forbidden Docker operation"
+        printf '    %s\n' "${hits}"
+    fi
 
     hits="$(static_grep_code 'rm[[:space:]]+-[A-Za-z]*r[A-Za-z]*f|rm[[:space:]]+-[A-Za-z]*f[A-Za-z]*r' "${files[@]}" | grep -v '^scripts/test.sh:' || true)"
     if [[ -z "${hits}" ]]; then

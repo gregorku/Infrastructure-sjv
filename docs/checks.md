@@ -1,6 +1,6 @@
 # Kontroly a testy
 
-Stav: etapa B1. Další etapy seznam rozšíří (Compose, databáze, zálohy).
+Stav: etapa B1b. Sada běží offline. `docker compose config` se spustí jen když je CLI k dispozici a nic nespouští.
 
 ## Přehled
 
@@ -36,6 +36,10 @@ Stav: etapa B1. Další etapy seznam rozšíří (Compose, databáze, zálohy).
 - `update-env.sh`: vytvoření `.env`, výpis placeholderů jménem, opakovaný běh beze změny souborů i adresářů, zachování doplněných hodnot, záloha před obnovou hodnoty `framework`, zámek proti souběhu, odmítnutí zastaralé kopie `.env.example`.
 - `update-env.sh` a `check-env.sh` volají `require_mountpoint` dřív, než sáhnou na `.env`. Bez mountpointu nic nezapíšou a nezaloží adresář.
 - `check-env.sh`: odmítne placeholdery (všechny najednou), práva 644 u `.env` i záloh, osiřelý `.env.tmp.*`, visící symlink `.env` v checkoutu a nebezpečný allowlist; přijme kompletní konfiguraci; nikdy nic nezmění a nevypíše tajemství.
+- Compose a konfigurace: v repozitáři není `docker.sock`, bouncer klíč není proměnná `.env`, gitová šablona admin portu nic nepublikuje.
+- Plán sítí bez Docker démona: `sjv-internal` je jediná interní, cizí síť se nemění, překryv zastaví vytvoření, shodná označená síť se nezakládá znovu.
+- `deploy.sh --render-only` v testovacím režimu vykreslí Traefik bez Docker provideru, s file providerem, allowlistem a budoucími routami API a webu. Middleware bounceru chybí, dokud nevznikne soubor klíče s právy 600. Druhé vykreslení soubor nemění. Plný `deploy.sh` v testovacím režimu skončí před Dockerem.
+- Zápis klíče smaže jen svůj dočasný soubor. Výstup klíč neobsahuje.
 
 ## Testy, které `test.sh` nespustí
 

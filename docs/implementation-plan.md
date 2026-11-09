@@ -15,7 +15,6 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 | Dokumentace koncentrátoru | fáze 11 |
 | E2, E3, E4 | ostrý provoz (fáze 12) |
 | SMTP (E7) | odesílání notifikací (fáze 9). Do té doby zůstávají ve frontě a v administraci |
-| Potvrzení pravidla pro aktuální stav měřidla (R15) | pohled člena ve fázi 7 a 8 |
 
 ## Fáze
 
@@ -24,7 +23,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 - `README.md`, `.gitignore`, `.env.example` s `set_*`.
 - `scripts/config.sh`, `lib/logging.sh`, `lib/common.sh`, `lib/env/` (`ENV_POLICY`, sync, validace) převzaté z reference a upravené. Parser `.env` bez `eval`.
 - `init.sh`, `update-env.sh`, `check-env.sh`, `test.sh --static`, `shellcheck.sh`.
-- Compose: čtyři sítě podle [architecture.md](architecture.md), Traefik (bez `docker.sock`), CrowdSec, správa bouncer klíče převzatá z reference, včetně testů.
+- Compose: čtyři sítě podle [architecture.md](architecture.md), Traefik (bez `docker.sock`), CrowdSec, správa bouncer klíče převzatá z reference, včetně testů. Soubory a offline testy jsou v repozitáři od B1b. Spuštění na testovacím kontejneru tato etapa neprovádí.
 - Zafixování verzí: Python, Node, pgBackRest (s podporou PostgreSQL 18), restic, rest-server. Ověření voleb `expire-auto` v pgBackRest a `manual_ack` v paho-mqtt.
 - Hotovo, když:
   - `test.sh --static` a shellcheck projdou,
@@ -103,7 +102,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 
 ### 8. Frontend
 
-- Člen: byty, aktuální stav (podle rozhodnutí R15), historie, grafy po měsících a letech (ECharts), exporty.
+- Člen: byty, aktuální kumulativní stav měřidla podle schváleného R15 (celkový stav počítadla, ne osobní spotřeba), historie a spotřeba jen za členství, grafy po měsících a letech (ECharts), exporty.
 - Administrátor: správa, přehled zařízení, telegramů, neznámých měřidel a anomálií, přechody zdroje, opravy, audit, historie bytu.
 - Hotovo, když projdou e2e testy hlavních scénářů (Playwright) a ověření, že UI nikdy nedostane data mimo členství.
 

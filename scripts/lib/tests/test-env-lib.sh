@@ -266,6 +266,12 @@ test_env_validate() {
     expect_invalid "unencrypted SMTP" "Unencrypted SMTP is not allowed" SMTP_SECURITY=none
     expect_invalid "SMTP credentials without a host" "SMTP_HOST is empty" SMTP_USER=sjv
     expect_invalid "a latest tag" "uses the latest tag" SMTP_HOST=smtp.example.org:latest
+    expect_invalid "an unpinned Traefik image" "TRAEFIK_IMAGE must be docker.io/library/traefik" \
+        TRAEFIK_IMAGE=docker.io/library/traefik:v3.6.22
+    expect_invalid "a CrowdSec image without a digest" "CROWDSEC_IMAGE must be docker.io/crowdsecurity/crowdsec" \
+        CROWDSEC_IMAGE=docker.io/crowdsecurity/crowdsec:v1.7.8
+    expect_invalid "a bouncer key stored in .env" "Bouncer keys are not stored" \
+        BOUNCER_KEY=abcdefghijklmnopqrst
     expect_invalid "an invalid log size" "LOG_MAX_SIZE" LOG_MAX_SIZE=lots
 
     local -A leak=()

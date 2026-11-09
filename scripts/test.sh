@@ -21,6 +21,18 @@ source "${SCRIPT_DIR}/lib/tests/test-static.sh"
 source "${SCRIPT_DIR}/lib/tests/test-env-lib.sh"
 # shellcheck source=scripts/lib/tests/test-scripts.sh
 source "${SCRIPT_DIR}/lib/tests/test-scripts.sh"
+# shellcheck source=scripts/lib/deploy/layout.sh
+source "${SCRIPT_DIR}/lib/deploy/layout.sh"
+# shellcheck source=scripts/lib/deploy/docker.sh
+source "${SCRIPT_DIR}/lib/deploy/docker.sh"
+# shellcheck source=scripts/lib/deploy/networks.sh
+source "${SCRIPT_DIR}/lib/deploy/networks.sh"
+# shellcheck source=scripts/lib/deploy/crowdsec.sh
+source "${SCRIPT_DIR}/lib/deploy/crowdsec.sh"
+# shellcheck source=scripts/lib/deploy/render.sh
+source "${SCRIPT_DIR}/lib/deploy/render.sh"
+# shellcheck source=scripts/lib/tests/test-infra.sh
+source "${SCRIPT_DIR}/lib/tests/test-infra.sh"
 
 T_RUN_DIR=""
 
@@ -56,6 +68,7 @@ main() {
     run_static_tests
     run_env_lib_tests
     run_script_tests
+    run_infra_tests
     run_shellcheck_step
 
     print_footer "No container, network, ZFS or host configuration was touched."

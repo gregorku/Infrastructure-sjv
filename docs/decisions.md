@@ -1,6 +1,6 @@
 # Rozhodnutí
 
-Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026. Implementace nezačala. Schválení dokumentace neznamená souhlas s implementací aplikace ani infrastruktury.
+Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026. R15 je schválené rozhodnutí. Schválení dokumentace neznamená souhlas s nasazením.
 
 ## Potvrzená rozhodnutí
 
@@ -19,6 +19,7 @@ Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026. Implementace neza
 | 11 | Plánované úlohy přes systemd timers | Zálohy, testy obnovy, certifikáty, údržba partitions, viz [architecture.md](architecture.md#plánované-úlohy-systemd-timers) |
 | 12 | Dokumentace malými písmeny | Stejná konvence jako `Infrastructure-Nextcloud-Lu` |
 | 13 | Aplikace je jen informační | Bez rozúčtování nákladů a bez výpočtu cen |
+| 14 | Člen vidí aktuální kumulativní stav měřidla a historii jen za své členství | Hodnota je celkový stav počítadla, ne osobní spotřeba. Administrátor má kompletní historii |
 
 ## Retence
 
@@ -57,7 +58,7 @@ Změny proti dokumentaci z kola 2. Všech devět dokumentů je s nimi sladěnýc
 | R12 | Denní hodnoty | Nebylo určeno, ze kterých streamů a v jakém časovém pásmu | Jen z efektivní řady (přiřazené streamy), den v `Europe/Prague` |
 | R13 | Obnovovací přístup | Uživatel `sjv-vps` neodpovídal cestě `infrastructure-sjv/` při `--private-repos`. Druhý uživatel ve stejné instanci by k repozitáři neměl přístup | Uživatel VPS se jmenuje `infrastructure-sjv`. Pro obnovu je předem připravená vypnutá instance `rest-server-sjv-recovery` bez `--private-repos` s uživatelem `sjv-recovery` |
 | R14 | Heartbeat a broker | Heartbeat nenesl časovou referenci. Broker mohl hromadit QoS 0 | `queue_qos0_messages false`. Heartbeat nese `instance`, `boot`, `uptime_ms`, `at` |
-| R15 | Aktuální stav pro člena | Nebylo určeno | Člen vidí aktuální absolutní stav počítadla (jako fyzický displej), ale historii a spotřebu jen za období členství. **K potvrzení** |
+| R15 | Aktuální stav pro člena | Nebylo určeno | Schváleno. Člen vidí aktuální kumulativní stav měřidla, označený jako celkový stav počítadla, ne jako osobní spotřebu. Historické odečty a vypočítanou spotřebu vidí jen za období svého členství. Administrátor má kompletní historii |
 | R16 | Retence odečtů | „dlouhodobě“ | „trvale“, podle zadání |
 
 Další upřesnění bez samostatného čísla:
@@ -83,6 +84,5 @@ Hodnoty, které nejsou známé, se nedoplňují odhadem.
 | Hardware ESP (čip, rádio, flash, konektivita, napájení) | firmware |
 | Vzorky telegramů, typy měřidel tepla, AES klíče | fáze 6 |
 | Dokumentace koncentrátoru dodavatele | fáze 11 |
-| Potvrzení R15 | fáze 7 a 8 |
 | Počet měřidel a intervaly vysílání | odhad objemu, fáze 4 |
 | Verze software a ověření bodů „k ověření“ | fáze 1–3 |

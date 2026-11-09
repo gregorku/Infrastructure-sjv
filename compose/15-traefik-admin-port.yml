@@ -1,0 +1,9 @@
+###############################################################################
+#
+# Placeholder included by Compose. deploy.sh rewrites the stack copy when
+# TRAEFIK_ADMIN_PUBLISH is set. An empty services map publishes no admin port.
+# Do not add a host port here in Git.
+#
+###############################################################################
+
+services: {}

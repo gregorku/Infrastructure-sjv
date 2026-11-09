@@ -71,6 +71,17 @@ Rozdíly proti referenci:
 - Traefik nemá `docker.sock` a nepoužívá Docker provider. Všechny routery jsou v souborech.
 - Bez Dockge, Redis, Nginx+PHP a Metabase.
 
+### Implementace B1b
+
+V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefik.yml`, `compose/15-traefik-admin-port.yml`, `compose/20-crowdsec.yml`, `configs/traefik/dynamic/` a `configs/crowdsec/`. Služby aplikace, PostgreSQL a Mosquitto v Compose ještě nejsou.
+
+- Sítě jsou `external`. Zakládá je `deploy.sh` a označí je `com.infrastructure-sjv.managed=true`. Cizí síť se stejným jménem skript nemění ani nemaže. `sjv-internal` vzniká s `--internal`.
+- Pevná adresa Traefiku na `sjv-proxy` je první adresa za branou této sítě. Počítá ji `deploy.sh` a předá ji Compose jako `TRAEFIK_PROXY_ADDRESS`. V `.env` tato hodnota není.
+- Traefik má jen file provider. `docker.sock` se nikam nemountuje. Porty hosta jsou jen 80 a 443. Entrypoint `admin` se publikuje jen do stackové kopie `compose/15-traefik-admin-port.yml`, a jen když existuje heslo dashboardu a `TRAEFIK_ADMIN_PUBLISH`.
+- Routy `sjv-api` (`http://sjv-backend:8000`) a `sjv-web` (`http://sjv-web:8080`) jsou připravené. Kontejnery těchto služeb tato etapa nespouští.
+- Samostatný certifikát MQTT se vykreslí jen při `MQTT_HOSTNAME=sjv-mqtt.serveftp.org` a `TRAEFIK_TLS_MODE=letsencrypt`.
+- CrowdSec je na `sjv-internal` a `sjv-egress`, bez portu na hostu. LAPI je `crowdsec:8080`. Bouncer middleware se připojí až po `post-deploy.sh`, protože klíč v tu chvíli teprve vzniká.
+
 ### Sítě
 
 | Síť | `internal` | Členové | Účel |
@@ -164,7 +175,7 @@ Data jsou vždy omezená na období členství ([security.md](security.md), [dat
 | GET | `/me/apartments` | byty a vlastní období členství |
 | GET | `/me/apartments/{id}/meters` | měřidla v bytě během členství |
 | GET | `/me/apartments/{id}/consumption?granularity=month\|year&from&to&medium` | spotřeba omezená na členství |
-| GET | `/me/apartments/{id}/current` | aktuální stav měřidel |
+| GET | `/me/apartments/{id}/current` | aktuální kumulativní stav měřidel, označený jako celkový stav počítadla, ne jako osobní spotřeba (schválené R15) |
 | GET | `/me/meters/{id}/readings?from&to` | odečty efektivního zdroje uvnitř členství |
 | GET | `/me/exports/consumption.csv`, `/me/exports/consumption.pdf` | export vlastních dat |
 
@@ -232,22 +243,19 @@ Data jsou vždy omezená na období členství ([security.md](security.md), [dat
 
 Pořadí ručních kroků:
 
-`init.sh` → `update-env.sh` → doplnit `set_` → `create-dashboard-user.sh` → `check-env.sh` → `deploy.sh` → `post-deploy.sh` → `create-admin.sh`
+`init.sh` → `update-env.sh` → doplnit `set_` → `create-dashboard-user.sh` → `check-env.sh` → `deploy.sh` → `post-deploy.sh`
 
-`deploy.sh` dělá v tomto pořadí:
+`create-admin.sh` přibude s backendem. `reload.sh` zopakuje `deploy.sh` a sítě nemaže. `deploy.sh --render-only` jen vykreslí runtime a Docker nezavolá.
 
-1. synchronizuje stack,
-2. ověří `.env`,
-3. připraví úložiště a sítě,
-4. vykreslí konfiguraci Traefiku a Mosquitta,
-5. postaví image,
-6. spustí PostgreSQL s `--wait` a založí role,
-7. ověří stanzu pgBackRest,
-8. vynutí čerstvou zálohu před migrací se zámkem `state/migration.lock`,
-9. spustí `alembic upgrade head`,
-10. spustí celý stack s `--remove-orphans` bez mazání volume.
+`deploy.sh` v etapě B1b dělá v tomto pořadí:
 
-Dockge se nekontroluje.
+1. ověří `.env` dřív, než něco zapíše,
+2. připraví adresáře a zkopíruje soubory bez tajemství,
+3. vykreslí konfiguraci Traefiku,
+4. mimo testovací režim založí čtyři sítě a spustí jen `traefik` a `crowdsec`,
+5. nainstaluje kolekce CrowdSec, pokud už nejsou.
+
+Databáze, migrace a další služby se do tohoto pořadí doplní ve svých etapách. `--remove-orphans` se nepoužívá. Dockge se nekontroluje.
 
 ## Plánované úlohy (systemd timers)
 

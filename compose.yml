@@ -1,0 +1,16 @@
+###############################################################################
+#
+# Infrastructure-sjv
+#
+# Traefik and CrowdSec only. Application, database and MQTT services are
+# later stages and are not started by this file.
+#
+###############################################################################
+
+name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME}
+
+include:
+  - compose/00-networks.yml
+  - compose/10-traefik.yml
+  - compose/15-traefik-admin-port.yml
+  - compose/20-crowdsec.yml

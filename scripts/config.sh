@@ -62,6 +62,11 @@ readonly STACK_DIR="${STACKS_DIR}/${STACK_NAME}"
 readonly BACKUP_LOCAL_DIR="${BASE_DIR}/backups/${STACK_NAME}"
 readonly STATE_DIR="${DATA_DIR}/state"
 readonly SECRETS_DIR="${DATA_DIR}/secrets"
+readonly TRAEFIK_DIR="${DATA_DIR}/traefik"
+readonly CROWDSEC_DIR="${DATA_DIR}/crowdsec"
+readonly ACME_FILE="${TRAEFIK_DIR}/acme/acme.json"
+readonly HTPASSWD_FILE="${TRAEFIK_DIR}/users/dashboard.htpasswd"
+readonly RUNTIME_DIR="${STACK_DIR}/runtime"
 
 # Values written into .env must describe the production layout even in tests.
 readonly PRODUCTION_DATA_DIR="${PRODUCTION_BASE_DIR}/${STACK_NAME}"
@@ -81,6 +86,9 @@ fi
 # Only files without secrets are copied from Git into the stack directory.
 readonly DEPLOY_ITEMS=(
     .env.example
+    compose.yml
+    compose
+    configs
 )
 
 readonly SJV_DOMAIN="sjv.serveftp.org"
@@ -105,6 +113,14 @@ readonly RESERVED_SUBNETS=(
 )
 
 readonly TRAEFIK_ADMIN_PORT="8443"
+readonly TRAEFIK_CONTAINER="sjv-traefik"
+readonly CROWDSEC_CONTAINER="sjv-crowdsec"
+readonly CROWDSEC_BOUNCER_NAME="sjv-traefik"
+readonly BOUNCER_KEY_FILE="${TRAEFIK_DIR}/crowdsec/BOUNCER_KEY_${CROWDSEC_BOUNCER_NAME}"
+readonly APP_BACKEND_URL="http://sjv-backend:8000"
+readonly APP_WEB_URL="http://sjv-web:8080"
+readonly NETWORK_LABEL="com.infrastructure-sjv.managed"
+readonly NETWORK_ROLE_LABEL="com.infrastructure-sjv.role"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     readonly COLOR_RED="\033[0;31m"

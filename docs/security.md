@@ -53,7 +53,7 @@
 - Každý endpoint deklaruje potřebné oprávnění. Testy ověří, že neexistuje endpoint bez deklarace.
 - **Data členů** filtruje repozitářová vrstva, ne UI: měřidlo instalované v bytě v čase odečtu a čas uvnitř členství. Id bytu nebo měřidla z URL se vždy ověří proti těmto pravidlům. Neexistující a cizí objekt vrací stejnou odpověď `404`. Celé pravidlo je v [database-design.md](database-design.md#historie-bytu-přístup-oddělený-od-spotřeby).
 - **Přístup je oddělený od spotřeby.** Data spotřeby patří bytu a měřidlu, členství jen určuje viditelné období. Změna vlastníka nemění data spotřeby, takže nový vlastník nevidí historii předchozího a předchozí vlastník po skončení členství nevidí nová data.
-- **Aktuální stav měřidla:** člen vidí aktuální absolutní hodnotu počítadla, stejnou jako na fyzickém displeji. Ta nepřímo obsahuje součet spotřeby od instalace měřidla, včetně doby před členstvím. Historie a spotřeba jsou jen za období členství. Je to k potvrzení ([decisions.md](decisions.md)). Alternativou je ukazovat jen spotřebu od začátku členství.
+- **Aktuální stav měřidla (R15, schváleno):** člen vidí aktuální kumulativní stav počítadla, stejný jako na fyzickém displeji. Rozhraní ho označuje jako celkový stav měřidla, ne jako osobní spotřebu, protože zahrnuje i spotřebu před členstvím. Historické odečty a vypočítanou spotřebu vidí jen za období svého členství. Administrátor má kompletní historii ([decisions.md](decisions.md)).
 - **Historie pro administrátora:** `GET /admin/apartments/{id}/history` vrací instalace a výměny měřidel, členství a přiřazení zdrojů v čase. Přístup do ní se audituje.
 - Testy přístupu: pro každý endpoint člena se ověří cizí byt, období před členstvím a po jeho skončení, dvě oddělená období jednoho člena a měřidlo po výměně.
 

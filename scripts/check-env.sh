@@ -61,6 +61,18 @@ fi
 check_private_dir "${STATE_DIR}"
 check_private_dir "${SECRETS_DIR}"
 check_private_dir "${BACKUP_LOCAL_DIR}"
+check_private_dir "${TRAEFIK_DIR}/acme"
+check_private_dir "${TRAEFIK_DIR}/users"
+check_private_dir "${TRAEFIK_DIR}/crowdsec"
+check_private_dir "${CROWDSEC_DIR}/data"
+if [[ -e "${TRAEFIK_DIR}/logs" || -L "${TRAEFIK_DIR}/logs" ]]; then
+    [[ -d "${TRAEFIK_DIR}/logs" && ! -L "${TRAEFIK_DIR}/logs" ]] || fail "${TRAEFIK_DIR}/logs is not a directory."
+    [[ "$(file_mode "${TRAEFIK_DIR}/logs")" == 755 ]] || fail "${TRAEFIK_DIR}/logs must be mode 755."
+fi
+if [[ -e "${BOUNCER_KEY_FILE}" || -L "${BOUNCER_KEY_FILE}" ]]; then
+    assert_private_file "${BOUNCER_KEY_FILE}"
+    ok "Bouncer key file is private. Its value was not read."
+fi
 
 print_section "Runtime .env"
 env_load_runtime

@@ -56,6 +56,27 @@ env_cidr_broadcast_int() {
     printf '%s\n' $(( (base & $(env_cidr_mask "${prefix}")) | ((1 << (32 - prefix)) - 1) ))
 }
 
+env_int_to_ipv4() {
+    local n="$1"
+    printf '%s.%s.%s.%s\n' \
+        $(( (n >> 24) & 255 )) \
+        $(( (n >> 16) & 255 )) \
+        $(( (n >> 8) & 255 )) \
+        $(( n & 255 ))
+}
+
+# The address immediately after the gateway. It stays inside the subnet and
+# is neither the network address nor the broadcast address.
+env_address_after_gateway() {
+    local subnet="$1" gateway="$2" next broadcast
+    env_cidr_contains_ip "${subnet}" "${gateway}" || return 1
+    next="$(env_int_to_ipv4 $(( $(env_ipv4_to_int "${gateway}") + 1 )))"
+    env_cidr_contains_ip "${subnet}" "${next}" || return 1
+    broadcast="$(env_int_to_ipv4 "$(env_cidr_broadcast_int "${subnet}")")"
+    [[ "${next}" != "${broadcast}" && "${next}" != "${subnet%/*}" ]] || return 1
+    printf '%s\n' "${next}"
+}
+
 env_cidr_overlaps() {
     local a="$1" b="$2"
     env_cidr_contains_ip "${a}" "${b%/*}" && return 0

@@ -88,7 +88,7 @@ Důsledky:
 - Nový vlastník nevidí nic z doby před svým `valid_from`. Předchozí vlastník po `valid_to` nevidí nic nového.
 - Kdo byl členem ve dvou oddělených obdobích, vidí obě období, ale ne mezeru mezi nimi.
 - Spotřeba za měsíc, který členství pokrývá jen částečně, se počítá z denních hodnot uvnitř členství a je označená jako částečná.
-- Aktuální stav ukazuje absolutní hodnotu počítadla, stejnou jako na displeji měřidla. Ta zahrnuje i spotřebu před členstvím. Je to návrh k potvrzení, viz [decisions.md](decisions.md).
+- Aktuální stav ukazuje kumulativní hodnotu počítadla, stejnou jako na displeji měřidla. Je označená jako celkový stav měřidla, ne jako osobní spotřeba, protože zahrnuje i spotřebu před členstvím. Historické odečty a vypočítaná spotřeba zůstávají jen za období členství. Administrátor vidí kompletní historii. Schváleno jako R15 v [decisions.md](decisions.md).
 
 Pravidlo vynucuje repozitářová vrstva backendu jedním společným predikátem. Pokrývají ho testy ([security.md](security.md)).
 

@@ -1,0 +1,39 @@
+###############################################################################
+#
+# CrowdSec reads only this stack's Traefik access log.
+# LAPI stays on sjv-internal. No host port is published.
+# sjv-egress is how the container reaches the CrowdSec hub.
+#
+###############################################################################
+
+services:
+  crowdsec:
+    image: ${CROWDSEC_IMAGE:?CROWDSEC_IMAGE}
+    container_name: sjv-crowdsec
+    hostname: sjv-crowdsec
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TZ: ${TZ:?TZ}
+      COLLECTIONS: "crowdsecurity/linux crowdsecurity/traefik"
+    volumes:
+      - ../configs/crowdsec/acquis.yaml:/etc/crowdsec/acquis.yaml:ro
+      - ../configs/crowdsec/profiles.yaml:/etc/crowdsec/profiles.yaml:ro
+      - ${DATA_DIR}/crowdsec/data:/var/lib/crowdsec/data
+      - ${DATA_DIR}/traefik/logs:/logs:ro
+    networks:
+      - sjv-internal
+      - sjv-egress
+    healthcheck:
+      test: ["CMD", "cscli", "version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:?LOG_MAX_SIZE}
+        max-file: ${LOG_MAX_FILES:?LOG_MAX_FILES}

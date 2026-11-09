@@ -1,0 +1,23 @@
+###############################################################################
+#
+# External networks. deploy.sh creates them from .env and labels them.
+# Compose does not own their IPAM and must not replace them.
+#
+###############################################################################
+
+networks:
+  sjv-proxy:
+    name: sjv-proxy
+    external: true
+
+  sjv-internal:
+    name: sjv-internal
+    external: true
+
+  sjv-mqtt:
+    name: sjv-mqtt
+    external: true
+
+  sjv-egress:
+    name: sjv-egress
+    external: true
