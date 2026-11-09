@@ -1,0 +1,21 @@
+# Runtime configuration and secrets never belong in Git.
+.env
+.env.bak-*
+.env.tmp.*
+.env.lock
+*.pem
+*.key
+*.htpasswd
+acme.json
+app-kek
+BOUNCER_KEY_*
+dynamic-security.json
+
+# Backups and dumps.
+*.dump
+*.tar
+*.tar.gz
+*.sha256
+
+# Local test runs (scripts/test.sh).
+.test-tmp/
