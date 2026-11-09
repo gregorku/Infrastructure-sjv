@@ -46,8 +46,8 @@ systemd timer ──► restic ──► wg1 ──► MikroTik doma (DNAT) ─�
 
 | Kontejner | Image | Sítě | Host port | Healthcheck |
 | --- | --- | --- | --- | --- |
-| `sjv-traefik` | `traefik`, přesný tag (reference `v3.6.22`) | `sjv-proxy` (pevná IP), `sjv-internal` | `80`, `443` | `traefik healthcheck --ping` |
-| `sjv-crowdsec` | `crowdsecurity/crowdsec`, přesný tag (reference `v1.7.8`) | `sjv-internal`, `sjv-egress` | žádný | `cscli version` |
+| `sjv-traefik` | `traefik` `v3.7.17` (tag i digest) | `sjv-proxy` (pevná IP), `sjv-internal` | `80`, `443` | `traefik healthcheck --ping` |
+| `sjv-crowdsec` | `crowdsecurity/crowdsec` `v1.8.2` (tag i digest) | `sjv-internal`, `sjv-egress` | žádný | `cscli lapi status` na portu 8080 |
 | `sjv-postgresql` | lokální build `postgres:18.x` + pgBackRest | `sjv-internal` | žádný | `pg_isready` |
 | `sjv-mosquitto` | `eclipse-mosquitto` 2.x, přesný tag | `sjv-internal`, `sjv-mqtt` | `8883` | odběr `$SYS` přes interní listener s účtem healthcheck |
 | `sjv-backend` | lokální build `app/backend` | `sjv-proxy`, `sjv-internal` | žádný | `GET /readyz` |
@@ -80,7 +80,9 @@ V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefi
 - Traefik má jen file provider. `docker.sock` se nikam nemountuje. Porty hosta jsou jen 80 a 443. Entrypoint `admin` se publikuje jen do stackové kopie `compose/15-traefik-admin-port.yml`, a jen když existuje heslo dashboardu a `TRAEFIK_ADMIN_PUBLISH`.
 - Routy `sjv-api` (`http://sjv-backend:8000`) a `sjv-web` (`http://sjv-web:8080`) jsou připravené. Kontejnery těchto služeb tato etapa nespouští.
 - Samostatný certifikát MQTT se vykreslí jen při `MQTT_HOSTNAME=sjv-mqtt.serveftp.org` a `TRAEFIK_TLS_MODE=letsencrypt`.
-- CrowdSec je na `sjv-internal` a `sjv-egress`, bez portu na hostu. LAPI je `crowdsec:8080`. Bouncer middleware se připojí až po `post-deploy.sh`, protože klíč v tu chvíli teprve vzniká.
+- CrowdSec je na `sjv-internal` a `sjv-egress`, bez portu na hostu. LAPI je `crowdsec:8080`. Healthcheck volá `cscli lapi status`, takže Traefik čeká na skutečně dostupnou LAPI, ne na verzi binárky. Bouncer middleware se připojí až po `post-deploy.sh`, protože klíč v tu chvíli teprve vzniká.
+- Traefik má kořen souborového systému jen pro čtení, zahozené capabilities kromě `NET_BIND_SERVICE` a zapisuje jen do ACME, logů a `/plugins-storage`. CrowdSec má zahozené všechny capabilities. Nepřepíná se na jiného uživatele: oficiální entrypoint zapisuje `/etc/crowdsec` a databázi a image nemá neprivilegovaný účet, pod kterým by tyto zápisy prošly.
+- `traefik.log` rotuje Traefik sám (`maxSize` 20 MB, `maxAge` 14 dní, `maxBackups` 14, komprese). `access.log` rotuje `scripts/rotate-traefik-logs.sh` přes copytruncate, aby CrowdSec zůstal na stejném inode. Návrh timeru je v `ops/systemd/` a do NixOS se neinstaluje.
 
 ### Sítě
 
@@ -226,7 +228,7 @@ Data jsou vždy omezená na období členství ([security.md](security.md), [dat
 | Stack, runtime, `.env` | `/docker-data/stacks/infrastructure-sjv` |
 | PostgreSQL | `/docker-data/infrastructure-sjv/postgresql` |
 | Mosquitto data a certifikáty | `/docker-data/infrastructure-sjv/mosquitto/{data,certs}` |
-| Traefik | `/docker-data/infrastructure-sjv/traefik/{acme,logs,users,crowdsec}` |
+| Traefik | `/docker-data/infrastructure-sjv/traefik/{acme,logs,users,crowdsec,plugins}` |
 | CrowdSec | `/docker-data/infrastructure-sjv/crowdsec/data` |
 | Hlavní klíč aplikace (KEK) | `/docker-data/infrastructure-sjv/secrets/app-kek` |
 | Stav skriptů | `/docker-data/infrastructure-sjv/state/` |
@@ -236,7 +238,7 @@ Data jsou vždy omezená na období členství ([security.md](security.md), [dat
 
 - Žádný tag `latest`. Externí image mají v `.env.example` přesný tag a digest a `check-env.sh` odmítne neúplný tag.
 - Lokální image se staví při `deploy.sh`. Base image je zafixovaná přes tag a digest, závislosti přes `uv.lock` a `package-lock.json`. Tag lokálního image je `infrastructure-sjv/<služba>:<git-commit>`. Commit se zapíše do `state/deployed-commit`.
-- Výchozí verze podle existujících stacků: PostgreSQL `18.6`, Mosquitto `2.1.2`, Traefik `v3.6.22`, CrowdSec `v1.7.8`, plugin bouncer `v1.7.0`, wmbusmeters `release-3.0.0`.
+- Výchozí verze podle existujících stacků: PostgreSQL `18.6`, Mosquitto `2.1.2`, wmbusmeters `release-3.0.0`. Traefik, CrowdSec a bouncer plugin jsou zafixované v `.env.example`: Traefik `v3.7.17`, CrowdSec `v1.8.2`, plugin `v1.8.1`. Řada 3.6 už nemá bezpečnostní podporu. Tag `v3.7.18` k 9. 11. 2026 nebyl vydaný.
 - Verze Pythonu, Node, pgBackRest, restic a rest-server se ověří a zafixují ve fázi 1. Podmínka: pgBackRest s podporou PostgreSQL 18.
 
 ## Skripty

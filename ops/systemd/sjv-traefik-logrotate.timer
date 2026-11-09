@@ -1,0 +1,14 @@
+# Proposal only. This timer is not installed and this repository does not
+# change NixOS. Hourly is the schedule; the script itself rotates access.log
+# only after 20 MiB or 24 hours.
+[Unit]
+Description=Hourly rotation of the Infrastructure-sjv Traefik access log
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+AccuracySec=5min
+Unit=sjv-traefik-logrotate.service
+
+[Install]
+WantedBy=timers.target

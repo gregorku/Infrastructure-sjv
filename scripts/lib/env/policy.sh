@@ -31,6 +31,7 @@ declare -gA ENV_POLICY=(
     [TRAEFIK_IMAGE]=framework
     [CROWDSEC_IMAGE]=framework
     [CROWDSEC_BOUNCER_PLUGIN]=framework
+    [CROWDSEC_BOUNCER_PLUGIN_HASH]=framework
 
     [PG_DB]=framework
     [PG_BOOTSTRAP_USER]=framework

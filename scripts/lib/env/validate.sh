@@ -312,6 +312,9 @@ env_check_images() {
     plugin="${env_image_ref[CROWDSEC_BOUNCER_PLUGIN]}"
     [[ "${plugin}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
         || env_err "CROWDSEC_BOUNCER_PLUGIN must be a vX.Y.Z version."
+    plugin="${env_image_ref[CROWDSEC_BOUNCER_PLUGIN_HASH]}"
+    [[ "${plugin}" =~ ^[0-9a-f]{64}$ ]] \
+        || env_err "CROWDSEC_BOUNCER_PLUGIN_HASH must be 64 lowercase hex digits."
 }
 
 # Usage: env_validate ARRAY_NAME

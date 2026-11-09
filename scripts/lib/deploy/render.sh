@@ -182,7 +182,13 @@ EOF
 
 render_static_traefik() {
     local dst="$1" proxy_web="" proxy_secure="" acme="" src plugin
+    local hash
     plugin="${RUNTIME_ENV[CROWDSEC_BOUNCER_PLUGIN]}"
+    hash="${RUNTIME_ENV[CROWDSEC_BOUNCER_PLUGIN_HASH]}"
+    [[ "${plugin}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+        || fail "Refusing to render a plugin version that is not vX.Y.Z."
+    [[ "${hash}" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "Refusing to render a plugin hash that is not 64 lowercase hex digits."
     if [[ "${RUNTIME_ENV[PROXY_PROTOCOL_MODE]}" == haproxy ]]; then
         proxy_web=$'    proxyProtocol:\n      trustedIPs:\n'
         proxy_secure=$'    proxyProtocol:\n      trustedIPs:\n'
@@ -236,9 +242,14 @@ experimental:
     crowdsec:
       moduleName: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
       version: ${plugin}
+      hash: ${hash}
 log:
   level: INFO
   filePath: /var/log/traefik/traefik.log
+  maxSize: ${TRAEFIK_LOG_MAX_SIZE_MB}
+  maxAge: ${TRAEFIK_LOG_MAX_AGE_DAYS}
+  maxBackups: ${TRAEFIK_LOG_MAX_BACKUPS}
+  compress: true
 accessLog:
   filePath: /var/log/traefik/access.log
 ${acme}

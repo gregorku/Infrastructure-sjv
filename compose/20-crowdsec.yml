@@ -13,8 +13,15 @@ services:
     hostname: sjv-crowdsec
     restart: unless-stopped
     init: true
+    # The image entrypoint runs as root: it writes /etc/crowdsec, registers
+    # the local agent and refuses to start unless the data directory is a
+    # mounted volume. A non-root user or a read-only root filesystem would
+    # stop that before LAPI listens. Capabilities are dropped because this
+    # container does not install firewall rules or bind a privileged port.
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       TZ: ${TZ:?TZ}
       COLLECTIONS: "crowdsecurity/linux crowdsecurity/traefik"
@@ -27,11 +34,14 @@ services:
       - sjv-internal
       - sjv-egress
     healthcheck:
-      test: ["CMD", "cscli", "version"]
-      interval: 30s
+      # cscli lapi status authenticates to the URL in the image credentials,
+      # which is http://0.0.0.0:8080. A closed port or a refused login fails
+      # the command. Docker stops the check after the timeout if it hangs.
+      test: ["CMD-SHELL", "cscli lapi status >/dev/null"]
+      interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 60s
     logging:
       driver: json-file
       options:

@@ -36,9 +36,11 @@ Stav: etapa B1b. Sada běží offline. `docker compose config` se spustí jen kd
 - `update-env.sh`: vytvoření `.env`, výpis placeholderů jménem, opakovaný běh beze změny souborů i adresářů, zachování doplněných hodnot, záloha před obnovou hodnoty `framework`, zámek proti souběhu, odmítnutí zastaralé kopie `.env.example`.
 - `update-env.sh` a `check-env.sh` volají `require_mountpoint` dřív, než sáhnou na `.env`. Bez mountpointu nic nezapíšou a nezaloží adresář.
 - `check-env.sh`: odmítne placeholdery (všechny najednou), práva 644 u `.env` i záloh, osiřelý `.env.tmp.*`, visící symlink `.env` v checkoutu a nebezpečný allowlist; přijme kompletní konfiguraci; nikdy nic nezmění a nevypíše tajemství.
-- Compose a konfigurace: v repozitáři není `docker.sock`, bouncer klíč není proměnná `.env`, gitová šablona admin portu nic nepublikuje.
-- Plán sítí bez Docker démona: `sjv-internal` je jediná interní, cizí síť se nemění, překryv zastaví vytvoření, shodná označená síť se nezakládá znovu.
-- `deploy.sh --render-only` v testovacím režimu vykreslí Traefik bez Docker provideru, s file providerem, allowlistem a budoucími routami API a webu. Middleware bounceru chybí, dokud nevznikne soubor klíče s právy 600. Druhé vykreslení soubor nemění. Plný `deploy.sh` v testovacím režimu skončí před Dockerem.
+- Compose a konfigurace: v repozitáři není `docker.sock`, bouncer klíč není proměnná `.env`, gitová šablona admin portu nic nepublikuje. Image mají tag i digest podporované řady, plugin má verzi a sha256 katalogového zipu.
+- Plán sítí bez Docker démona: `sjv-internal` je jediná interní, cizí síť se nemění, překryv zastaví vytvoření, shodná označená síť se nezakládá znovu. Traefik není na `sjv-egress`, CrowdSec není na `sjv-proxy`.
+- `deploy.sh --render-only` v testovacím režimu vykreslí Traefik bez Docker provideru, s file providerem, allowlistem, limity rotace `traefik.log` a budoucími routami API a webu. Middleware bounceru chybí, dokud nevznikne soubor klíče s právy 600. Druhé vykreslení soubor nemění. Plný `deploy.sh` v testovacím režimu skončí před Dockerem.
+- Healthcheck CrowdSec v Compose je `cscli lapi status`. Traefik na něj dál čeká přes `service_healthy`.
+- Rotace `access.log`: práh velikosti a stáří, copytruncate se stejným inode, vlastníkem a právy, archiv 640, retence 14, odmítnutí symlinku, úklid po selhání gzipu a ponechání souboru mimo adresář logů. `traefik.log` skript nemění.
 - Zápis klíče smaže jen svůj dočasný soubor. Výstup klíč neobsahuje.
 
 ## Testy, které `test.sh` nespustí

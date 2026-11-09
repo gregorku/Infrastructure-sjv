@@ -36,6 +36,32 @@ test_infra_repository() {
     else
         t_pass "a broadcast Traefik address is rejected"
     fi
+    t_check "Traefik is pinned to the supported 3.7 release" \
+        grep -qx 'TRAEFIK_IMAGE=docker.io/library/traefik:v3.7.17@sha256:f4bb143d1135a579b630ed491e17ec50f6f7c9c6a30585ff3d385471d2a86f5a' "${REPO_ROOT}/.env.example"
+    t_check "CrowdSec is pinned to v1.8.2 and its index digest" \
+        grep -qx 'CROWDSEC_IMAGE=docker.io/crowdsecurity/crowdsec:v1.8.2@sha256:65b74942f7e7ed5c60fde4ac15fc4ba715904c398c8b16dd451f4907d90347d4' "${REPO_ROOT}/.env.example"
+    t_check "the bouncer plugin version and catalog hash are pinned" \
+        bash -c 'grep -qx "CROWDSEC_BOUNCER_PLUGIN=v1.8.1" "$1" && grep -qx "CROWDSEC_BOUNCER_PLUGIN_HASH=1c63fab00b5c777fc02dc657ce24557c1e7f8548af4fd13fc4bfd8f0aa91f12d" "$1"' _ "${REPO_ROOT}/.env.example"
+    t_check "CrowdSec healthcheck authenticates to LAPI" \
+        grep -q 'cscli lapi status' "${REPO_ROOT}/compose/20-crowdsec.yml"
+    t_check "Traefik drops capabilities and keeps only bind" \
+        bash -c 'grep -q "cap_drop:" "$1" && grep -q "NET_BIND_SERVICE" "$1" && grep -q "read_only: true" "$1" && grep -q "/plugins-storage" "$1"' _ "${REPO_ROOT}/compose/10-traefik.yml"
+    t_check "CrowdSec drops every capability" \
+        grep -q 'cap_drop:' "${REPO_ROOT}/compose/20-crowdsec.yml"
+    t_check "Traefik is not attached to the egress network" \
+        bash -c '! grep -q "sjv-egress" "$1"' _ "${REPO_ROOT}/compose/10-traefik.yml"
+    t_check "CrowdSec is not attached to the proxy network" \
+        bash -c '! grep -q "sjv-proxy" "$1"' _ "${REPO_ROOT}/compose/20-crowdsec.yml"
+    t_check "CrowdSec does not add a capability back" \
+        bash -c '! grep -q "cap_add:" "$1"' _ "${REPO_ROOT}/compose/20-crowdsec.yml"
+    t_check "Traefik still waits until CrowdSec is healthy" \
+        grep -q 'condition: service_healthy' "${REPO_ROOT}/compose/10-traefik.yml"
+    t_check "CrowdSec still tails the live access log" \
+        grep -qx '  - /logs/access.log' "${REPO_ROOT}/configs/crowdsec/acquis.yaml"
+    t_check "the log timer proposal points at the rotation script" \
+        grep -q 'scripts/rotate-traefik-logs.sh' "${REPO_ROOT}/ops/systemd/sjv-traefik-logrotate.service"
+    t_check "the log timer proposal is hourly" \
+        grep -qx 'OnCalendar=hourly' "${REPO_ROOT}/ops/systemd/sjv-traefik-logrotate.timer"
 }
 
 test_infra_bouncer_rules() {
@@ -184,6 +210,10 @@ test_infra_render() {
     t_check "render says Docker was not called" t_contains "${T_OUT}" "Docker was not called"
     t_check "Traefik static config has no Docker socket" test -z "$(grep -n 'docker.sock' "${stack}/runtime/traefik/traefik.yml" || true)"
     t_check "Traefik uses the file provider" grep -q 'directory: /etc/traefik/dynamic' "${stack}/runtime/traefik/traefik.yml"
+    t_check "traefik.log rotation limits are rendered" \
+        bash -c 'grep -q "maxSize: 20" "$1" && grep -q "maxAge: 14" "$1" && grep -q "maxBackups: 14" "$1" && grep -q "compress: true" "$1"' _ "${stack}/runtime/traefik/traefik.yml"
+    t_check "the plugin catalog hash is rendered" \
+        grep -q 'hash: 1c63fab00b5c777fc02dc657ce24557c1e7f8548af4fd13fc4bfd8f0aa91f12d' "${stack}/runtime/traefik/traefik.yml"
     t_check "the Docker provider is absent" bash -c '! grep -q "^  docker:" "$1"' _ "${stack}/runtime/traefik/traefik.yml"
     t_check "the API is not insecure" grep -q 'insecure: false' "${stack}/runtime/traefik/traefik.yml"
     t_check "TLS 1.2 is the minimum" grep -q 'minVersion: VersionTLS12' "${dynamic}/tls.yml"
@@ -263,6 +293,104 @@ test_infra_key_and_compose() {
     t_check "no /docker-data directory was created" test ! -e /docker-data
 }
 
+test_infra_log_rotation() {
+    print_section "Access log rotation"
+    local logs="${T_BASE}/infrastructure-sjv/traefik/logs" live foreign marker inode mode owner
+    local fake="${T_RUN_DIR}/fakebin" archive_count
+    if log_rotate_due 0 0 100 1; then
+        t_fail "an empty access log was eligible for rotation"
+    else
+        t_pass "an empty access log is not rotated"
+    fi
+    if log_rotate_due 10 1000 1000 0; then
+        t_fail "a fresh small access log was eligible"
+    else
+        t_pass "a fresh small access log waits"
+    fi
+    if log_rotate_due 10 1000 $((1000 + ACCESS_LOG_ROTATE_MAX_AGE)) 0; then
+        t_pass "an old access log is eligible"
+    else
+        t_fail "an old access log was not eligible"
+    fi
+    if log_rotate_due "${ACCESS_LOG_ROTATE_MIN_BYTES}" 1000 1000 0; then
+        t_pass "a large access log is eligible"
+    else
+        t_fail "a large access log was not eligible"
+    fi
+
+    infra_reset_base
+    run_script init.sh
+    t_check "init creates the plugin directory" test -d "${T_BASE}/infrastructure-sjv/traefik/plugins"
+    t_check "the plugin directory is mode 755" test "$(stat -c %a "${T_BASE}/infrastructure-sjv/traefik/plugins")" = 755
+    live="${logs}/access.log"
+    foreign="${T_BASE}/access.log"
+    marker="SECRET-LOG-LINE"
+    printf '%s\n' "${marker}" > "${live}"
+    printf '%s\n' "keep-outside" > "${foreign}"
+    inode="$(stat -c %i "${live}")"
+    mode="$(stat -c %a "${live}")"
+    owner="$(stat -c %u:%g "${live}")"
+    run_script rotate-traefik-logs.sh
+    t_check "a fresh small log is left in place" test "${T_RC}" -eq 0
+    t_check "the skipped run does not mention the log line" t_not_contains "${T_OUT}" "${marker}"
+    t_check "the live log still has its line" grep -qx "${marker}" "${live}"
+
+    touch -d '25 hours ago' "${live}"
+    run_script rotate-traefik-logs.sh
+    t_check "an old access log rotates" test "${T_RC}" -eq 0
+    t_check "rotation does not print the log line" t_not_contains "${T_OUT}" "${marker}"
+    t_check "the live file keeps its inode" test "$(stat -c %i "${live}")" = "${inode}"
+    t_check "the live file keeps its mode" test "$(stat -c %a "${live}")" = "${mode}"
+    t_check "the live file keeps its owner" test "$(stat -c %u:%g "${live}")" = "${owner}"
+    t_check "the live file is empty after copytruncate" test ! -s "${live}"
+    t_check "a file outside the log directory is untouched" grep -qx 'keep-outside' "${foreign}"
+    archive_count="$(find "${logs}" -maxdepth 1 -type f -name 'access.log.*.gz' | wc -l)"
+    t_check "one compressed archive was written" test "${archive_count}" -eq 1
+    t_check "the archive is mode 640" \
+        bash -c '[[ "$(stat -c %a "$1"/access.log.*.gz)" == 640 ]]' _ "${logs}"
+    t_check "the archive contains the original line" \
+        bash -c 'gzip -dc "$1"/access.log.*.gz | grep -qx "$2"' _ "${logs}" "${marker}"
+    t_check "no partial rotation file remains" \
+        bash -c '[[ -z "$(find "$1" -name ".access-rotate.*" -print -quit)" ]]' _ "${logs}"
+    t_check "traefik.log was not created by rotation" test ! -e "${logs}/traefik.log"
+
+    run_script rotate-traefik-logs.sh --force
+    t_check "a second run does not rotate an empty file" test "${T_RC}" -eq 0
+    t_check "the second run keeps the single archive" \
+        bash -c '[[ "$(find "$1" -maxdepth 1 -type f -name "access.log.*.gz" | wc -l)" -eq 1 ]]' _ "${logs}"
+
+    local i
+    for i in $(seq 1 16); do
+        printf 'old\n' | gzip -c > "${logs}/access.log.202601$(printf '%02d' "${i}")T000000Z.gz"
+        # Spread mtimes so retention order is the sequence, not the clock.
+        touch -d "2026-01-${i} 00:00:00 UTC" "${logs}/access.log.202601$(printf '%02d' "${i}")T000000Z.gz"
+    done
+    # January has 31 days; 16 is valid. A non-matching name must survive.
+    printf 'notes\n' > "${logs}/access.log.notes.gz"
+    run_script rotate-traefik-logs.sh
+    t_check "retention keeps fourteen archives" \
+        bash -c '[[ "$(find "$1" -maxdepth 1 -type f -name "access.log.[0-9]*.gz" | wc -l)" -eq 14 ]]' _ "${logs}"
+    t_check "a name that is not a rotation archive is kept" test -f "${logs}/access.log.notes.gz"
+
+    printf '%s\n' "${marker}" > "${live}"
+    mkdir -m 755 "${fake}"
+    printf '%s\n' '#!/bin/sh' 'echo gzip-failed >&2' 'exit 1' > "${fake}/gzip"
+    chmod 755 "${fake}/gzip"
+    t_run env NO_COLOR=1 SJV_TEST_BASE_DIR="${T_BASE}" PATH="${fake}:${PATH}" "${REPO_ROOT}/scripts/rotate-traefik-logs.sh" --force
+    t_check "a failed compression leaves the live log" \
+        bash -c '(( $1 != 0 )) && grep -qx "$2" "$3"' _ "${T_RC}" "${marker}" "${live}"
+    t_check "a failed compression removes its temporary files" \
+        bash -c '[[ -z "$(find "$1" -name ".access-rotate.*" -print -quit)" ]]' _ "${logs}"
+
+    mv "${live}" "${logs}/access.log.real"
+    ln -s access.log.real "${live}"
+    run_script rotate-traefik-logs.sh --force
+    t_check "a symlinked access log is refused" test "${T_RC}" -ne 0
+    t_check "the symlink target was not truncated" grep -qx "${marker}" "${logs}/access.log.real"
+    rm -f "${live}"
+    mv "${logs}/access.log.real" "${live}"
+}
+
 run_infra_tests() {
     print_header "Traefik and CrowdSec"
     test_infra_repository
@@ -270,4 +398,5 @@ run_infra_tests() {
     test_infra_networks
     test_infra_render
     test_infra_key_and_compose
+    test_infra_log_rotation
 }

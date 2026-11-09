@@ -1,0 +1,9 @@
+# Proposal only. This unit is not installed and this repository does not
+# change NixOS. The checkout path below is still unconfirmed.
+[Unit]
+Description=Rotate the Infrastructure-sjv Traefik access log
+Documentation=file:///incus-dir/git/Infrastructure-sjv/docs/operations.md
+
+[Service]
+Type=oneshot
+ExecStart=/incus-dir/git/Infrastructure-sjv/scripts/rotate-traefik-logs.sh

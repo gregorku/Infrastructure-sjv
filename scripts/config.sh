@@ -113,6 +113,14 @@ readonly RESERVED_SUBNETS=(
 )
 
 readonly TRAEFIK_ADMIN_PORT="8443"
+# Traefik rotates traefik.log itself. Sizes are megabytes and days.
+readonly TRAEFIK_LOG_MAX_SIZE_MB=20
+readonly TRAEFIK_LOG_MAX_AGE_DAYS=14
+readonly TRAEFIK_LOG_MAX_BACKUPS=14
+# access.log has no built-in rotation. The script keeps this many gzip copies.
+readonly ACCESS_LOG_ROTATE_KEEP=14
+readonly ACCESS_LOG_ROTATE_MIN_BYTES=$((20 * 1024 * 1024))
+readonly ACCESS_LOG_ROTATE_MAX_AGE=86400
 readonly TRAEFIK_CONTAINER="sjv-traefik"
 readonly CROWDSEC_CONTAINER="sjv-crowdsec"
 readonly CROWDSEC_BOUNCER_NAME="sjv-traefik"

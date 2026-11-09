@@ -65,10 +65,14 @@ check_private_dir "${TRAEFIK_DIR}/acme"
 check_private_dir "${TRAEFIK_DIR}/users"
 check_private_dir "${TRAEFIK_DIR}/crowdsec"
 check_private_dir "${CROWDSEC_DIR}/data"
-if [[ -e "${TRAEFIK_DIR}/logs" || -L "${TRAEFIK_DIR}/logs" ]]; then
-    [[ -d "${TRAEFIK_DIR}/logs" && ! -L "${TRAEFIK_DIR}/logs" ]] || fail "${TRAEFIK_DIR}/logs is not a directory."
-    [[ "$(file_mode "${TRAEFIK_DIR}/logs")" == 755 ]] || fail "${TRAEFIK_DIR}/logs must be mode 755."
-fi
+check_public_dir() {
+    local path="$1"
+    [[ -e "${path}" || -L "${path}" ]] || { warn "${path} does not exist yet. Run ./scripts/init.sh."; return 0; }
+    [[ -d "${path}" && ! -L "${path}" ]] || fail "${path} is not a directory."
+    [[ "$(file_mode "${path}")" == 755 ]] || fail "${path} must be mode 755."
+}
+check_public_dir "${TRAEFIK_DIR}/logs"
+check_public_dir "${TRAEFIK_DIR}/plugins"
 if [[ -e "${BOUNCER_KEY_FILE}" || -L "${BOUNCER_KEY_FILE}" ]]; then
     assert_private_file "${BOUNCER_KEY_FILE}"
     ok "Bouncer key file is private. Its value was not read."

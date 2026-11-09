@@ -92,7 +92,7 @@ test_scripts_guard() {
     t_check "an unknown option is refused" bash -c '(( $1 != 0 )) && [[ "$2" == *"Unknown option"* ]]' _ "${T_RC}" "${T_OUT}"
 
     local script
-    for script in init.sh update-env.sh check-env.sh deploy.sh post-deploy.sh reload.sh create-dashboard-user.sh; do
+    for script in init.sh update-env.sh check-env.sh deploy.sh post-deploy.sh reload.sh create-dashboard-user.sh rotate-traefik-logs.sh; do
         t_run env -u SJV_TEST_BASE_DIR NO_COLOR=1 "${REPO_ROOT}/scripts/${script}"
         t_check "${script} without root is refused" \
             bash -c '(( $1 != 0 )) && [[ "$2" == *"must be run as root"* ]]' _ "${T_RC}" "${T_OUT}"
@@ -100,7 +100,7 @@ test_scripts_guard() {
     t_check "a refused non-root run creates no /docker-data" test ! -e /docker-data
 
     if command -v unshare >/dev/null 2>&1; then
-        for script in update-env.sh check-env.sh init.sh deploy.sh post-deploy.sh reload.sh create-dashboard-user.sh; do
+        for script in update-env.sh check-env.sh init.sh deploy.sh post-deploy.sh reload.sh create-dashboard-user.sh rotate-traefik-logs.sh; do
             t_run unshare --map-auto --map-root-user env -u SJV_TEST_BASE_DIR NO_COLOR=1 "${REPO_ROOT}/scripts/${script}"
             t_check "${script} refuses a missing /docker-data mount" \
                 bash -c '(( $1 != 0 )) && [[ "$2" == *"/docker-data does not exist"* ]]' _ "${T_RC}" "${T_OUT}"

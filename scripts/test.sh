@@ -31,6 +31,8 @@ source "${SCRIPT_DIR}/lib/deploy/networks.sh"
 source "${SCRIPT_DIR}/lib/deploy/crowdsec.sh"
 # shellcheck source=scripts/lib/deploy/render.sh
 source "${SCRIPT_DIR}/lib/deploy/render.sh"
+# shellcheck source=scripts/lib/deploy/logs.sh
+source "${SCRIPT_DIR}/lib/deploy/logs.sh"
 # shellcheck source=scripts/lib/tests/test-infra.sh
 source "${SCRIPT_DIR}/lib/tests/test-infra.sh"
 

@@ -1,3 +1,5 @@
+# This path is the live file. Rotation must keep its inode. A rename makes
+# the inotify watch stop following new lines.
 filenames:
   - /logs/access.log
 labels:

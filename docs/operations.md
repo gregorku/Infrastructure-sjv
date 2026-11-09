@@ -1,6 +1,6 @@
 # Provoz: instalace a konfigurace
 
-Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Traefiku a postup pro CrowdSec. Databáze, MQTT, aplikace, zálohy a systemd timery zatím nejsou.
+Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Traefiku, postup pro CrowdSec a rotaci souborových logů Traefiku. Databáze, MQTT, aplikace a zálohy zatím nejsou. Návrh systemd timeru je v repozitáři a není nainstalovaný.
 
 ## Předpoklady
 
@@ -18,7 +18,8 @@ Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Tr
 | `/docker-data/infrastructure-sjv/state` | 700 | stav skriptů |
 | `/docker-data/infrastructure-sjv/secrets` | 700 | soubory s tajemstvími pro služby (od pozdějších etap) |
 | `/docker-data/infrastructure-sjv/traefik/acme` | 700 | `acme.json`, práva 600 |
-| `/docker-data/infrastructure-sjv/traefik/logs` | 755 | access log pro CrowdSec |
+| `/docker-data/infrastructure-sjv/traefik/logs` | 755 | `access.log` pro CrowdSec a `traefik.log` |
+| `/docker-data/infrastructure-sjv/traefik/plugins` | 755 | cache pluginu, zapisovatelná i při read-only kořeni kontejneru |
 | `/docker-data/infrastructure-sjv/traefik/users` | 700 | `dashboard.htpasswd`, práva 600 |
 | `/docker-data/infrastructure-sjv/traefik/crowdsec` | 700 | `BOUNCER_KEY_sjv-traefik`, práva 600, mimo Git i `.env` |
 | `/docker-data/infrastructure-sjv/crowdsec/data` | 700 | data CrowdSec |
@@ -46,8 +47,9 @@ Opakované spuštění je bezpečné. Pokud se nic nezměnilo, soubory se nepře
 | `DOCKER_*_SUBNET`, `DOCKER_*_GATEWAY` | před nasazením | čtyři privátní sítě /16 až /28, bez překryvu navzájem ani s 10.10.10.0/24, 10.100.100.0/24, 10.110.100.0/24, 10.120.100.0/24 a 172.17.0.0/16 |
 | `ADMIN_IP_ALLOWLIST` | před nasazením | privátní CIDR oddělené mezerou, nikdy `0.0.0.0/0` |
 | `TRAEFIK_ACME_EMAIL` | před `TRAEFIK_TLS_MODE=letsencrypt` | v režimu `local` může zůstat placeholder |
-| `TRAEFIK_IMAGE`, `CROWDSEC_IMAGE` | v šabloně | tag a digest, kategorie `framework` |
-| `CROWDSEC_BOUNCER_PLUGIN` | v šabloně | verze pluginu `vX.Y.Z`, ne API klíč |
+| `TRAEFIK_IMAGE`, `CROWDSEC_IMAGE` | v šabloně | tag a index digest, kategorie `framework` |
+| `CROWDSEC_BOUNCER_PLUGIN` | v šabloně | verze pluginu `v1.8.1`, ne API klíč |
+| `CROWDSEC_BOUNCER_PLUGIN_HASH` | v šabloně | sha256 zipu z `plugins.traefik.io`, ne API klíč |
 | `PROXY_PROTOCOL_TRUSTED_IPS` | před `PROXY_PROTOCOL_MODE=haproxy` | zjištěná zdrojová adresa HAProxy jako /32 |
 | `RESTIC_REPOSITORY`, `RESTIC_REST_PASSWORD` | před ostrými daty | závisí na E5, E6; prázdné = varování |
 | `SMTP_*`, `MAIL_FROM` | fáze 9 | závisí na E7; prázdný `SMTP_HOST` = notifikace zůstávají ve frontě |
@@ -85,8 +87,16 @@ Proměnné, které v `.env` jsou, ale politika je nezná, se nemažou. Přesunou
 
 Bouncer klíč není v `.env` ani v Gitu. Vznikne až v běžícím CrowdSec a uloží se do `/docker-data/infrastructure-sjv/traefik/crowdsec/BOUNCER_KEY_sjv-traefik`. Do prvního `post-deploy.sh` Traefik middleware bounceru nemá. `post-deploy.sh` maže jen bouncer jména `sjv-traefik`.
 
+## Logy Traefiku
+
+Limit `json-file` v Compose omezuje jen stdout kontejneru. Soubory `traefik.log` a `access.log` se jím nerotují.
+
+- `traefik.log` rotuje proces Traefiku: 20 MB, 14 záloh, 14 dní, gzip. Signál USR1 tento soubor znovu neotevírá, proto ho skript nepřesouvá.
+- `access.log` Traefik sám nerotuje. `sudo ./scripts/rotate-traefik-logs.sh` udělá copytruncate: zkopíruje obsah, po úspěšném gzipu zkrátí původní soubor na nulu a ponechá inode, vlastníka i práva. CrowdSec dál čte `/logs/access.log`. Řádky zapsané mezi kopií a zkrácením mohou chybět. Při přerušení před zkrácením zůstane původní soubor a smaže se jen nedokončený dočasný soubor. Archivů se drží 14, práva 640. Prázdný soubor se nerotuje. `--force` přeskočí práh 20 MB a 24 hodin, prázdný soubor stejně nechá být.
+- Návrh hodinového timeru je `ops/systemd/sjv-traefik-logrotate.service` a `.timer`. Cesta checkoutu v jednotce je pořád nepotvrzená konvence. Jednotky se do NixOS neinstalují. Než timer běží, strop `access.log` nastane až po ručním spuštění skriptu.
+
 ## Mimo rozsah B1b
 
 - PostgreSQL, pgBackRest, Restic, Mosquitto, FastAPI, React, wmbusmeters a firmware.
-- systemd jednotky a timery, zálohy, obnova.
+- Instalace systemd jednotek, zálohy a obnova. Návrh timeru pro access log v repozitáři není nasazení.
 - Jakékoli změny NixOS, Incus, HAProxy, MikroTik, DNS nebo WireGuard (viz [external-changes.md](external-changes.md)).

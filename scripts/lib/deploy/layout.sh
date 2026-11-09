@@ -54,6 +54,7 @@ layout_prepare() {
     ensure_dir "${TRAEFIK_DIR}" 755
     ensure_dir "${TRAEFIK_DIR}/acme" 700
     ensure_dir "${TRAEFIK_DIR}/logs" 755
+    ensure_dir "${TRAEFIK_DIR}/plugins" 755
     ensure_dir "${TRAEFIK_DIR}/users" 700
     ensure_dir "${TRAEFIK_DIR}/crowdsec" 700
     ensure_dir "${CROWDSEC_DIR}" 755

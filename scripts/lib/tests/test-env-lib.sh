@@ -267,9 +267,11 @@ test_env_validate() {
     expect_invalid "SMTP credentials without a host" "SMTP_HOST is empty" SMTP_USER=sjv
     expect_invalid "a latest tag" "uses the latest tag" SMTP_HOST=smtp.example.org:latest
     expect_invalid "an unpinned Traefik image" "TRAEFIK_IMAGE must be docker.io/library/traefik" \
-        TRAEFIK_IMAGE=docker.io/library/traefik:v3.6.22
+        TRAEFIK_IMAGE=docker.io/library/traefik:v3.7.17
     expect_invalid "a CrowdSec image without a digest" "CROWDSEC_IMAGE must be docker.io/crowdsecurity/crowdsec" \
-        CROWDSEC_IMAGE=docker.io/crowdsecurity/crowdsec:v1.7.8
+        CROWDSEC_IMAGE=docker.io/crowdsecurity/crowdsec:v1.8.2
+    expect_invalid "a plugin hash that is not hex" "CROWDSEC_BOUNCER_PLUGIN_HASH must be 64 lowercase hex digits" \
+        CROWDSEC_BOUNCER_PLUGIN_HASH=not-a-hash
     expect_invalid "a bouncer key stored in .env" "Bouncer keys are not stored" \
         BOUNCER_KEY=abcdefghijklmnopqrst
     expect_invalid "an invalid log size" "LOG_MAX_SIZE" LOG_MAX_SIZE=lots
@@ -288,10 +290,10 @@ test_env_validate() {
     print_section "Image references"
     local digest
     digest="sha256:$(printf '%064d' 0)"
-    t_check "accepts registry/repo:tag@digest" env_image_ref_ok "docker.io/library/traefik:v3.6.22@${digest}"
+    t_check "accepts registry/repo:tag@digest" env_image_ref_ok "docker.io/library/traefik:v3.7.17@${digest}"
     local ref
-    for ref in "docker.io/library/traefik:latest@${digest}" "docker.io/library/traefik:v3.6.22" \
-        "docker.io/library/traefik@${digest}" "docker.io/library/traefik:v3.6.22@sha256:abc" "traefik:v3.6.22@${digest}"; do
+    for ref in "docker.io/library/traefik:latest@${digest}" "docker.io/library/traefik:v3.7.17" \
+        "docker.io/library/traefik@${digest}" "docker.io/library/traefik:v3.7.17@sha256:abc" "traefik:v3.7.17@${digest}"; do
         if env_image_ref_ok "${ref}"; then
             t_fail "image reference accepted: ${ref}"
         else

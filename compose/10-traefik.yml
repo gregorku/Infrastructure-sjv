@@ -14,8 +14,18 @@ services:
     hostname: sjv-traefik
     restart: unless-stopped
     init: true
+    # The image has no unprivileged account. Dropping privileges would make
+    # the root-owned ACME, log and plugin directories unwritable. The process
+    # keeps only the capability required to bind ports 80 and 443.
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp
     command:
       - --configFile=/etc/traefik/traefik.yml
     networks:
@@ -31,6 +41,7 @@ services:
       - ${DATA_DIR}/traefik/users:/etc/traefik/users:ro
       - ${DATA_DIR}/traefik/acme:/etc/traefik/acme
       - ${DATA_DIR}/traefik/logs:/var/log/traefik
+      - ${DATA_DIR}/traefik/plugins:/plugins-storage
       - ${DATA_DIR}/traefik/crowdsec:/etc/traefik/crowdsec:ro
     depends_on:
       crowdsec:
