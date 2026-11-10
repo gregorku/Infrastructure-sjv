@@ -40,7 +40,7 @@ Každý přijatý vstup má dohledatelný záznam.
 
 - Položka, kterou adaptér oddělil (telegram, dekódovaná hodnota, řádek importu, heartbeat, událost), má řádek v `ingest_receipts`.
 - Obálka, ze které položka nevznikla (autentizace, velikost, nečitelný formát, neúplné fragmenty), má řádek v `ingest_rejections`.
-- Opakované doručení prokázaného `(ingest_source_id, msg_key_namespace, msg_key)` má další příjem `duplicate_delivery` a zvýší `delivery_count`. Nový odečet nevznikne. Stejný hash těla bez prokázaného identifikátoru tento stav není.
+- Opakované doručení prokázané položky `(ingest_source_id, msg_key_namespace, msg_key, item_index)` má další příjem `duplicate_delivery`. Nový odečet nevznikne. Ostatní položky téže zprávy se tím nepřeskakují. Stejný hash těla bez prokázaného identifikátoru tento stav není.
 
 Příjem nese autentizované `device_id`, transport, `msg_key`, identifikátor zprávy zdroje, pokud ho poslal, `server_received_at`, odhad času zachycení a jeho nejistotu, stav a vazbu na payload. U rámce i vazbu na `raw_telegrams`. Pořadí fragmentů je na `ingest_fragments`, ne na odečtu.
 
@@ -113,7 +113,7 @@ Co z dekódovaných dat zjistit nejde, popisuje část [Omezení dekódovaných 
 | identita doručení | `ingest_receipts.id` v měsíci `server_received_at` | každé přijetí je nové doručení, i když je obsah stejný |
 
 - `device_id` se vždy bere z autentizace (MQTT účet, API token, klientský certifikát nebo PSK), nikdy z těla zprávy. U Platform API je autentizovaný koncový bod a koncentrátor uvnitř odpovědi se přiřadí jen přes už uložené `device_external_ids`.
-- Prokázaný `msg_key` se uloží do `ingest_message_keys` s `PRIMARY KEY (ingest_source_id, msg_key_namespace, msg_key)`:
+- Prokázaný `msg_key` se ukládá po položkách do `ingest_message_keys` s `PRIMARY KEY (ingest_source_id, msg_key_namespace, msg_key, item_index)`:
   - **vlastní ESP:** `<instance_id>-<boot_counter>-<seq>` pro opakované odeslání téhož záznamu fronty.
     - `instance_id` je náhodné 64bitové číslo v hex. Vygeneruje se při prvním startu a znovu po každém vymazání flash, takže reset `boot_counter` nikdy nevytvoří klíč, který server už zná.
     - `boot_counter` je v NVS a roste při každém startu.
@@ -196,7 +196,7 @@ Postup podle priority:
 
 | Situace | Ochrana |
 | --- | --- |
-| stejná zpráva znovu (ztracený ACK, `replay_since`) | prokázaný `PRIMARY KEY (ingest_source_id, msg_key_namespace, msg_key)` → `duplicate_delivery` v měsíci tohoto přijetí. Hash těla tento stav nezaloží |
+| stejná položka znovu (ztracený ACK, `replay_since`) | prokázaný `PRIMARY KEY (ingest_source_id, msg_key_namespace, msg_key, item_index)` → `duplicate_delivery` jen této položky. Hash těla tento stav nezaloží |
 | stejný text `msg_key` na jiném transportu téhož zařízení | `id_collision`, obě doručení zůstanou. Při `msg_key_scope = transport` se nesloučí |
 | stejný telegram jiným zdrojem nebo v nové zprávě, v okně a s důvěryhodnou kotvou | exclusion constraint → `duplicate`, jeden `raw_telegrams`. Příjem leží v měsíci svého `server_received_at` |
 | stejný obsah, důvěryhodný čas, mimo `dedup_window`, do 60 dní | `suspect_replay`, vlastní příjem, bez odečtu, alarm. Ke staršímu telegramu se nepřipojí |
@@ -300,7 +300,7 @@ Retained zprávu publikuje collector podle `PUT /api/v1/admin/devices/{id}/confi
 | `duplicate` | potvrzená shoda uvnitř `dedup_window`. Příjem je připojený k existujícímu telegramu |
 | `probable_duplicate` | rámec je uložený jako vlastní telegram `ambiguous`. Ke staršímu telegramu připojený není a odečet nevznikl |
 | `needs_review` | rámec je uložený, shoda se nenašla a bez důvěryhodné kotvy odečet nevznikl |
-| `duplicate_delivery` | prokázanou trojici `(ingest_source_id, msg_key_namespace, msg_key)` už server má |
+| `duplicate_delivery` | prokázanou položku `(ingest_source_id, msg_key_namespace, msg_key, item_index)` už server má. Ostatní položky zprávy tento stav sám neuzavře |
 | `uncertain` | stejný `content_hash` bez prokázaného identifikátoru. Pozorování zůstalo, odečet z něj nevznikl |
 | `id_collision` | stejný text `msg_key` v jiném namespace. Doručení se nesloučila |
 | `suspect_replay` | uloženo jen jako příjem a telegram bez fronty dekódování, bez odečtu |
@@ -310,7 +310,7 @@ Retained zprávu publikuje collector podle `PUT /api/v1/admin/devices/{id}/confi
 | `unresolved` | pozorování je uložené. Stejný čas ve streamu už má aktivní kumulativní odečet a druhý se nezaložil |
 | `conflict` | pozorování je uložené s jinou hodnotou. Původní odečet se nezměnil |
 
-Zařízení smaže zprávu z fronty po každém z těchto stavů, včetně `probable_duplicate`, `needs_review`, `uncertain` a `id_collision`. Data jsou v databázi a odečet z nejistého nebo kolizního doručení automaticky nevznikl. Tyto stavy se do `duplicate` neskládají. Bez ACK ji po timeoutu pošle znovu se stejným `msg_key` a stejnými údaji `rx`.
+Zařízení smaže zprávu z fronty až tehdy, když má uložený výsledek každá její položka. Jedna položka ve stavu `duplicate_delivery` ostatní položky nepotvrzuje. U ESP má položka fronty vlastní `msg_key`. U zprávy s více položkami pod jedním `msg_key` odpověď vypíše každý `item_index` a jeho stav. Stav `accepted` znamená uložený výsledek této položky, ne to, že z každé položky vznikl odečet. `probable_duplicate`, `needs_review`, `uncertain` a `id_collision` se do `duplicate` neskládají. Bez kompletního ACK zařízení po timeoutu pošle znovu stejný `msg_key` a stejné údaje `rx`.
 
 ### Doručení až po COMMIT
 
@@ -339,14 +339,14 @@ Zařízení smaže zprávu z fronty po každém z těchto stavů, včetně `prob
 Platí, i když konkrétní datagram, topic nebo JSON ACRIOS ještě nejsou známé.
 
 - **UDP/DTLS.** Každý datagram je jeden `ingest_payloads` s `content_kind = udp_datagram`. Otevřený UDP se nezapíná. DTLS se použije, až PoC ukáže, že ho vybraný model má. Session DTLS nenahrazuje aplikační `msg_key`. Port se do Compose ani do firewallu nepřidává, dokud PoC přímý UDP potvrdí a změna mimo repozitář bude zvlášť schválená.
-- **Platform API.** Server se dotazuje sám, z procesu na síti `sjv-egress`. Odpověď je payload `api_response`. Záznamy uvnitř se rozdělí adaptérem na položky kontraktu. Účet platformy má vlastní řádek `ingest_sources` s `kind = platform` a `device_id` NULL. Prokázaná idempotence je `(ingest_source_id, msg_key_namespace, msg_key)` tohoto řádku. Bez prokázaného identifikátoru se položky neslučují podle hashe. Koncentrátor uvnitř odpovědi se na `devices` namapuje jen přes `device_external_ids` a klíč zprávy se na něj nepřesune. Neznámý identifikátor zařízení nezaloží a příjem má `device_attribution = unattributed`.
+- **Platform API.** Server se dotazuje sám, z procesu na síti `sjv-egress`. Odpověď je payload `api_response`. Záznamy uvnitř se rozdělí adaptérem na položky kontraktu. Účet platformy má vlastní řádek `ingest_sources` s `kind = platform` a `device_id` NULL. Prokázaná idempotence je `(ingest_source_id, msg_key_namespace, msg_key, item_index)` tohoto řádku. Všechny položky jednoho payloadu se zpracují v jedné transakci. Bez prokázaného identifikátoru se položky neslučují podle hashe. Koncentrátor uvnitř odpovědi se na `devices` namapuje jen přes `device_external_ids` a klíč zprávy se na něj nepřesune. Neznámý identifikátor zařízení nezaloží a příjem má `device_attribution = unattributed`.
 - **Import souboru.** Import má vlastní `ingest_sources` s `kind = import`. Celý soubor je jeden payload. Řádek, který projde validací, je položka `import_row`. Identifikátor řádku se jako `msg_key` použije jen tehdy, když formát prokáže, že se neopakuje. Hash řádku identifikátor není. Stejný obsah dvou řádků jsou dvě doručení se stavem `uncertain`. Odečet má `source_kind = import` a `source_key = import:<payload_id>:<řádek>`. Ruční odečet zadaný ve formuláři zůstává `manual` a souborem není.
 
 ## Deduplikace raw telegramů
 
 ### Cíle
 
-- Každý příjem se eviduje zvlášť (`ingest_receipts`) v měsíci svého `server_received_at`, včetně opakovaného doručení prokázaného `(ingest_source_id, msg_key_namespace, msg_key)`.
+- Každý příjem se eviduje zvlášť (`ingest_receipts`) v měsíci svého `server_received_at`, včetně opakovaného doručení prokázané položky `(ingest_source_id, msg_key_namespace, msg_key, item_index)`.
 - Stejný rádiový telegram zachycený více zdroji, nebo opakovaně jedním v nové zprávě, má jeden `raw_telegrams` a nejvýš jeden aktivní odečet, když je shoda potvrzená uvnitř `dedup_window` a kotva je důvěryhodná. Mimo ni se rámec uloží znovu a odečet se nezaloží.
 - Dva různé telegramy se stejnou hodnotou spotřeby se nesloučí. Stejná hodnota není deduplikační klíč.
 - Deduplikace funguje pro opožděné doručení z fronty ESP, i když jiný přijímač poslal stejný telegram už dříve, a funguje při souběžném zpracování.
@@ -372,79 +372,73 @@ Platí, i když konkrétní datagram, topic nebo JSON ACRIOS ještě nejsou zná
 - Neuloží se rámec, telegram ani deduplikační klíč, jen se aktualizuje `unknown_meter_sightings` (upsert).
 - Administrace je zobrazí v `/api/v1/admin/unknown-meters`, odkud lze měřidlo založit.
 
-### Transakce zpracování jedné položky
+### Transakce jedné přijaté zprávy
+
+Jedna přijatá zpráva je jedna databázová transakce a zpracuje všechny své položky. Samostatná transakce jedné položky by při existujícím klíči zprávy ostatní položky přeskočila. Evidence zpracování je po položkách: primární klíč obsahuje `item_index`.
 
 ```text
 BEGIN
- 0. content_hash = sha256(kanonické tělo položky). Do msg_key se neukládá.
- 1. Jen prokázaný identifikátor:
-    INSERT INTO ingest_message_keys
-        (ingest_source_id, msg_key_namespace, msg_key, …)
-    ON CONFLICT (ingest_source_id, msg_key_namespace, msg_key) DO NOTHING
-    → nic nevloženo: prokázané opakované doručení.
-       partition_month příjmu = měsíc tohoto server_received_at
-       INSERT ingest_receipts (
-         status = duplicate_delivery,
-         content_hash, ingest_source_id, msg_key, msg_key_namespace, item_index,
-         server_received_at = čas tohoto doručení,
-         raw_telegram_id, raw_partition_month
-           nebo decoded_observation_id, decoded_partition_month)
-       Tyto odkazy nejsou cizí klíč.
+  Rozděl payload na položky 0 .. n-1 v pořadí zdroje.
+  Prázdný seznam je invalid celé obálky: jeden příjem, COMMIT, ACK invalid.
+  Když je identifikátor prokázaný:
+    pg_advisory_xact_lock na (ingest_source_id, msg_key_namespace, msg_key)
+    ještě před první položkou. Dva workery neprojdou stejným klíčem současně.
+  Pro každou položku i, v pořadí:
+    SAVEPOINT item_i
+    content_hash = sha256(kanonické tělo položky i). Do msg_key se neukládá.
+    1. Jen prokázaný identifikátor:
+       INSERT INTO ingest_message_keys
+           (ingest_source_id, msg_key_namespace, msg_key, item_index = i, …)
+       ON CONFLICT (ingest_source_id, msg_key_namespace, msg_key, item_index)
+           DO NOTHING
+       → nic nevloženo: opakované doručení jen položky i.
+          INSERT ingest_receipts (
+            partition_month = měsíc tohoto server_received_at,
+            status = duplicate_delivery, item_index = i,
+            content_hash, ingest_source_id, msg_key, msg_key_namespace,
+            server_received_at = čas tohoto doručení)
+          Odkaz na dřívější telegram nebo pozorování není cizí klíč.
+          UPDATE ingest_message_keys
+            SET delivery_count = delivery_count + 1,
+                last_received_at = čas tohoto doručení
+          RELEASE SAVEPOINT. Další položka se zpracuje.
+          Telegram, pozorování ani odečet této položky se nevkládá.
+       → identifikátor není prokázaný: klíč se nevloží a krok 1 není
+          duplicate_delivery, ani když content_hash už v databázi je.
+    2. validace časů a výpočet captured_at_est, time_source, time_uncertainty_ms
+       → too_old nebo invalid: receipt této položky, bez telegramu.
+          Doplň outcome klíče, když v kroku 1 vznikl. Další položka.
+    3. normalizace → při chybě receipt crc_error nebo invalid této položky.
+       Další položka.
+    4. lookup meters podle meter_key → neznámé: upsert unknown_meter_sightings,
+       receipt unknown_meter bez rámce. Další položka.
+    5. time_source = server_only, nebo nejistota větší než polovina dedup_window
+       → postup "Kotva server_only". telegram_dedup_keys se nevkládá.
+       INSERT raw_telegrams a ingest_receipts této položky,
+       případně ingest_dedup_candidates.
+       Odkaz na cizí telegram není cizí klíč. Další položka.
+    6. raw_telegram_id := nextval('raw_telegrams_id_seq')
+       raw_partition_month := měsíc captured_at_est
+    7. INSERT INTO telegram_dedup_keys ( … ) ON CONFLICT DO NOTHING
+       a) vloženo: suspect_replay, nebo pending a decode_queue, plus raw_telegrams
+       b) konflikt: připoj k existujícímu telegramu, status příjmu = duplicate
+    8. INSERT ingest_receipts této položky do měsíce server_received_at
+    9. Když v kroku 1 vznikl klíč této položky:
        UPDATE ingest_message_keys
-         SET delivery_count = delivery_count + 1,
-             last_received_at = čas tohoto doručení
-       COMMIT, ACK duplicate_delivery.
-       Telegram, pozorování ani odečet se nevkládá.
-    → identifikátor není prokázaný: klíč se nevloží a krok 1 není duplicate_delivery,
-      ani když content_hash už v databázi je.
- 2. validace časů a výpočet captured_at_est, time_source, time_uncertainty_ms
-    → too_old nebo invalid: receipt v měsíci server_received_at, bez telegramu, COMMIT, ACK
- 3. normalizace → při chybě receipt crc_error nebo invalid, COMMIT, ACK
- 4. lookup meters podle meter_key → neznámé: upsert unknown_meter_sightings,
-    receipt unknown_meter bez rámce, COMMIT, ACK
- 5. time_source = server_only, nebo nejistota větší než polovina dedup_window
-    → postup "Kotva server_only". telegram_dedup_keys se nevkládá.
-    INSERT raw_telegrams (měsíc kotvy nebo server_received_at, jak postup říká).
-    INSERT ingest_receipts do měsíce server_received_at
-        a případně ingest_dedup_candidates do téhož měsíce.
-    Odkaz na cizí telegram není cizí klíč.
-    Klíč zprávy se aktualizuje jen tehdy, když v kroku 1 vznikl.
-    COMMIT, ACK probable_duplicate nebo needs_review
- 6. raw_telegram_id := nextval('raw_telegrams_id_seq')
-    raw_partition_month := měsíc captured_at_est
- 7. INSERT INTO telegram_dedup_keys (
-        meter_key, access_number, frame_hash, anchor_at, dedup_window,
-        raw_telegram_id, raw_partition_month)
-    ON CONFLICT DO NOTHING RETURNING id
-    a) vloženo:   stejný (meter_key, access_number, frame_hash) s kotvou
-                  mimo dedup_window a do 60 dní
-                  → decode_status = suspect_replay, bez decode_queue
-                  jinak decode_status = pending a INSERT decode_queue
-                  INSERT raw_telegrams (id = raw_telegram_id,
-                      partition_month = raw_partition_month, …)
-    b) konflikt:  SELECT raw_telegram_id, raw_partition_month
-                  WHERE meter_key, access_number, frame_hash
-                    AND dedup_window && nové okno
-                  nejbližší anchor_at
-                  UPDATE raw_telegrams SET receipt_count = receipt_count + 1,
-                         capture_device_ids
-                  UPDATE meter_readings (receipt_count, capture_device_ids)
-                         a reading_provenance.confirmed_source_ids,
-                         pokud odečet už existuje
-                  status příjmu = duplicate
- 8. INSERT ingest_receipts (
-        partition_month = měsíc server_received_at,
-        payload_partition_month = totéž,
-        server_received_at, content_hash,
-        raw_telegram_id, raw_partition_month, …)
-    Cizí klíč je jen na payload téhož měsíce.
- 9. Když v kroku 1 vznikl klíč:
-    UPDATE ingest_message_keys
-        SET outcome, receipt_id, receipt_partition_month, delivery_count = 1
-COMMIT → PUBACK brokeru a ACK zařízení
+           SET outcome = stav této položky,
+               receipt_id, receipt_partition_month, delivery_count = 1
+    Logický stav položky transakci nekončí. RELEASE SAVEPOINT item_i.
+    Neočekávaná chyba databáze: ROLLBACK TO SAVEPOINT item_i.
+       Položka i uložený výsledek nemá. Smyčka skončí.
+  Když některá položka uložený výsledek nemá:
+    ROLLBACK celé transakce. ACK se neposílá.
+    Zařízení zprávu pošle znovu. Nic z tohoto pokusu nezůstane,
+    takže se žádná položka neoznačí jako duplicate_delivery omylem.
+  Jinak COMMIT.
+ACK až po COMMIT. Odpověď má jeden záznam na každou položku a její stav.
 ```
 
-Kroky 2, 3 a 4 před COMMIT taky vloží příjem do měsíce svého `server_received_at`. Klíč zprávy se doplní jen u prokázaného identifikátoru. Když má prokázaná zpráva víc položek, opakované doručení vloží příjem `duplicate_delivery` pro každý původní `item_index`. Nové pozorování ani odečet nevznikne. Stejný `content_hash` bez klíče tímto krokem neprojde.
+Logické selhání jedné položky (`invalid`, `unknown_meter`, `too_old`, `probable_duplicate`, `needs_review`) uloží její příjem a pokračuje na další. Nevyřadí sourozence a nevrátí jejich práci. Zařízení smí frontu smazat až po ACK, ve kterém má uložený výsledek každá položka. `duplicate_delivery` v tom seznamu platí jen pro položku, jejíž klíč už existoval. Stejný `content_hash` bez prokázaného identifikátoru tímto krokem neprojde.
 
 ### Proč je to bezpečné při souběhu
 
@@ -503,7 +497,7 @@ Shodný obsah s důvěryhodnou kotvou, mimo `dedup_window`, ale do 60 dní, dost
 
 | Případ | Jak se pozná | Co vznikne |
 | --- | --- | --- |
-| 1. Opakované doručení stejné zprávy | prokázané `(ingest_source_id, msg_key_namespace, msg_key)` | další `ingest_receipts` se stavem `duplicate_delivery` v měsíci tohoto `server_received_at`, `delivery_count + 1`, žádný nový odečet. Stejný hash bez identifikátoru tento případ není |
+| 1. Opakované doručení stejné položky | prokázané `(ingest_source_id, msg_key_namespace, msg_key, item_index)` | další `ingest_receipts` se stavem `duplicate_delivery` jen této položky, žádný nový odečet. Ostatní položky prvního doručení se zpracují. Stejný hash bez identifikátoru tento případ není |
 | 2. Stejný telegram, víc zdrojů | jiné `ingest_source_id` nebo jiný identifikátor, stejné `(meter_key, access_number, frame_hash)` uvnitř `dedup_window` a důvěryhodná kotva | jeden `raw_telegrams`, N příjmů v měsících svých přijetí, jeden odečet `raw:<raw_telegram_id>` |
 | 3. Nový telegram se stejnou hodnotou | jiné `access_number` nebo jiný `frame_hash`; u dat bez rámce jiné tělo, nebo stejné tělo bez prokázaného identifikátoru | nový telegram nebo nové pozorování. Shoda hodnoty, času nebo hashe zprávy nespojí |
 | 4. Fragmenty jedné zprávy | jedna sada `ingest_fragment_sets.id` a prokázané `message_ref`, nebo jediná ještě neuzavřená sada bez něj | žádný odečet, dokud sada není `complete`. Po uzavření se fragment se stejným `group_key` k nové sadě nepřipojí. Bez `message_ref` se izoluje |
@@ -530,36 +524,53 @@ Postup jednoho fragmentu:
 BEGIN
  1. ingest_source_id je dané účtem nebo koncovým bodem. Bez něj se sada nezaloží
     (odmítnutí fragment_unidentified). device_id je jen atribuce a smí chybět.
- 2. group_key a fragment_index musí přijít od zdroje. Když chybí, payload se uloží,
+    Payload tohoto doručení se uloží vždy, dřív než se hledá sada.
+ 2. group_key a fragment_index musí přijít od zdroje. Když chybí, payload zůstane,
     ingest_rejections.reason = fragment_unidentified, COMMIT. Sada nevznikne.
     group_key se nepovažuje za globálně jedinečné a adaptér k němu nepřidává předponu.
-    message_ref se vezme jen z prokázaného identifikátoru celé zprávy. Jinak je NULL.
- 3. message_ref je vyplněné:
-       najdi collecting sadu se stejným (ingest_source_id, message_ref).
-       našla se: připoj fragment.
+    source_message_ref se uloží na fragment, když ho zdroj poslal.
+    message_ref sady se vyplní jen při prokázaném rozsahu. Jinak je NULL
+    a text od zdroje sadu nespojí.
+ 3. pg_advisory_xact_lock na (ingest_source_id, zámek).
+    Zámek je prokázané message_ref, a když rozsah zahrnuje transport, i transport.
+    Bez prokázaného rozsahu je zámek group_key.
+    Zámek drží do COMMIT, takže dva procesy nezaloží dvě otevřené sady.
+ 4. message_ref je prokázané:
+       najdi collecting sadu se stejným rozsahem a message_ref.
+       našla se: připoj fragment k ní.
        nenašla se a existuje ukončená sada s tímto message_ref:
           izoluj. K jiné sadě se stejným group_key se nepřipojuj.
-       nenašla se žádná: založ collecting s tímto message_ref a group_key.
-    message_ref je NULL:
+       nenašla se žádná: SAVEPOINT set_insert, INSERT collecting s tímto message_ref a group_key.
+    message_ref není prokázané:
        existuje ukončená sada se stejným (ingest_source_id, group_key),
        nebo je otevřená sada a fragment k ní nelze bezpečně přiřadit:
           izoluj. Novou collecting sadu nezakládej a k otevřené se nepřipojuj.
        collecting sada bez message_ref existuje a žádná starší sada tohoto
        group_key ještě neskončila: připoj fragment.
-       žádná sada není: založ první collecting sadu.
- 4. Izolace: nová sada status = isolated, jeden fragment, payload zůstane.
-    Sada se neskládá a dekodér se nevolá. COMMIT.
- 5. Připojení na (fragment_set_id, fragment_index):
-       stejný content_hash: delivery_count + 1
-       jiný hash: sada conflict, ingest_rejections fragment_conflict, COMMIT.
-       Dekodér se nevolá.
- 6. Když fragmenty uvádějí různý expected_count, sada je conflict a dál se neskládá.
- 7. Když jsou přítomné všechny indexy 0 .. expected_count-1
+       žádná sada není: SAVEPOINT set_insert, INSERT první collecting sady.
+    Jedinečný index collecting sady je pojistka zámku.
+    unique_violation: ROLLBACK TO SAVEPOINT set_insert, znovu SELECT vítězné sady.
+       Vítěz je stejná identita a pořád collecting před deadline_at: připoj k němu.
+       Vítěz má jiné message_ref, už není collecting, nebo rozsah není prokázaný
+       a pravidlo říká izolovat: izoluj. Fragment ani jeho payload se nezahodí.
+       K jiné sadě se nepřipojí.
+ 5. Izolace: nová sada status = isolated, řádek fragmentu delivery_role = first,
+    payload zůstane. Sada se neskládá a dekodér se nevolá. COMMIT.
+ 6. Připojení:
+       index v sadě ještě nemá řádek first:
+          INSERT ingest_fragments delivery_role = first, vlastní payload_id.
+       stejný content_hash: další řádek delivery_role = repeat,
+          vlastní payload_id a received_at. Řádek first se nemění.
+       jiný hash: další řádek delivery_role = conflict, sada conflict,
+          ingest_rejections fragment_conflict. Řádek first a jeho payload zůstanou.
+          Dekodér se nevolá.
+ 7. Když fragmenty uvádějí různý expected_count, sada je conflict a dál se neskládá.
+ 8. Když jsou přítomné všechny indexy 0 .. expected_count-1 jako řádky first
     (nebo zdroj označil konec a indexy tvoří souvislou řadu od nuly):
-       slož bajty v pořadí indexů do ingest_payloads s origin = assembled,
+       slož bajty řádků first v pořadí indexů do ingest_payloads, origin = assembled,
        sada complete,
-       složený payload vstupuje jednou do běžné transakce položky.
-       msg_key složené zprávy je message_ref, jen když je prokázané.
+       složený payload vstupuje jednou do transakce přijaté zprávy.
+       msg_key složené zprávy je message_ref, jen když je prokázaný rozsah.
        Hash složeného těla msg_key není.
 COMMIT
 ```
@@ -572,7 +583,7 @@ Neúplná sada zůstane `collecting`. Worker po `deadline_at` nastaví `timed_ou
 2. Další fragment s `group_key = G` collecting sadu nezaloží. Bez `message_ref` by nešlo poznat, jestli patří k sadě 10, nebo k nové zprávě.
 3. Fragment 2 staré zprávy přijde až potom. Uloží se jako sada 11 se stavem `isolated`. K sadě 10 se nepřipojí, žádnou otevřenou sadu nedoplní a nedekóduje se.
 4. Fragmenty novější zprávy, která umí poslat jen `G`, se izolují stejně, každý ve vlastní sadě. Nesloží se spolu, protože by se mezi nimi mohl schovat opožděný kus sady 10.
-5. Když zdroj na každém fragmentu posílá prokázané `message_ref`, nová zpráva s jiným `message_ref` má vlastní collecting sadu. Opožděný fragment se starým `message_ref` se k ní nepřipojí a izoluje se.
+5. Když PoC prokáže rozsah `message_ref` a zdroj ho posílá na každém fragmentu, nová zpráva s jiným `message_ref` má vlastní collecting sadu. Opožděný fragment se starým `message_ref` se k ní nepřipojí a izoluje se. Dokud rozsah prokázaný není, text od zdroje sadu nespojí.
 
 `group_key` se tím nestává globálně jedinečným. Cena je, že bez prokázaného `message_ref` se po první ukončené sadě další zpráva se stejným klíčem automaticky nesloží. Payload izolovaného fragmentu zůstane.
 
@@ -582,10 +593,10 @@ Rozlišení:
 | --- | --- |
 | identita pokusu o zprávu | `ingest_fragment_sets.id` |
 | identifikátor od zdroje | `group_key`. Rozsah jedinečnosti není známý |
-| prokázaná identita celé zprávy | `message_ref`, jinak NULL |
-| identita fragmentu | `(fragment_set_id, fragment_index)` a `content_hash` jeho bajtů |
+| prokázaná identita celé zprávy | `message_ref` sady, jen po prokázaném rozsahu. Jinak NULL. Text od zdroje je `source_message_ref` na fragmentu |
+| identita jednoho doručení fragmentu | řádek `ingest_fragments`: vlastní `payload_id`, index, sada, `received_at`, `delivery_role` |
 | pořadí | `fragment_index` uvnitř jedné sady |
-| opakované doručení fragmentu | stejná otevřená sada, stejný index, stejný hash, `delivery_count + 1` |
+| opakované doručení fragmentu | další řádek `repeat` se stejným indexem a stejným hashem. Původní payload zůstane |
 | nejednoznačný fragment | stav `isolated`. K žádné jiné sadě se nepřipojí |
 
 Ochrana proti záměně:
@@ -626,6 +637,7 @@ Korelace níže je proto jen záznam shody, ne sloučení odečtů.
 | Věc | Čím se pozná | Čím se nepozná |
 | --- | --- | --- |
 | zpráva | prokázané `(ingest_source_id, msg_key_namespace, msg_key)` | hash, `device_id`, čas, hodnota |
+| položka | `(…, item_index)` v `ingest_message_keys` | ostatní položky téže zprávy |
 | položka zprávy | prokázaná zpráva plus `item_index`, jinak `id` pozorování | `source_measured_at`, `content_hash` |
 | doručení | `ingest_receipts.id` | shoda obsahu |
 | měření, ze kterého vznikl odečet | `source_key = vobs:<decoded_observation_id>` | čas ani hodnota |
@@ -715,8 +727,8 @@ Každé měřidlo má v každém okamžiku právě jeden přiřazený stream (`m
   - hodiny zařízení v budoucnosti,
   - regrese `boot_counter`,
   - nové `instance_id` po vymazání flash.
-- **Idempotence:** opakované doručení prokázaného `msg_key` po ztraceném ACK. Druhé doručení má příjem `duplicate_delivery` a stejný počet odečtů. Stejné tělo bez identifikátoru má druhé pozorování.
-- **Fragmenty:** neúplná sada, opakovaný fragment se stejným hashem, fragment s jiným hashem, fragment cizího `group_key` nebo cizího `ingest_source_id`, timeout. Po `timed_out` přijde fragment se stejným `group_key` a je `isolated`. K nové ani ke staré sadě se nepřipojí a dekodér ho nedostane.
+- **Idempotence:** opakované doručení prokázaného `msg_key` a `item_index` po ztraceném ACK. Druhé doručení má příjem `duplicate_delivery` a stejný počet odečtů. Dvě položky jednoho `msg_key` se při prvním doručení obě zpracují. Logické selhání první neukončí druhou. Stejné tělo bez identifikátoru má druhé pozorování.
+- **Fragmenty:** neúplná sada, opakovaný fragment se stejným hashem jako další řádek s vlastním payloadem, fragment s jiným hashem, fragment cizího `group_key` nebo cizího `ingest_source_id`, timeout. Po `timed_out` přijde fragment se stejným `group_key` a je `isolated`. K nové ani ke staré sadě se nepřipojí a dekodér ho nedostane. Dva souběžné vklady nezaloží dvě otevřené sady a fragment nezahodí. `message_ref` bez zapsaného rozsahu sadu nespojí. Retence smaže fragment dřív než sadu, na kterou ještě ukazuje.
 - **Dekódovaná data:** opakované poslání prokázaného identifikátoru, stejný hash bez identifikátoru jako `uncertain` se dvěma pozorováními, stejný čas a stejná hodnota jako `unresolved`, stejný čas a jiná hodnota jako `conflict`. V obou konfliktech zůstanou obě pozorování a druhý odečet nevznikne. Stejná hodnota v jiném čase jsou dva odečty. Korelace s rádiem bez sloučení, JSON bez vyrobeného rámce.
 - **Pět případů:** opakované doručení prokázaného identifikátoru, dva koncentrátory se stejným rámcem, nový telegram se stejnou hodnotou a jiným `access_number`, fragmenty, opětovné dekódování se stejnou i jinou hodnotou. Deduplikace podle samotné hodnoty, samotného času nebo samotného hashe musí v testu selhat, pokud by sloučila různá měření.
 - **Identita zařízení:** výměna IMSI ponechá `device_id` a historii. Stejné IMSI u jiného zařízení je konflikt a zařízení se nezaloží z těla zprávy.

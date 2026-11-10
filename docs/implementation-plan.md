@@ -66,7 +66,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
   - `ingest_sources` a `reading_provenance` bez partitioningu,
   - ingest: měsíční partitions `ingest_payloads`, `ingest_receipts`, `ingest_dedup_candidates`, `ingest_rejections`, `raw_telegrams`, `decoded_observations`,
   - `ingest_fragment_sets` a `ingest_fragments` bez partitioningu,
-  - `ingest_message_keys` s `PRIMARY KEY (ingest_source_id, msg_key_namespace, msg_key)` jen pro prokázaný identifikátor, `telegram_dedup_keys`, `unknown_meter_sightings`, `decode_queue` s cizím klíčem,
+  - `ingest_message_keys` s `PRIMARY KEY (ingest_source_id, msg_key_namespace, msg_key, item_index)` jen pro prokázaný identifikátor, `telegram_dedup_keys`, `unknown_meter_sightings`, `decode_queue` s cizím klíčem,
   - `meter_readings` s `reading_kind`, `quality`, `source_key`, indexem `meter_readings_vendor_time_guard` a triggerem proti změnám, `meter_daily_values`,
   - `notifications`, audit s hash řetězcem.
 - `maintenance.sh`: zakládání partitions, retence v daném pořadí s kontrolami, mazání klíčů po 60 dnech.
@@ -80,7 +80,11 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
   - stejný `msg_key` dvou `ingest_source_id` jsou dva klíče,
   - `server_only` se shodou do 60 dní nepřipojí příjem ke staršímu telegramu a odečet nezaloží,
   - stejný `group_key` po `timed_out` fragment izoluje a k nové sadě ho nepřipojí,
-  - test retence na umělých datech: nejdřív kandidáti a příjmy měsíce přijetí, potom sady a fragmenty `DELETE`, potom payload a telegram. Odečet a `reading_provenance` zůstanou a neobsahují cizí klíč na smazaný příjem. Retence se odloží při čekajícím dekódování. `needs_review` bez odečtu ji neblokuje. Příjem z prosince 2028 odkazující na telegram z ledna 2027 se nemaže s lednovou partition.
+  - test retence na umělých datech: nejdřív kandidáti a příjmy měsíce přijetí, potom fragmenty `DELETE`, potom sada bez zbývajících fragmentů, potom payload a telegram. Sada se nesmaže, dokud na ni fragment ukazuje. Odečet a `reading_provenance` zůstanou a neobsahují cizí klíč na smazaný příjem. Retence se odloží při čekajícím dekódování. `needs_review` bez odečtu ji neblokuje. Příjem z prosince 2028 odkazující na telegram z ledna 2027 se nemaže s lednovou partition.
+  - dvě položky jednoho `msg_key` se při prvním doručení obě uloží a při druhém z nich nevznikne odečet,
+  - opakované doručení fragmentu má vlastní řádek a vlastní payload,
+  - souběžné založení sady nevytvoří dvě otevřené sady a fragment nezahodí,
+  - `message_ref` bez zapsaného rozsahu sadu nespojí.
 
 ### 5. Ingest, čas a deduplikace
 
@@ -139,6 +143,7 @@ Před fází 12 musí být zapsané:
 - topics nebo tvar API, až jsou pozorované,
 - ukázky surového payloadu a ukázky dekódovaného payloadu, pokud je zařízení posílá,
 - jestli a jak fragmentuje (identifikátor celé zprávy, pořadí, počet, opakování, timeout, jestli se identifikátor po uzavření použije znovu a v jakém rozsahu je jedinečný),
+- jestli se `message_ref` opakuje mezi endpointy, transporty, restarty nebo v čase, po jaké době, a jestli patří zařízení, spojení nebo bootu. Dokud to není zapsané, `message_ref` identita zprávy není,
 - jak vypadá opakované doručení a jestli zpráva nese vlastní identifikátor, který se během 60 dní neopakuje,
 - jaká je přesnost času dekódované hodnoty,
 - jaká autentizace je dostupná (heslo, certifikát, PSK, token platformy). Metoda se v PoC vybírá podle zařízení, ne dopředu,
