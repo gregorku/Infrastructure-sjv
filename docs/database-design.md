@@ -1,6 +1,6 @@
 # Databázový návrh
 
-PostgreSQL 18.x, databáze `sjv`, schéma `public`, je centrální a jediný dlouhodobý zdroj pravdy pro data SJV (rozhodnutí 15–19 v [decisions.md](decisions.md)). Konkrétní model ACRIOS, jeho firmware ani protokol tvar tabulek nemění. ACRIOS je kód partnera a adaptéru, ne předpona tabulek.
+PostgreSQL 18.x, databáze `sjv`, schéma `public`, je centrální a jediný dlouhodobý zdroj pravdy pro data SJV (rozhodnutí 15–30 v [decisions.md](decisions.md)). Konkrétní model ACRIOS, jeho firmware ani protokol tvar tabulek nemění. ACRIOS je kód partnera a adaptéru, ne předpona tabulek.
 
 - ORM SQLAlchemy 2 s psycopg 3, migrace Alembic.
 - Rozšíření `btree_gist` (exclusion constrainty) a `citext` (e-maily).
@@ -19,14 +19,18 @@ PostgreSQL 18.x, databáze `sjv`, schéma `public`, je centrální a jediný dlo
 
 ### Řešení
 
-1. **Partitionují se jen tabulky s časovou retencí:** `ingest_payloads`, `ingest_receipts`, `ingest_fragments`, `ingest_fragment_sets`, `ingest_rejections`, `raw_telegrams`, `decoded_observations` (24 měsíců) a `device_events` (12 měsíců). Důvodem je levné mazání celé partition. Dřívější `telegram_receipts` je sloučená do `ingest_receipts`, aby MQTT, HTTPS, UDP/DTLS, API a import neměly každý vlastní evidenci.
+1. **Partitionují se jen tabulky s časovou retencí po měsících:** `ingest_payloads`, `ingest_receipts`, `ingest_dedup_candidates`, `ingest_rejections`, `raw_telegrams`, `decoded_observations` (24 měsíců od `partition_month`) a `device_events` (12 měsíců). Důvodem je levné mazání celé partition. `ingest_fragment_sets` a `ingest_fragments` partition nemají, protože jedinečnost otevřené sady a dvojice `(fragment_set_id, fragment_index)` musí platit přes hranici měsíce. Mažou se `DELETE` 24 měsíců od svého času. Dřívější `telegram_receipts` je sloučená do `ingest_receipts`.
 2. **Globální idempotence a deduplikace jsou v malých tabulkách bez partitioningu:**
-   - `ingest_message_keys` s `PRIMARY KEY (device_id, msg_key)`,
-   - `telegram_dedup_keys` s exclusion constraintem přes časové okno.
+   - `ingest_message_keys` s `PRIMARY KEY (ingest_source_id, msg_key_namespace, msg_key)`. Všechny složky jsou `NOT NULL`. Řádek vznikne jen pro prokázaný identifikátor zprávy. Hash těla klíčem není. `device_id` v klíči není, protože import a platforma zařízení nemají.
+   - `telegram_dedup_keys` s exclusion constraintem přes časové okno. Potvrzená shoda rámce platí jen uvnitř okna s důvěryhodnou kotvou.
 
-   Mají retenci 60 dní a ingest odmítne zprávy starší než `INGEST_MAX_MESSAGE_AGE` (30 dní). Každé možné opakování tak vždy narazí na existující klíč.
-3. **Trvalé tabulky se nepartitionují** a mají globální `UNIQUE`: `meter_readings`, `meter_daily_values`, `audit_logs`, kmenová data.
-4. **Partition klíč je `partition_month date`** (první den měsíce v UTC). U telegramu, pozorování a jejich příjmu ho server počítá z ověřeného odhadu času zachycení a po zápisu se nemění. Příjem a jeho telegram mají stejné `partition_month`, takže cizí klíč `(raw_telegram_id, partition_month)` funguje. Původní obálka má měsíc podle `server_received_at`: na server dorazila teď, i když rámec byl zachycen dříve. Příjem si drží `(payload_id, payload_partition_month)`. Rozdíl měsíců je nejvýš stáří zprávy (30 dní), takže údržba mazající od nejstaršího měsíce nenarazí na živý odkaz.
+   Klíče mají retenci 60 dní. Ingest odmítne zprávy starší než `INGEST_MAX_MESSAGE_AGE` (30 dní). Opakování prokázaného identifikátoru, které se ještě vejde do stáří, narazí na existující klíč. Stejný hash bez identifikátoru na klíč nenarazí.
+3. **Trvalé tabulky se nepartitionují** a mají globální `UNIQUE`: `meter_readings`, `meter_daily_values`, `audit_logs`, `ingest_sources`, `reading_provenance`, kmenová data.
+4. **`partition_month` je klíč partition.** Je to `date`, první den měsíce v UTC. Čas, kdy bajty dorazily, je vždy samostatný sloupec `received_at` nebo `server_received_at`.
+   - `ingest_payloads.partition_month` je měsíc `received_at`.
+   - `ingest_receipts.partition_month`, `ingest_dedup_candidates.partition_month` a `decoded_observations.partition_month` jsou měsíc `server_received_at`. Retence příjmu a pozorování je 24 měsíců od tohoto měsíce, ne od stáří telegramu, na který odkazují.
+   - `raw_telegrams.partition_month` je měsíc kotvy, ne měsíc pozdějšího příjmu. Pozdější příjem telegram do své partition nestěhuje a cizím klíčem ho nedrží.
+   - Payload příjmu, pozorování a fragmentu leží ve stejném měsíci jako řádek, který na něj cizím klíčem ukazuje. Cizí klíč je `(payload_id, payload_partition_month)` a oba měsíce se rovnají. Tím mazání starší partition nestrhne mladší příjem a mladší příjem neudrží starší payload.
 5. **Trvalé odečty nemají cizí klíč na tabulky s retencí.** Odkaz na telegram nebo pozorování je jen historický údaj. Smazání telegramu tak nikdy neovlivní odečet ([retence](#retence-a-vazby)).
 
 ## Kmenová data
@@ -248,7 +252,7 @@ EXCLUDE USING gist (
 | `device_external_ids` | `device_external_ids` | beze změny významu |
 | `device_capabilities` | `device_capabilities` | beze změny významu |
 | `ingest_endpoints` | `ingest_endpoints` | konfigurace příjmu, ne přijatá data |
-| `ingest_sources` | `ingest_payloads` a `devices` | `source_streams` už je zdroj odečtů. Původní bajty jsou payload, původce je zařízení nebo koncový bod |
+| `ingest_sources` | `ingest_sources` | identita příjmového zdroje pro idempotenci. Není to `source_streams` ani `devices.id`. Payload zůstává v `ingest_payloads` |
 | `ingest_fragments` | `ingest_fragments` a `ingest_fragment_sets` | sada drží úplnost, timeout a hranici mezi zprávami. Samotný fragment by to neuměl |
 | `ingest_rejections` | `ingest_rejections` | odmítnutá obálka. Výsledek jednotlivé položky zůstává na `ingest_receipts`, aby jeden příjem nebyl ve dvou tabulkách |
 | dřívější `telegram_receipts` | `ingest_receipts` | jeden tvar příjmu pro všechny transporty |
@@ -273,24 +277,43 @@ EXCLUDE USING gist (
 
 ### `ingest_payloads` (měsíční partitions, 24 měsíců) — vrstva A
 
-`id` (sekvence), `partition_month`, `endpoint_id`, `device_id NULL`, `transport`, `received_at`, `content_kind` (`wmbus_batch`, `wmbus_frame`, `json`, `csv`, `udp_datagram`, `api_response`, `opaque`), `mqtt_topic NULL`, `payload bytea`, `payload_sha256`, `size_bytes`, `origin` (`received`, `assembled`), `fragment_set_id NULL`, `fragment_set_partition_month NULL`, `metadata jsonb`
+`id` (sekvence), `partition_month`, `ingest_source_id NOT NULL`, `endpoint_id`, `device_id NULL`, `transport`, `received_at`, `content_kind` (`wmbus_batch`, `wmbus_frame`, `json`, `csv`, `udp_datagram`, `api_response`, `opaque`), `mqtt_topic NULL`, `payload bytea`, `payload_sha256`, `size_bytes`, `origin` (`received`, `assembled`), `fragment_set_id NULL`, `metadata jsonb`
 
 - `PRIMARY KEY (id, partition_month)`
-- `partition_month` je měsíc `received_at` v UTC. U `origin = assembled` je to měsíc složení, shodný s měsícem sady fragmentů.
+- `partition_month` je měsíc `received_at` v UTC. U `origin = assembled` je to měsíc složení.
+- `ingest_source_id → ingest_sources`. Vyplněné vždy, i když `device_id` chybí.
 - `payload` jsou bajty, které přišly, bez překódování a bez ořezu. Topic MQTT je vedle nich, protože do těla zprávy nepatří, ale k příjmu ano.
 - `origin = assembled` vznikne jen z úplné sady fragmentů a odkazuje na ni. Původní fragmenty v tabulce zůstávají. Složený payload je jejich spojení v daném pořadí, ne náhrada.
 - `metadata` smí nést jméno souboru, identifikátor stránky API nebo netajné hlavičky. Autorizační hlavička se neukládá.
 - Dekódovaná hodnota bez wM-Bus rámce má `content_kind` `json` nebo `csv` a nevytvoří řádek `raw_telegrams`.
 - Tělo nad `max_payload_bytes` se sem nezapíše. Odmítnutí je jen v `ingest_rejections`, aby velké odmítnuté zprávy plnily disk.
 
+### `ingest_sources` (bez partitioningu, trvale)
+
+`id`, `code UNIQUE`, `kind` (`device`, `platform`, `import`), `msg_key_scope` (`transport`, `device`), `device_id NULL → devices`, `endpoint_id NULL → ingest_endpoints`
+
+- `id` je identita příjmového zdroje. Po založení se nemění. Není to `devices.id` a nesmí se jím nahradit.
+- `CHECK ((kind = 'device' AND device_id IS NOT NULL AND endpoint_id IS NULL) OR (kind <> 'device' AND device_id IS NULL AND endpoint_id IS NOT NULL))`
+- Fyzické zařízení má právě jeden řádek `kind = device`. Unikátní index je `UNIQUE (device_id) WHERE kind = 'device'`. MQTT a HTTPS téhož zařízení sdílejí tento řádek jako původce, ne jako společný prostor `msg_key`.
+- `msg_key_scope = transport` je výchozí. `msg_key_namespace` v klíči zprávy je pak název transportu. Stejný text `msg_key` na MQTT a na HTTPS jsou dvě doručení.
+- `msg_key_scope = device` smí být jen u zdroje, jehož kontrakt prokáže jeden prostor identifikátorů napříč transporty. `msg_key_namespace` je potom konstanta `device`. Firmware ESP popisuje `msg_key` jako vlastnost záznamu fronty při opakovaném odeslání. Nepopisuje, že MQTT a HTTPS jsou jeden prostor. Dokud to firmware výslovně nezaručí, ESP zůstává `transport`.
+- Platforma a import mají povinné `endpoint_id`. Unikátní index je `UNIQUE (endpoint_id) WHERE kind <> 'device'`. Účet platformy není zařízení. Koncentrátor uvnitř odpovědi se na `devices` namapuje jen přes už uložené `device_external_ids` a na klíč idempotence se tím nepřesune.
+- Budoucí zdroj bez fyzického zařízení je další `kind` a další řádek s vlastním `id`. Klíč prokázané zprávy zůstává `(ingest_source_id, msg_key_namespace, msg_key)`.
+- Stejný text `msg_key` dvou různých `ingest_source_id` jsou dvě zprávy. Sloučení by schovalo doručení z druhého zdroje.
+
 ### `ingest_message_keys` (bez partitioningu, 60 dní)
 
-`device_id`, `msg_key text`, `message_kind` (`telegram`, `decoded`, `event`, `heartbeat`, `import_row`), `first_received_at`, `last_received_at`, `delivery_count`, `outcome`, `receipt_id NULL`, `receipt_partition_month NULL`
+`ingest_source_id NOT NULL → ingest_sources`, `msg_key_namespace text NOT NULL`, `msg_key text NOT NULL`, `message_kind` (`telegram`, `decoded`, `event`, `heartbeat`, `import_row`), `first_received_at`, `last_received_at`, `delivery_count`, `outcome`, `receipt_id NULL`, `receipt_partition_month NULL`
 
-- `PRIMARY KEY (device_id, msg_key)`
+- `PRIMARY KEY (ingest_source_id, msg_key_namespace, msg_key)`. NULL v klíči není.
+- Řádek vznikne jen tehdy, když zdroj poslal identifikátor a je prokázané, že se během 60denní retence klíče neopakuje. `sha256` těla se do `msg_key` neukládá. Dvě legitimní zprávy mohou mít stejný obsah a jedno tělo může přijít znovu. Hash tyto případy nerozliší, takže by tiché sloučení zahodilo samostatné pozorování.
+- `msg_key_namespace` je transport, nebo `device` při `msg_key_scope = device`. Stejný text v jiném namespace není stejná zpráva.
 - `outcome` je výsledek první položky, jeden ze stavů ACK ([data-ingestion.md](data-ingestion.md)).
-- `delivery_count` začíná na 1. Každé další doručení téhož klíče ho zvýší, přidá příjem `duplicate_delivery` a odečet nezaloží.
-- `device_id` je součást klíče, protože stejný `msg_key` dvou koncentrátorů jsou dva příjmy. U zařízení, které identifikátor zprávy nemá, je `msg_key` rovné `sha256` kanonického těla položky. To chytá opakované doručení stejného těla. Nový telegram se stejnou hodnotou a jiným časem nebo jiným ACC má jiné tělo, tedy jiný klíč.
+- `delivery_count` začíná na 1. Další doručení stejné trojice zvýší počet, přidá příjem `duplicate_delivery` a odečet nezaloží. To je prokázané opakované doručení, ne shoda hashe.
+- `FOREIGN KEY (receipt_id, receipt_partition_month) REFERENCES ingest_receipts (id, partition_month)` je vyplněný po prvním příjmu. Klíč žije 60 dní, příjem 24 měsíců, takže cizí klíč po tu dobu míří na živý řádek.
+- Položky jedné prokázané zprávy rozlišuje `item_index` na příjmu a na pozorování. Druhé doručení celé zprávy položky znovu nezakládá.
+- Bez prokázaného identifikátoru klíč nevznikne. Každé doručení zůstane vlastní příjem a vlastní pozorování. Shoda `content_hash` se zapíše jako `uncertain` a kandidát, ne jako `duplicate_delivery`.
+- ESP smí jako `msg_key` použít `instance_id`, boot a pořadí, protože ten identifikátor je v návrhu firmware daný pro opakované odeslání záznamu fronty. U ACRIOS ten důkaz není a do PoC se nedoplňuje.
 
 ### `telegram_dedup_keys` (bez partitioningu, 60 dní)
 
@@ -315,58 +338,78 @@ CREATE TABLE telegram_dedup_keys (
 CREATE INDEX ON telegram_dedup_keys (meter_key, access_number, frame_hash);
 ```
 
-- Chybějící ACC se ukládá jako `-1`. Hodnoty `NULL` by se v exclusion constraintu nikdy nesrazily.
-- `anchor_at` ani okno se po zápisu nemění, takže okna se neřetězí.
-- Druhý index slouží k hledání stejného obsahu v celé retenci (kotva `server_only`, podezření na replay).
+- Chybějící `access_number` se ukládá jako `-1`. V dokumentaci postupu se sloupec nejmenuje `acc`. ACC je jen název pole wM-Bus, které se do sloupce ukládá.
+- `anchor_at` ani `dedup_window` se po zápisu nemění, takže okna se neřetězí.
+- Druhý index slouží k vyhledání stejného obsahu v retenci klíče. Nález mimo `dedup_window` není potvrzená duplicita. U kotvy `server_only` se podle něj telegramy neslučují ([data-ingestion.md](data-ingestion.md#kotva-server_only)).
+- `raw_telegram_id` a `raw_partition_month` ukazují na telegram, který okno založil. Pseudokód ingestu používá tato jména, ne `raw_id` a `partition_month` bez rozlišení.
 
 ### `raw_telegrams` (měsíční partitions, 24 měsíců)
 
-`id` (sekvence `raw_telegrams_id_seq`, hodnota se alokuje před vložením), `partition_month`, `meter_key`, `meter_id NULL`, `access_number`, `ci_field`, `encryption_mode`, `canonical_frame bytea`, `frame_hash`, `normalizer_version`, `anchor_at`, `time_source`, `first_server_received_at`, `receipt_count`, `capture_device_ids bigint[]`, `decode_status` (`pending`, `decoded`, `failed`, `no_key`, `suspect_replay`), `decode_error NULL`, `decoder_version NULL`
+`id` (sekvence `raw_telegrams_id_seq`, hodnota se alokuje před vložením), `partition_month`, `meter_key`, `meter_id NULL`, `access_number`, `ci_field`, `encryption_mode`, `canonical_frame bytea`, `frame_hash`, `normalizer_version`, `anchor_at`, `time_source`, `first_server_received_at`, `receipt_count`, `capture_device_ids bigint[]`, `decode_status` (`pending`, `decoded`, `failed`, `no_key`, `suspect_replay`, `needs_review`, `ambiguous`), `decode_error NULL`, `decoder_version NULL`
 
 - `PRIMARY KEY (id, partition_month)`
 - Telegramy neznámých měřidel se do této tabulky neukládají ([data-ingestion.md](data-ingestion.md)).
 - Řádek vznikne jen ze skutečného wM-Bus rámce. JSON, CSV ani odpověď API sem nepatří a fiktivní rámec se pro ně nevytváří.
 - `canonical_frame` je kanonická podoba po ověření CRC. Původní bajty obálky jsou v `ingest_payloads`, vyříznutý rámec na příjmu. Kanonická podoba původní data nenahrazuje.
+- `needs_review` a `ambiguous` rámec ukládají a do `decode_queue` ho nedávají. `ambiguous` se nepřipojí k staršímu telegramu se stejným `access_number` a `frame_hash`. Starší řádek se kvůli němu nemění. Osmibitové `access_number` se ve 60 dnech přetočí, takže shoda mimo `dedup_window` není důkaz stejného vysílání.
 
 ### `ingest_receipts` (měsíční partitions, 24 měsíců) — vrstva B
 
-`id` (sekvence), `partition_month`, `payload_id`, `payload_partition_month`, `item_index NULL`, `endpoint_id`, `device_id NULL`, `device_attribution` (`authenticated`, `mapped`, `unattributed`), `message_kind` (`raw_wmbus`, `decoded`, `event`, `heartbeat`, `import_row`), `msg_key`, `external_message_id NULL`, `transport` (`mqtt`, `https`, `udp_dtls`, `platform_api`, `file_import`), `server_received_at`, `device_rx_unix_ms NULL`, `rx_instance_id NULL`, `rx_boot NULL`, `rx_uptime_ms NULL`, `age_ms NULL`, `tx_at NULL`, `tx_uptime_ms NULL`, `captured_at_est`, `time_source` (`boot_epoch`, `device_clock`, `server_only`), `time_uncertainty_ms`, `time_flags text[]`, `rssi NULL`, `frame_format NULL`, `original_frame bytea NULL`, `fragment_set_id NULL`, `raw_telegram_id NULL`, `decoded_observation_id NULL`, `status`
+`id` (sekvence), `partition_month`, `server_received_at`, `payload_id`, `payload_partition_month`, `content_hash bytea NOT NULL`, `item_index NOT NULL`, `ingest_source_id NOT NULL → ingest_sources`, `endpoint_id`, `device_id NULL`, `device_attribution` (`authenticated`, `mapped`, `unattributed`), `message_kind` (`raw_wmbus`, `decoded`, `event`, `heartbeat`, `import_row`), `msg_key NULL`, `msg_key_namespace NULL`, `external_message_id NULL`, `transport` (`mqtt`, `https`, `udp_dtls`, `platform_api`, `file_import`), `device_rx_unix_ms NULL`, `rx_instance_id NULL`, `rx_boot NULL`, `rx_uptime_ms NULL`, `age_ms NULL`, `tx_at NULL`, `tx_uptime_ms NULL`, `captured_at_est`, `time_source` (`boot_epoch`, `device_clock`, `server_only`), `time_uncertainty_ms`, `time_flags text[]`, `rssi NULL`, `frame_format NULL`, `original_frame bytea NULL`, `fragment_set_id NULL`, `raw_telegram_id NULL`, `raw_partition_month NULL`, `decoded_observation_id NULL`, `decoded_partition_month NULL`, `status`
 
 - `PRIMARY KEY (id, partition_month)`
-- `FOREIGN KEY (payload_id, payload_partition_month) REFERENCES ingest_payloads (id, partition_month)`
-- `FOREIGN KEY (raw_telegram_id, partition_month) REFERENCES raw_telegrams (id, partition_month)`
-- `FOREIGN KEY (decoded_observation_id, partition_month) REFERENCES decoded_observations (id, partition_month)`
-- `status`: `new_telegram`, `duplicate`, `probable_duplicate`, `duplicate_delivery`, `suspect_replay`, `unknown_meter`, `unknown_device`, `crc_error`, `invalid`, `too_old`, `accepted`, `conflict`. Stavy ACK pro ESP se nemění. `new_telegram` na příjmu odpovídá ACK `accepted`.
-- `device_id` pochází z autentizace. NULL je jen u záznamu z Platform API, jehož vnitřní identifikátor koncentrátoru ještě není v `device_external_ids`. U známého měřidla se položka zpracuje a `status` zůstane stavem položky; v `time_flags` se nepřidává nic, attribution nese sloupec `device_attribution` (`authenticated`, `mapped`, `unattributed`). Neznámý koncentrátor u MQTT, HTTPS tokenu a DTLS nenastane, protože `device_id` je z autentizace povinné a tělo ho nepřepíše. Nové zařízení z těla zprávy nevznikne.
-- U příjmu bez telegramu je `raw_telegram_id NULL`. `partition_month` je měsíc `captured_at_est`, a když odhad není, měsíc `server_received_at`.
-- Opakované doručení stejného `(device_id, msg_key)` vloží další příjem `duplicate_delivery` do partition původního výsledku, zvýší `delivery_count` a nevloží telegram, pozorování ani odečet.
-- `original_frame` je vyříznutý wM-Bus rámec, bajtově shodný s polem v obálce. U dekódovaného JSON zůstane NULL. Obálka v `ingest_payloads` je záznam toho, co přišlo na transport. Rámec na příjmu je položka, nad kterou běží normalizace. Není to druhý datový model.
-- Údaje času od zařízení se ukládají, jen když je zdroj poslal. Chybějící `rx_uptime` u ACRIOS se nevymýšlí.
+- `partition_month` je první den měsíce `server_received_at` v UTC. `CHECK (payload_partition_month = partition_month)`.
+- `FOREIGN KEY (payload_id, payload_partition_month) REFERENCES ingest_payloads (id, partition_month)`. Payload tohoto doručení vznikl při tomto přijetí, takže oba řádky mají stejný měsíc a stejnou retenci.
+- Na `raw_telegrams` a `decoded_observations` cizí klíč není. `raw_telegram_id` s `raw_partition_month` a `decoded_observation_id` s `decoded_partition_month` jsou odkaz pořízený v okamžiku zápisu. Telegram z ledna smí být smazaný dřív než příjem z prosince. Cizí klíč by buď příjem smazal s lednovou partition, nebo by lednový telegram držel až do retence prosincového příjmu. Ani jedno neodpovídá retenci 24 měsíců od skutečného přijetí.
+- Příklad: telegram má kotvu v lednu 2027 a jeho partition se maže, když je leden 2027 starší než 24 měsíců. Další koncentrátor doručí svůj příjem v prosinci 2028. Příjem leží v partition prosince 2028 a maže se, až když je prosinec 2028 starší než 24 měsíců. Sloupce `raw_telegram_id` a `raw_partition_month` dál nesou lednovou identitu. Po smazání lednové partition se z nich řádek nenačte. To není porušený cizí klíč, protože cizí klíč tam není.
+- `status`: `new_telegram`, `duplicate`, `probable_duplicate`, `needs_review`, `duplicate_delivery`, `uncertain`, `id_collision`, `suspect_replay`, `unknown_meter`, `unknown_device`, `crc_error`, `invalid`, `too_old`, `accepted`, `unresolved`, `conflict`. `duplicate` je jen potvrzená shoda uvnitř `dedup_window`. `duplicate_delivery` je jen prokázaný identifikátor zprávy. `uncertain` je stejný `content_hash` bez prokázané identity. `id_collision` je stejný text `msg_key` v jiném namespace téhož zdroje. Ani jeden z nich není tiché sloučení.
+- `ingest_source_id` je povinné. `device_id` je fyzická atribuce a smí být NULL. Tělo zprávy ho nepřepíše. Nové zařízení z těla nevznikne.
+- `content_hash` je `sha256` kanonického těla položky. Není to identifikátor zprávy ani primární klíč.
+- Identita doručení je `(id, partition_month)`. Identita prokázané položky je `(ingest_source_id, msg_key_namespace, msg_key, item_index)`. Bez prokázaného `msg_key` je položka totožná s tímto doručením a s řádkem pozorování, který z něj vznikl.
+- Prokázané opakované doručení vloží další příjem `duplicate_delivery` do měsíce svého `server_received_at`, zvýší `delivery_count` a nevloží telegram, pozorování ani odečet. Odkaz na původní výsledek jsou sloupce bez cizího klíče.
+- `original_frame` je vyříznutý wM-Bus rámec. U dekódovaného JSON zůstane NULL. Chybějící rámec se nevytváří.
+- Údaje času od zařízení se ukládají, jen když je zdroj poslal. Chybějící `rx_uptime` se nevymýšlí.
+- `device_attribution` je `authenticated` z účtu zařízení, `mapped` přes `device_external_ids`, nebo `unattributed`, když platforma pošle identifikátor, který v evidenci není. Poslední případ zařízení nezaloží.
 
-### `ingest_fragment_sets` (měsíční partitions, 24 měsíců)
+### `ingest_dedup_candidates` (měsíční partitions, 24 měsíců)
 
-`id` (sekvence), `partition_month`, `device_id`, `endpoint_id`, `group_key`, `expected_count NULL`, `received_count`, `status` (`collecting`, `complete`, `timed_out`, `conflict`, `rejected`), `first_received_at`, `deadline_at`, `assembled_payload_id NULL`, `assembled_payload_partition_month NULL`
+`receipt_id`, `receipt_partition_month`, `candidate_raw_telegram_id`, `candidate_partition_month`
 
-- `PRIMARY KEY (id, partition_month)`
-- `UNIQUE (device_id, group_key, partition_month)` drží jednu sadu. Fragment s klíčem už uzavřené sady se k ní nepřipojí a novou sadu ve stejném měsíci nezaloží: je to odmítnutí, ne sloučení dvou zpráv. Dokud PoC neukáže, jestli zařízení identifikátor znovu používá, adaptér klíč neprodlužuje o domyšlenou předponu.
-- `partition_month` se bere z prvního fragmentu a další fragmenty téže sady ho používají i přes půlnoc měsíce.
-- `deadline_at` je `first_received_at + INGEST_FRAGMENT_TIMEOUT`. Délka timeoutu se doplní podle PoC. Do té doby je sloupec připravený a žádný model se nepředpokládá.
-- `FOREIGN KEY (assembled_payload_id, assembled_payload_partition_month) REFERENCES ingest_payloads (id, partition_month)` se vyplní jen při `status = complete`.
+- `PRIMARY KEY (receipt_id, receipt_partition_month, candidate_raw_telegram_id, candidate_partition_month)`
+- `FOREIGN KEY (receipt_id, receipt_partition_month) REFERENCES ingest_receipts (id, partition_month)`
+- Na `raw_telegrams` cizí klíč není. Kandidát smí ležet v jiném měsíci a retence staršího telegramu nečeká na nevyřešenou shodu.
+- Řádek znamená jen podobnost uloženého rámce s dřívějším telegramem. Kandidáta nepřepisuje, jeho `receipt_count` nezvedá a odečet nezakládá. Maže se s příjmem.
 
-### `ingest_fragments` (měsíční partitions, 24 měsíců)
+### `ingest_fragment_sets` (bez partitioningu, mazání 24 měsíců od `first_received_at`)
 
-`id` (sekvence), `partition_month`, `fragment_set_id`, `fragment_index int`, `payload_id`, `payload_partition_month`, `content_hash bytea`, `received_at`, `delivery_count`
+`id`, `ingest_source_id NOT NULL → ingest_sources`, `endpoint_id`, `group_key`, `message_ref NULL`, `expected_count NULL`, `received_count`, `status` (`collecting`, `complete`, `timed_out`, `conflict`, `rejected`, `isolated`), `first_received_at`, `deadline_at`, `assembled_payload_id NULL`, `assembled_payload_partition_month NULL`
 
-- `PRIMARY KEY (id, partition_month)`
-- `UNIQUE (fragment_set_id, partition_month, fragment_index)`
-- `FOREIGN KEY (fragment_set_id, partition_month) REFERENCES ingest_fragment_sets (id, partition_month)`
-- `FOREIGN KEY (payload_id, payload_partition_month) REFERENCES ingest_payloads (id, partition_month)`
-- Stejný index a stejný `content_hash` jen zvýší `delivery_count`. Jiný hash při stejném indexu přepne sadu na `conflict`.
-- Fragment není příjem odečtu a není vstup dekodéru. Vstupem je až složený payload kompletní sady, a ten projde obyčejnou cestou `ingest_receipts`.
+- `PRIMARY KEY (id)`. `id` je identita jednoho pokusu o složení. `group_key` jí není.
+- `group_key` posílá zdroj. Jak dlouho ho neopakuje, PoC neví. Návrh ho proto nepovažuje za globálně jedinečný, ani za jedinečný v měsíci nebo po dobu života zařízení. Adaptér k němu nepřidává vymyšlenou předponu.
+- `message_ref` je identifikátor celé zprávy, jen když je prokázané, že se během skládání neopakuje a je na každém fragmentu. Bez toho zůstane NULL. `group_key` se za `message_ref` nedosazuje.
+- `CREATE UNIQUE INDEX ON ingest_fragment_sets (ingest_source_id, message_ref) WHERE status = 'collecting' AND message_ref IS NOT NULL`
+- `CREATE UNIQUE INDEX ON ingest_fragment_sets (ingest_source_id, group_key) WHERE status = 'collecting' AND message_ref IS NULL`
+- Otevřená sada bez `message_ref` je nejvýš jedna. Druhá se nezaloží, jakmile pro stejný `(ingest_source_id, group_key)` existuje sada `complete`, `timed_out`, `conflict` nebo `rejected`. Nový fragment je `isolated`.
+- Fragment se připojí jen ke `collecting` před `deadline_at` a jen když nese stejné prokázané `message_ref`, nebo když sada `message_ref` nemá a žádná starší sada tohoto `group_key` ještě neskončila. K `complete`, `timed_out`, `conflict`, `rejected` a `isolated` se nepřipojí.
+- `isolated` je vlastní sada jednoho fragmentu. Neskládá se, nepřijme další fragment a dekodér ji nedostane. Payload fragmentu zůstane.
+- `deadline_at` je `first_received_at + INGEST_FRAGMENT_TIMEOUT`. Číslo doplní PoC.
+- `FOREIGN KEY (assembled_payload_id, assembled_payload_partition_month) REFERENCES ingest_payloads (id, partition_month)` jen při `complete`. Měsíc složeného payloadu je měsíc složení.
+
+### `ingest_fragments` (bez partitioningu, mazání 24 měsíců od `received_at`)
+
+`id`, `fragment_set_id → ingest_fragment_sets`, `fragment_index int NOT NULL`, `payload_id`, `payload_partition_month`, `content_hash bytea NOT NULL`, `received_at`, `delivery_count`
+
+- `PRIMARY KEY (id)`
+- `UNIQUE (fragment_set_id, fragment_index)`. Pořadí patří jedné sadě. Stejný index v jiné sadě, třeba po opakovaném `group_key`, je jiný fragment.
+- `FOREIGN KEY (payload_id, payload_partition_month) REFERENCES ingest_payloads (id, partition_month)`. Payload zůstává v měsíční partition podle `received_at`.
+- Stejný `fragment_index` a stejný `content_hash` v otevřené sadě, ke které fragment patří, jen zvýší `delivery_count`. To je opakované doručení fragmentu, ne nová zpráva.
+- Jiný `content_hash` na stejném indexu otevřené sady přepne sadu na `conflict`. Dekodér se nevolá a chybějící kus se nulami nedoplní.
+- Fragment, který k otevřené sadě nepatří, se do ní nevloží. Dostane vlastní sadu `isolated`. Shoda `group_key` nebo `content_hash` ho k cizí sadě nepřipojí.
+- Fragment není odečet. Dekodér dostane až složený payload sady `complete`.
 
 ### `ingest_rejections` (měsíční partitions, 24 měsíců)
 
-`id` (sekvence), `partition_month`, `received_at`, `endpoint_id NULL`, `device_id NULL`, `transport`, `reason` (`auth_failed`, `payload_too_large`, `replay`, `stale`, `fragment_timeout`, `fragment_conflict`, `fragment_unidentified`, `unparseable`, `endpoint_disabled`, `rate_limited`), `payload_id NULL`, `payload_partition_month NULL`, `fragment_set_id NULL`, `fragment_set_partition_month NULL`, `detail jsonb`
+`id` (sekvence), `partition_month`, `received_at`, `ingest_source_id NULL`, `endpoint_id NULL`, `device_id NULL`, `transport`, `reason` (`auth_failed`, `payload_too_large`, `replay`, `stale`, `fragment_timeout`, `fragment_conflict`, `fragment_unidentified`, `unparseable`, `endpoint_disabled`, `rate_limited`), `payload_id NULL`, `payload_partition_month NULL`, `fragment_set_id NULL`, `detail jsonb`
 
 - `PRIMARY KEY (id, partition_month)`
 - `partition_month` je měsíc `received_at`.
@@ -383,13 +426,19 @@ CREATE INDEX ON telegram_dedup_keys (meter_key, access_number, frame_hash);
 
 ### `decoded_observations` (měsíční partitions, 24 měsíců)
 
-`id` (sekvence), `partition_month`, `device_id NULL`, `msg_key`, `source_stream_id`, `external_meter_ref`, `meter_id NULL`, `source_measured_at`, `source_time_kind` (`meter_clock`, `concentrator_rx`, `platform_time`, `unknown`), `server_received_at`, `access_number NULL`, `values jsonb`, `vendor_payload jsonb NULL`, `payload_id`, `payload_partition_month`, `adapter`, `adapter_version`, `status` (`accepted`, `duplicate`, `conflict`, `unknown_meter`, `invalid`)
+`id` (sekvence), `partition_month`, `ingest_source_id NOT NULL`, `msg_key NULL`, `msg_key_namespace NULL`, `item_index NOT NULL`, `content_hash bytea NOT NULL`, `device_id NULL`, `source_stream_id`, `external_meter_ref`, `meter_id NULL`, `source_measured_at`, `source_time_kind` (`meter_clock`, `concentrator_rx`, `platform_time`, `unknown`), `server_received_at`, `access_number NULL`, `measurement_ref NULL`, `values jsonb`, `vendor_payload jsonb NULL`, `payload_id`, `payload_partition_month`, `adapter`, `adapter_version`, `status` (`accepted`, `unresolved`, `conflict`, `uncertain`, `unknown_meter`, `invalid`)
 
 - `PRIMARY KEY (id, partition_month)`
+- `partition_month` je měsíc `server_received_at`. `CHECK (payload_partition_month = partition_month)`.
 - `FOREIGN KEY (payload_id, payload_partition_month) REFERENCES ingest_payloads (id, partition_month)`
-- `vendor_payload` je původní JSON položky, když je obálka dávka a položka není celá obálka. Když je obálka právě ta položka, stačí `payload_id` a `vendor_payload` zůstane NULL. V obou případech je původní text uložený. Rámec se kvůli tomu nevytváří.
-- `source_time_kind = platform_time` znamená čas, o kterém adaptér ví jen to, že ho přidala platforma. PoC teprve ukáže, jestli ACRIOS takový čas posílá. Do odečtu se pak dostane s `time_basis = source_time` a do spotřeby jako hraniční hodnota se nepoužije, stejně jako `time_unknown`.
-- `device_id` může být NULL jen u nepřirazeného záznamu z platformy, viz `ingest_receipts`.
+- Prokázaná zpráva je `(ingest_source_id, msg_key_namespace, msg_key)`. Prokázaná položka je tatáž trojice plus `item_index`. Bez prokázaného `msg_key` je identita položky `id` tohoto pozorování. Čas měření, hodnota ani `content_hash` identita nejsou.
+- `content_hash` je `sha256` kanonického těla položky. Stejný hash druhé pozorování nesmaže a neoznačí jako `duplicate`.
+- `measurement_ref` se vyplní jen identifikátorem, který zdroj skutečně poslal. Unikátní index na něm není. PoC teprve ukáže, jestli ho ACRIOS má a v jakém rozsahu je jedinečný. Do té doby se podle něj neslučuje.
+- Nová položka vloží nové pozorování, i když `source_measured_at`, hodnota nebo `content_hash` už v databázi jsou. Pozorování se nepřepisuje a nemaže kvůli shodě ani kvůli `meter_readings_vendor_time_guard`.
+- `accepted` znamená, že z položky vznikl odečet. `unresolved` znamená stejný čas a stejnou hodnotu jako aktivní kumulativní odečet. `conflict` znamená stejný čas a jinou hodnotu. `uncertain` znamená stejný `content_hash` bez prokázané identity zprávy. Ani jeden stav není `duplicate` a původní pozorování nemaže.
+- `vendor_payload` je původní JSON položky, když obálka není právě ta položka. Jinak stačí `payload_id`. Rámec se kvůli tomu nevytváří.
+- `source_time_kind = platform_time` je čas, o kterém adaptér ví jen to, že ho přidala platforma. Jestli ho ACRIOS posílá, ukáže PoC. Do spotřeby jako hraniční hodnota se nepoužije.
+- `device_id` smí být NULL. `ingest_source_id` ne.
 
 ### `decode_queue` (bez partitioningu)
 
@@ -403,7 +452,7 @@ CREATE INDEX ON telegram_dedup_keys (meter_key, access_number, frame_hash);
 
 ### `meter_readings` (bez partitioningu, trvale)
 
-`id`, `meter_id`, `source_stream_id`, `source_key text NOT NULL`, `source_kind` (`radio`, `vendor_decoded`, `manual`, `correction`, `import`), `reading_kind` (`cumulative`, `interval`, `event`), `quality` (`valid`, `suspect`, `invalid`), `raw_telegram_id NULL`, `decoded_observation_id NULL`, `measured_at`, `time_basis` (`meter_clock`, `capture_estimate`, `source_time`, `manual`), `time_source`, `primary_value numeric(18,6) NULL`, `unit NULL`, `quantity NULL`, `values jsonb`, `status_flags text[]`, `decoder_version NULL`, `adapter NULL`, `adapter_version NULL`, `normalizer_version NULL`, `frame_hash NULL`, `receipt_count`, `capture_device_ids bigint[]`, `corrects_reading_id NULL → meter_readings`, `accepted_at NULL`, `accepted_by NULL`, `superseded_at NULL`, `created_at`, `created_by NULL`
+`id`, `meter_id`, `source_stream_id`, `source_key text NOT NULL`, `source_kind` (`radio`, `vendor_decoded`, `manual`, `correction`, `import`), `reading_kind` (`cumulative`, `interval`, `event`), `quality` (`valid`, `suspect`, `invalid`), `raw_telegram_id NULL`, `decoded_observation_id NULL`, `measured_at`, `time_basis` (`meter_clock`, `capture_estimate`, `source_time`, `manual`), `time_source`, `primary_value numeric(18,6) NULL`, `unit NULL`, `quantity NULL`, `values jsonb`, `status_flags text[]`, `decoder_version NULL`, `adapter NULL`, `adapter_version NULL`, `normalizer_version NULL`, `frame_hash NULL`, `access_number NULL`, `receipt_count`, `capture_device_ids bigint[]`, `corrects_reading_id NULL → meter_readings`, `accepted_at NULL`, `accepted_by NULL`, `superseded_at NULL`, `created_at`, `created_by NULL`
 
 Constrainty a indexy:
 
@@ -414,16 +463,23 @@ Constrainty a indexy:
   - `correction:<uuid>`
   - `import:<dávka>:<řádek>`
 - `CHECK (reading_kind <> 'cumulative' OR primary_value IS NOT NULL)`
-- `CREATE UNIQUE INDEX ON meter_readings (meter_id, source_stream_id, measured_at) WHERE source_kind = 'vendor_decoded' AND superseded_at IS NULL`
-  Index identifikuje měření časem zdroje uvnitř jednoho streamu. Stejná hodnota v jiném čase je jiný řádek. Stejná hodnota sama indexem není.
+- `CREATE UNIQUE INDEX meter_readings_vendor_time_guard ON meter_readings (meter_id, source_stream_id, measured_at) WHERE source_kind = 'vendor_decoded' AND reading_kind = 'cumulative' AND superseded_at IS NULL`
+  Index chrání jen aktivní kumulativní projekci: v jednom streamu není druhý bod ve stejném čase. Není to identita měření a není to důvod smazat pozorování. Insert odečtu, který na index narazí, se vrátí jen pro řádek `meter_readings`. `decoded_observations` už v téže transakci zůstane.
+- Postup dvou vendor payloadů se stejným `measured_at`:
+  1. Oba payloady a oba příjmy se uloží. Každý má vlastní `content_hash`.
+  2. Vloží se dvě pozorování. Druhé se nevloží příkazem `ON CONFLICT DO NOTHING` a první se neaktualizuje.
+  3. První položka smí založit odečet, když není `uncertain` ani `conflict`.
+  4. Druhá položka se stejnou hodnotou dostane `unresolved`. S jinou hodnotou dostane `conflict`. Se stejným hashem a bez prokázaného identifikátoru zprávy dostane `uncertain`, i když čas náhodou sedí.
+  5. Druhý odečet se nezaloží. Původní odečet se nepřepíše. Administrátor dostane upozornění.
+  6. Rozhodnutí administrátora je v auditu. Potvrzení, že jde o jedno měření, pozorování nemaže. Potvrzení, že jde o dvě měření, smí první odečet označit `superseded_at` a z druhého pozorování vložit opravu. Dva aktivní kumulativní body ve stejném čase index dál nepustí. Obě pozorování zůstanou do své retence.
 - `(meter_id, measured_at)`, `(meter_id, source_stream_id, measured_at)`, BRIN na `measured_at`.
-- Trigger povolí `UPDATE` jen u `superseded_at`, `receipt_count`, `capture_device_ids`, `accepted_at` a `accepted_by`. Hodnota, čas, měřidlo, druh, kvalita, zdroj ani verze dekodéru se nemění.
-- `reading_kind = cumulative` je stav počítadla. `interval` je přírůstek za období dodaný zdrojem. `event` je událost bez kumulativní hodnoty (`primary_value` smí být NULL). Do spotřeby a do aktuálního stavu R15 vstupuje jen kumulativní primární hodnota.
-- `quality` se nastaví při vložení. `suspect` (pokles, průtok, neznámý čas) se do spotřeby nepočítá, dokud administrátor nevyplní `accepted_at`. `invalid` se nepřijme ani potom. Přijetí nemění hodnotu a zapisuje se do auditu.
+- Trigger povolí `UPDATE` jen u `superseded_at`, `receipt_count`, `capture_device_ids`, `accepted_at` a `accepted_by`. Hodnota, čas, měřidlo, druh, kvalita, zdroj ani verze dekodéru se nemění. `receipt_count` a `capture_device_ids` se mění jen u potvrzeného dalšího příjmu (`duplicate` uvnitř okna nebo `duplicate_delivery`), ne u `probable_duplicate`.
+- `reading_kind = cumulative` je stav počítadla. `interval` je přírůstek za období dodaný zdrojem. `event` je událost bez kumulativní hodnoty (`primary_value` smí být NULL). Do spotřeby vstupuje jen kumulativní primární hodnota. R15 dál ukazuje poslední takovou hodnotu přiřazeného streamu. Odečet, který nevznikl, ji nemění.
+- `quality` se nastaví při vložení. `suspect` se do spotřeby nepočítá, dokud administrátor nevyplní `accepted_at`. `invalid` se nepřijme ani potom. Přijetí nemění hodnotu a zapisuje se do auditu.
 - `values` nese další registry téže zprávy, každý s `quantity`, `kind`, `value`, `unit` a `quality`. Nejsou to další řádky `meter_readings` a do spotřeby samy nevstupují.
 - `quantity` je veličina primární hodnoty (objem, energie, jednotky poměrového měřiče a další až podle měřidla).
-- Na `raw_telegrams`, `decoded_observations` ani `ingest_payloads` není cizí klíč. `frame_hash`, verze dekodéru, adaptéru a normalizátoru, `receipt_count` a `capture_device_ids` uchovají původ odečtu i po smazání příjmu a payloadu. Vazba za života dat je `source_key` → telegram nebo pozorování → `ingest_receipts` → `ingest_payloads`.
-- `adapter` a `adapter_version` jsou verze, která uloženou hodnotu vytvořila. Opětovné dekódování je popsané v [data-ingestion.md](data-ingestion.md).
+- `capture_device_ids` jsou jen fyzická zařízení. U importu a u platformy bez namapovaného koncentrátoru je pole prázdné. Není to úplná provenience.
+- Na `raw_telegrams`, `decoded_observations` ani `ingest_payloads` není cizí klíč. Trvalý původ odečtu je řádek `reading_provenance` spolu s `frame_hash`, verzemi, `receipt_count` a `capture_device_ids`. Detailní příjmy a payloady mají retenci a po jejich smazání se nedají zrekonstruovat.
 
 ### Opravy
 
@@ -433,6 +489,19 @@ Postup v jedné transakci:
 2. původní řádek dostane `superseded_at`,
 3. `audit_logs` dostane starou a novou hodnotu a povinný důvod,
 4. naplánuje se přepočet dotčených dnů.
+
+### `reading_provenance` (bez partitioningu, trvale)
+
+`reading_id PK → meter_readings`, `ingest_source_id NOT NULL → ingest_sources`, `message_id NULL`, `msg_key_namespace NULL`, `item_index NULL`, `content_hash bytea NOT NULL`, `transport`, `endpoint_code`, `first_server_received_at`, `confirmed_source_ids bigint[]`
+
+- Jeden řádek na odečet. Není to kopie příjmu ani payloadu.
+- Rozsah je zdroj, který odečet založil: `ingest_source_id`, prokázané `message_id` (jinak NULL), `item_index`, `transport`, kód koncového bodu v době zápisu a `first_server_received_at`. `content_hash` je hash těla, které odečet založilo. Není to identita zprávy a není to cizí klíč.
+- `confirmed_source_ids` je souhrn dalších `ingest_sources`, jejichž příjem byl potvrzená duplicita (`duplicate` uvnitř okna nebo `duplicate_delivery` prokázaného identifikátoru). `uncertain`, `id_collision`, `probable_duplicate`, `conflict`, `unresolved` a izolovaný fragment se do pole nepřidají. Není to seznam všech přijímačů, které poslaly podobný obsah.
+- Fyzická zařízení potvrzených příjmů zůstávají v `meter_readings.capture_device_ids`. Verze, `frame_hash`, `access_number` a `receipt_count` zůstávají na odečtu.
+- Sloupce neobsahují `receipt_id`, `payload_id`, `raw_telegram_id` ani `decoded_observation_id`. Po retenci by to byly odkazy na smazané řádky. Cizí klíče vedou jen na `meter_readings` a `ingest_sources`, které se nemažou. `endpoint_code` je textový snímek, ne cizí klíč.
+- `receipt_count` je počet potvrzených příjmů. Není to seznam časů doručení. Po retenci se jednotlivé časy a bajty nedají obnovit.
+- `probable_duplicate`, `needs_review` a `uncertain` odečet nezaloží, takže sem řádek nedostanou. Jejich detail zůstane v příjmu a payloadu po dobu jejich vlastní retence.
+- Ruční odečet a oprava mají `message_id` rovné `source_key`. Import má `transport = file_import`. Ruční zápis a oprava mají `transport = manual`.
 
 ### `meter_daily_values` (bez partitioningu, trvale)
 
@@ -478,10 +547,13 @@ Postup v jedné transakci:
 
 | Data | Retence | Způsob |
 | --- | --- | --- |
-| `meter_readings`, `meter_daily_values` | trvale | nemažou se |
+| `meter_readings`, `meter_daily_values`, `reading_provenance`, `ingest_sources` | trvale | nemažou se |
 | `audit_logs` | dlouhodobě | nemažou se |
-| `ingest_payloads`, `ingest_receipts`, `ingest_fragments`, `ingest_fragment_sets`, `ingest_rejections`, `raw_telegrams`, `decoded_observations` | 24 měsíců | odpojení a smazání partition |
-| `device_events` | 12 měsíců | odpojení a smazání partition |
+| `ingest_payloads`, `ingest_receipts`, `ingest_dedup_candidates`, `ingest_rejections`, `decoded_observations` | 24 měsíců stáří měsíce přijetí (`received_at` nebo `server_received_at`) | odpojení a smazání partition |
+| `raw_telegrams` | 24 měsíců stáří měsíce kotvy | odpojení a smazání partition. Pozdější příjem tuto dobu neprodlužuje |
+| `ingest_fragment_sets` | 24 měsíců od `first_received_at` | `DELETE` |
+| `ingest_fragments` | 24 měsíců od `received_at` | `DELETE` |
+| `device_events` | 12 měsíců stáří `partition_month` | odpojení a smazání partition |
 | `ingest_message_keys`, `telegram_dedup_keys`, `device_boots` | 60 dní | `DELETE` v dávkách |
 | `device_external_ids`, `device_firmware_history`, `device_placements`, `device_capabilities` | trvale s historií | řádky se neuzavírají mazáním, jen `valid_to` |
 | `unknown_meter_sightings` | 90 dní od posledního zachycení | `DELETE` |
@@ -490,14 +562,16 @@ Postup v jedné transakci:
 Pořadí v `maintenance.sh` pro měsíc M starší než 24 měsíců:
 
 1. Kontrola, že v `decode_queue` neexistuje řádek s `raw_partition_month = M`. Pokud existuje, retence měsíce M se odloží a vznikne alarm. Cizí klíč by mazání stejně zablokoval.
-2. Kontrola, že každý telegram z M ve stavu `decoded` má odečet `raw:<id>`. Chybějící odečet znamená alarm a odklad.
-3. Kontrola, že na payloady měsíce M neodkazuje příjem, fragment, sada, odmítnutí ani pozorování z jiného měsíce. Údržba mazává od nejstaršího měsíce a stáří zprávy je nejvýš 30 dní, takže odkaz může vést jen z M−1 a ten už je smazaný. Jinak se měsíc odloží.
-4. `ALTER TABLE … DETACH PARTITION … CONCURRENTLY` a `DROP` v tomto pořadí: `ingest_receipts_<M>`, `ingest_fragments_<M>`, `ingest_fragment_sets_<M>`, `ingest_rejections_<M>`, `decoded_observations_<M>`, `ingest_payloads_<M>`, `raw_telegrams_<M>`. Příjmy odkazují na telegramy, pozorování i payloady. Pozorování odkazují na payloady. Fragmenty odkazují na sady a payloady, sady na složený payload.
-5. Záznam do `audit_logs` (actor `system`): měsíc, tabulka, počet řádků.
+2. Kontrola, že každý telegram z M ve stavu `decoded` má odečet `raw:<id>`. Chybějící odečet znamená alarm a odklad. Stavy `needs_review`, `ambiguous`, `pending`, `failed`, `no_key` a `suspect_replay` odečet mít nemusí a retenci neblokují.
+3. Kontrola, že na payloady měsíce M neodkazuje příjem, pozorování, fragment, sada ani odmítnutí. U příjmu a pozorování je měsíc payloadu stejný jako měsíc řádku, takže odkaz z jiné partition nevzniká. Jinak se měsíc odloží.
+4. `ALTER TABLE … DETACH PARTITION … CONCURRENTLY` a `DROP` v tomto pořadí: `ingest_dedup_candidates_<M>`, `ingest_receipts_<M>`, `ingest_rejections_<M>`, `decoded_observations_<M>`.
+5. `DELETE` sad, jejichž `assembled_payload_partition_month = M` nebo jejichž `first_received_at` spadá do M a složený payload nemají, a `DELETE` fragmentů s `received_at` v M. Sada se smaže až když na ni fragment neukazuje. Fragment ukazuje na payload téhož měsíce.
+6. `DROP` partition `ingest_payloads_<M>` a potom `raw_telegrams_<M>`. Příjem z pozdějšího měsíce na telegram cizí klíč nemá, takže lednový telegram nečeká na prosincový příjem.
+7. Záznam do `audit_logs` (actor `system`): měsíc, tabulka, počet řádků.
 
-Smazání nemůže poškodit odečty, protože `meter_readings` nemají cizí klíče na mazané tabulky a jejich `source_key` zůstává unikátní (sekvence se neopakují).
+Smazání nemůže poškodit odečty, protože `meter_readings` a `reading_provenance` nemají cizí klíče na mazané tabulky. `source_key` zůstává unikátní, protože se sekvence neopakují. Po smazání zůstane souhrn původu na odečtu a v `reading_provenance`. Bajty, jednotlivé časy doručení a kandidáti podobnosti zmizí. Telegram ve stavu `ambiguous`, `needs_review` nebo `suspect_replay`, který se do odečtu neuvolnil, trvalý řádek nemá a s partition zmizí. Retence se kvůli němu neprodlužuje a do spotřeby se dodatečně nedostane.
 
-Partitions se zakládají předem pro aktuální a 3 následující měsíce. DEFAULT partition se nepoužívá. `partition_month` vychází z času ověřeného ingestem, takže hodnota mimo existující partitions je chyba, která se má projevit.
+Partitions se zakládají předem pro aktuální a 3 následující měsíce. DEFAULT partition se nepoužívá. `partition_month` payloadu, příjmu, kandidáta a pozorování je měsíc přijetí. U telegramu je to měsíc kotvy. Hodnota mimo existující partitions je chyba, která se má projevit.
 
 ## Odhad objemu
 
@@ -516,8 +590,8 @@ Před fází 4 se dosadí skutečné hodnoty. Kdyby trvalé uchování všech od
 | --- | --- |
 | `sjv_bootstrap` | superuser z image. Používá jen `deploy.sh` |
 | `sjv_owner` | vlastník schématu. Používá jen Alembic |
-| `sjv_api` | čtení. Zápis kmenových dat, členství, instalací, přiřazení zdrojů, externích identifikátorů, schopností, umístění, firmwaru z administrace, koncových bodů, ručních odečtů a oprav. INSERT do auditu a notifikací. `endpoint_credentials` smí vkládat a odvolávat. `secret_enc` nečte |
-| `sjv_collector` | zápis do ingest tabulek včetně payloadů, fragmentů a odmítnutí, `device_boots`, `unknown_meter_sightings`, `device_events`, pozorované schopnosti a firmware z heartbeatu, aktualizace `devices.last_seen_at`. Zařízení nezakládá a `secret_enc` nečte |
+| `sjv_api` | čtení. Zápis kmenových dat, členství, instalací, přiřazení zdrojů, externích identifikátorů, schopností, umístění, firmwaru z administrace, koncových bodů, `ingest_sources` pro import, ručních odečtů a oprav. INSERT do auditu a notifikací. `endpoint_credentials` smí vkládat a odvolávat. `secret_enc` nečte |
+| `sjv_collector` | zápis do ingest tabulek včetně payloadů, fragmentů, kandidátů deduplikace a odmítnutí, `ingest_sources` pro nově ověřené zařízení, `device_boots`, `unknown_meter_sightings`, `device_events`, pozorované schopnosti a firmware z heartbeatu, aktualizace `devices.last_seen_at`. Zařízení nezakládá a `secret_enc` nečte |
 | `sjv_worker` | `decode_queue`, timeout fragmentů, INSERT `meter_readings`, `notifications`, agregace. Odchozí token platformy dešifruje jen v paměti, stejně jako klíč AES |
 | `sjv_maintenance` | partitions, retence, přepočty, INSERT auditu |
 | `sjv_readonly` | jen čtení, pro `restore-test.sh` a `backup-verify.sh` |

@@ -63,8 +63,11 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
   - `source_streams` včetně `import` a `vendor:acrios` jako řádku katalogu, ne jako vlastní tabulky,
   - `devices` s neměnným `id`, `device_external_ids`, `device_firmware_history`, `device_placements`, `device_capabilities`,
   - `device_boots`, `ingest_endpoints`, `endpoint_credentials`,
-  - ingest: partitions, `ingest_payloads`, `ingest_receipts`, `ingest_fragments`, `ingest_fragment_sets`, `ingest_rejections`, `ingest_message_keys`, `telegram_dedup_keys`, `unknown_meter_sightings`, `decode_queue` s cizím klíčem,
-  - `meter_readings` s `reading_kind`, `quality`, `source_key` a triggerem proti změnám, `meter_daily_values`,
+  - `ingest_sources` a `reading_provenance` bez partitioningu,
+  - ingest: měsíční partitions `ingest_payloads`, `ingest_receipts`, `ingest_dedup_candidates`, `ingest_rejections`, `raw_telegrams`, `decoded_observations`,
+  - `ingest_fragment_sets` a `ingest_fragments` bez partitioningu,
+  - `ingest_message_keys` s `PRIMARY KEY (ingest_source_id, msg_key_namespace, msg_key)` jen pro prokázaný identifikátor, `telegram_dedup_keys`, `unknown_meter_sightings`, `decode_queue` s cizím klíčem,
+  - `meter_readings` s `reading_kind`, `quality`, `source_key`, indexem `meter_readings_vendor_time_guard` a triggerem proti změnám, `meter_daily_values`,
   - `notifications`, audit s hash řetězcem.
 - `maintenance.sh`: zakládání partitions, retence v daném pořadí s kontrolami, mazání klíčů po 60 dnech.
 - Odhad objemu podle skutečného počtu měřidel a intervalů. Objem payloadů ACRIOS se neodhaduje, dokud není vzorek z PoC.
@@ -74,7 +77,10 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
   - testy constraintů projdou (překryv členství, instalací a přiřazení, změna odečtu, zápis do auditu),
   - výměna IMSI ponechá `device_id` a uzavře starý externí identifikátor,
   - v katalogu tabulek není evidence odečtů pojmenovaná podle transportu nebo výrobce,
-  - test retence na umělých datech: partitions se smažou v pořadí příjem, fragmenty, payload, telegram, odečty zůstanou beze změny, retence se odloží při čekajícím dekódování.
+  - stejný `msg_key` dvou `ingest_source_id` jsou dva klíče,
+  - `server_only` se shodou do 60 dní nepřipojí příjem ke staršímu telegramu a odečet nezaloží,
+  - stejný `group_key` po `timed_out` fragment izoluje a k nové sadě ho nepřipojí,
+  - test retence na umělých datech: nejdřív kandidáti a příjmy měsíce přijetí, potom sady a fragmenty `DELETE`, potom payload a telegram. Odečet a `reading_provenance` zůstanou a neobsahují cizí klíč na smazaný příjem. Retence se odloží při čekajícím dekódování. `needs_review` bez odečtu ji neblokuje. Příjem z prosince 2028 odkazující na telegram z ledna 2027 se nemaže s lednovou partition.
 
 ### 5. Ingest, čas a deduplikace
 
@@ -132,8 +138,9 @@ Před fází 12 musí být zapsané:
 - které z transportů MQTT, UDP/DTLS, HTTPS a Platform API tento kus skutečně má,
 - topics nebo tvar API, až jsou pozorované,
 - ukázky surového payloadu a ukázky dekódovaného payloadu, pokud je zařízení posílá,
-- jestli a jak fragmentuje (identifikátor celé zprávy, pořadí, počet, opakování, timeout),
-- jak vypadá opakované doručení a jestli zpráva nese vlastní identifikátor,
+- jestli a jak fragmentuje (identifikátor celé zprávy, pořadí, počet, opakování, timeout, jestli se identifikátor po uzavření použije znovu a v jakém rozsahu je jedinečný),
+- jak vypadá opakované doručení a jestli zpráva nese vlastní identifikátor, který se během 60 dní neopakuje,
+- jaká je přesnost času dekódované hodnoty,
 - jaká autentizace je dostupná (heslo, certifikát, PSK, token platformy). Metoda se v PoC vybírá podle zařízení, ne dopředu,
 - jestli jde přijímat data přímým spojením bez ACRIOS Platform.
 

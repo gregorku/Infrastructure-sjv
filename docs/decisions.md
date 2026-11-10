@@ -1,6 +1,6 @@
 # Rozhodnutí
 
-Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19). R15 zůstává schválené a beze změny. Schválení dokumentace neznamená souhlas s nasazením.
+Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24) a třetí kolo (25–30). R15 zůstává schválené a beze změny. Schválení dokumentace neznamená souhlas s nasazením.
 
 ## Potvrzená rozhodnutí
 
@@ -25,20 +25,33 @@ Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11
 | 17 | `devices.id` je neměnné a měřidlo nepatří koncentrátoru | IMSI a IMEI jsou externí identifikátory s historií. Výměna SIM nezakládá nové zařízení ani novou historii |
 | 18 | Deduplikace raw telegramů zůstává a rozšiřuje se na pět případů příjmu | Stejná naměřená hodnota sama o sobě zprávy neslučuje. Neúplná fragmentovaná zpráva se dekodéru nepředává |
 | 19 | Schéma je nezávislé na ACRIOS PoC | PoC je podmínka adaptéru daného zařízení, ne podmínka tabulek. Stejná brána platí pro dalšího výrobce |
+| 20 | Idempotence prokázané zprávy je `(ingest_source_id, msg_key_namespace, msg_key)` | Fyzické zařízení a příjmový zdroj jsou různé identity. Hash těla klíčem není. Upřesnění je v rozhodnutí 25 a 29 |
+| 21 | Shoda rámce mimo důvěryhodné okno není potvrzená duplicita | `server_only` uloží vlastní telegram a odečet nezaloží. Bitově shodný rámec po přetočení `access_number` za 60 dní se ke staršímu nepřipojí |
+| 22 | Čas ani hodnota dekódované položky nejsou identita měření | Nové pozorování zůstane. Druhý aktivní kumulativní odečet ve stejném čase nevznikne. Původní odečet se nepřepíše |
+| 23 | Trvalá provenience odečtu je souhrn, ne kopie příjmu | `reading_provenance` plus verze, `frame_hash`, `receipt_count` a `capture_device_ids`. Payload a jednotlivé příjmy mají retenci. Rozsah upřesňuje rozhodnutí 28 |
+| 24 | `group_key` není globálně jedinečné | Po ukončení sady se fragment bez prokázaného `message_ref` izoluje. K nové sadě se nepřipojí. Upřesnění je v rozhodnutí 26 a 27 |
+| 25 | Hash obsahu není identita zprávy | Stejný obsah bez prokázaného identifikátoru zůstane dvě pozorování se stavem `uncertain` |
+| 26 | Nejednoznačný fragment se izoluje | Opožděný fragment staré sady se nepřipojí k sadě se stejným `group_key` |
+| 27 | Retence příjmu je 24 měsíců od `server_received_at` | Příjem nemá cizí klíč na starší telegram. Odkaz je ve sloupcích |
+| 28 | Provenience neobsahuje id smazaných řádků | Nese zdroj, který odečet založil, a jen potvrzené další zdroje |
+| 29 | MQTT a HTTPS nesdílejí `msg_key`, dokud to kontrakt neprokáže | Výchozí `msg_key_scope = transport`. Stejný text na druhém transportu je `id_collision` |
+| 30 | `meter_readings_vendor_time_guard` chrání jen projekci | Konfliktní pozorování se vloží dřív než odečet a index je nesmaže |
 
 ## Retence
 
 | Data | Retence | Mechanismus |
 | --- | --- | --- |
-| Odečty (`meter_readings`) a denní hodnoty (`meter_daily_values`) | trvale | tabulky bez partitioningu, bez cizích klíčů na data s retencí |
-| Původní obálky (`ingest_payloads`), příjmy (`ingest_receipts`), fragmenty (`ingest_fragments`, `ingest_fragment_sets`), odmítnuté obálky (`ingest_rejections`), surové telegramy (`raw_telegrams`), dekódovaná pozorování (`decoded_observations`) | 24 měsíců | měsíční partitions, mazání celé partition. `ingest_receipts` nahrazuje dřívější `telegram_receipts` |
+| Odečty (`meter_readings`), denní hodnoty (`meter_daily_values`), souhrnná provenience (`reading_provenance`), příjmové zdroje (`ingest_sources`) | trvale | tabulky bez partitioningu. Odečty a provenience nemají cizí klíč na data s retencí |
+| Původní obálky (`ingest_payloads`), příjmy (`ingest_receipts`), kandidáti deduplikace (`ingest_dedup_candidates`), odmítnuté obálky (`ingest_rejections`), dekódovaná pozorování (`decoded_observations`) | 24 měsíců stáří měsíce přijetí | měsíční partitions. Příjem z prosince se nemaže s telegramem z ledna |
+| Surové telegramy (`raw_telegrams`) | 24 měsíců stáří měsíce kotvy | měsíční partitions. Pozdější příjem tuto dobu neprodlužuje a cizím klíčem ji nedrží |
+| Fragmentové sady (`ingest_fragment_sets`) a fragmenty (`ingest_fragments`) | 24 měsíců od `first_received_at` a od `received_at` | bez partitioningu, `DELETE`. Jedinečnost otevřené sady a `(fragment_set_id, fragment_index)` platí přes hranici měsíce |
 | Události zařízení (`device_events`) | 12 měsíců | měsíční partitions |
 | Audit (`audit_logs`) | dlouhodobě | bez partitioningu, hash řetězec, jen INSERT |
 | Klíče idempotence a deduplikace, epochy bootů | 60 dní | `DELETE` v dávkách. Delší než maximální stáří zprávy (30 dní) |
 | Neznámá měřidla (`unknown_meter_sightings`) | 90 dní od posledního zachycení | `DELETE` |
 | Pokusy o přihlášení, notifikace | 90 dní (návrh k potvrzení) | `DELETE` |
 
-Mazání respektuje vazby: nejdřív příjmy, fragmenty a odmítnutí, potom payloady, telegramy a pozorování. Retence se odloží, pokud v měsíci čekají telegramy na dekódování, dekódovanému telegramu chybí odečet, nebo na mazaný payload ještě odkazuje příjem. Pořadí je v [database-design.md](database-design.md#retence-a-vazby).
+Mazání respektuje vazby: nejdřív kandidáti, příjmy, odmítnutí a pozorování měsíce přijetí, potom sady a fragmenty, potom payloady a telegramy. Příjem na telegram cizí klíč nemá. Retence se odloží, pokud v měsíci čekají telegramy na dekódování, telegramu ve stavu `decoded` chybí odečet, nebo na mazaný payload ještě odkazuje řádek téhož měsíce. `needs_review` a `ambiguous` bez odečtu retenci neblokují. Pořadí je v [database-design.md](database-design.md#retence-a-vazby).
 
 Zálohy prodlužují faktickou dobu uložení. Roční snapshot restic drží data až 3 roky po jejich smazání z databáze. Patří to do záznamů o zpracování osobních údajů.
 
@@ -77,7 +90,32 @@ Rozhodnutí 15–19. Podrobnosti jsou v [architecture.md](architecture.md), [dat
 | 18 | Pět případů se eviduje odděleně: opakované doručení stejné zprávy, stejný telegram od více koncentrátorů, nový telegram se stejnou hodnotou, fragmenty jedné zprávy, opětovné dekódování novou verzí dekodéru. Každý příjem má záznam. Jeden skutečný odečet má jeden aktivní řádek `meter_readings`. |
 | 19 | Fáze ACRIOS PoC ověří konkrétní zařízení dřív, než vznikne jeho adaptér. Tabulky na výsledek PoC nečekají a neobsahují sloupce jednoho modelu. Další výrobce dostane vlastní PoC a stejný model. |
 
-R15 se tím nemění. Aktuální stav pro člena je dál poslední kumulativní stav přiřazeného streamu, označený jako celkový stav počítadla. Intervalové hodnoty a události ho nenahrazují.
+R15 se tím nemění. Aktuální stav pro člena je dál poslední kumulativní stav přiřazeného streamu, označený jako celkový stav počítadla. Intervalové hodnoty a události ho nenahrazují. Nevyřešený rámec (`ambiguous`, `needs_review`, `suspect_replay`) a nevyřešené pozorování (`unresolved`, `conflict`) odečet nezaloží, takže tuto hodnotu samy neposunou.
+
+## Doplnění 10. 11. 2026: druhé kolo kontroly příjmu
+
+Rozhodnutí 20–24. Chrání se tím příjem, který by se jinak ztratil nebo sloučil s jinou zprávou. Podrobnosti jsou v [database-design.md](database-design.md) a [data-ingestion.md](data-ingestion.md).
+
+| # | Proč tak a co by sloučení pokazilo |
+| --- | --- |
+| 20 | `PRIMARY KEY (device_id, msg_key)` neumí import a platformu bez zařízení, protože NULL v primárním klíči není. `ingest_sources.id` je identita zdroje a `devices.id` zůstává fyzická atribuce. Stejný `msg_key` dvou zdrojů jsou dvě zprávy. Věta, že se neprokázaný identifikátor nahradí hashem těla, se ruší rozhodnutím 25. Hash by sloučil dvě legitimní zprávy se stejným obsahem. |
+| 21 | Připojení bitově shodného rámce k telegramu z posledních 60 dní je širší než `dedup_window`. Osmibitové `access_number` se za těch 60 dní přetočí, takže shoda může být nové vysílání. Nový rámec se uloží zvlášť, kandidát se jen zaznamená a odečet nevznikne. Tím nevznikne falešná jistota a původní pozorování nezmizí. Spotřeba a R15 zůstanou na posledním důvěryhodném kumulativním odečtu. |
+| 22 | Unikátní index na čase by dvě položky se stejným hrubým časem smazal do jednoho měření. Pozorování se ukládá vždy. Index `meter_readings_vendor_time_guard` jen brání dvěma aktivním kumulativním bodům v jednom čase. Stejný čas se stejnou hodnotou je `unresolved`, jiná hodnota je `conflict`. Ani jedno není `duplicate` a původní odečet se nepřepíše. Postup, který pozorování opravdu zachová, je v rozhodnutí 30. |
+| 23 | `receipt_count`, `capture_device_ids` a verze neřeknou, který nepřiřazený zdroj a která položka odečet založily. `reading_provenance` to nese trvale, jeden řádek na odečet. Bajty a jednotlivé časy doručení se po 24 měsících neuchovávají podruhé. Rozsah souhrnu a zákaz odkazů na smazané řádky jsou v rozhodnutí 28. |
+| 24 | `UNIQUE (device_id, group_key, partition_month)` by po uzavření sady další zprávu zahodil. `group_key` není globálně jedinečné. Věta, že po uzavření vznikne nová sbírající sada, se ruší rozhodnutím 26: opožděný fragment by se k ní přilepil. Věta, že partition příjmu je měsíc cíle cizího klíče, se ruší rozhodnutím 27: prosincový příjem by se smazal s lednovým telegramem. |
+
+## Doplnění 10. 11. 2026: třetí kolo kontroly příjmu
+
+Rozhodnutí 25–30. Mění věty z 20 a 24, které pořád mohly sloučit nebo předčasně smazat původní data. R15, PostgreSQL jako jediný dlouhodobý zdroj pravdy a rozhodnutí 15–19 se nemění. Podrobnosti jsou v [database-design.md](database-design.md) a [data-ingestion.md](data-ingestion.md).
+
+| # | Proč tak a co by sloučení pokazilo |
+| --- | --- |
+| 25 | `sha256` těla nerozliší novou zprávu se stejným obsahem od opakovaného odeslání. Klíč se založí jen pro prokázaný identifikátor. Jinak zůstanou dvě doručení a dvě pozorování se stavem `uncertain` a druhý odečet nevznikne. |
+| 26 | Po `timed_out` sady s `group_key = G` by další fragment s `G` spadl do nové otevřené sady a smíchal dvě zprávy. Bez prokázaného `message_ref` se izoluje: payload zůstane, sada se nesloží a dekodér ji nedostane. `group_key` se nepovažuje za globálně jedinečné. |
+| 27 | Příjem z prosince 2028 uložený do lednové partition 2027 by se smazal asi měsíc po doručení. `partition_month` příjmu je měsíc `server_received_at`. Odkaz na telegram jsou sloupce bez cizího klíče, protože životnosti se liší. Po smazání telegramu se z odkazu řádek nenačte a cizí klíč se tím neporuší. |
+| 28 | Trvalá provenience říká, který zdroj odečet založil, a v `confirmed_source_ids` které další zdroje byly potvrzená duplicita. Nejistý, konfliktní a izolovaný příjem do souhrnu nepatří. Neukládají se `receipt_id`, `payload_id` ani id telegramu, protože po retenci by to byly odkazy na smazané řádky. |
+| 29 | Firmware ESP garantuje stejný `msg_key` při opakovaném odeslání záznamu fronty. Negarantuje jeden prostor pro MQTT a HTTPS. Výchozí `msg_key_scope = transport`. Stejný text na druhém transportu je `id_collision`, obě doručení zůstanou a `delivery_count` se mezi nimi nesčítá. |
+| 30 | Dva vendor payloady se stejným časem mohou být dvě měření. Oba se uloží jako pozorování dřív, než se zkouší odečet. Index smí odmítnout druhý aktivní kumulativní bod. Nesmí smazat druhé pozorování ani přepsat první odečet. Administrátor rozhodne auditem. Dva aktivní body ve stejném čase dál nevzniknou, takže R15 dál ukazuje jeden aktivní kumulativní stav. |
 
 Další upřesnění bez samostatného čísla:
 
@@ -101,7 +139,7 @@ Hodnoty, které nejsou známé, se nedoplňují odhadem.
 | Maximální stáří zprávy (návrh 30 dní) | fáze 5 |
 | Hardware ESP (čip, rádio, flash, konektivita, napájení) | firmware |
 | Vzorky telegramů, typy měřidel tepla, AES klíče | fáze 6 |
-| Dokumentace a vzorky konkrétního ACRIOS: model, revize hardwaru, firmware, skutečně dostupné transporty, topics nebo API, surové i dekódované payloady, fragmentace, opakované doručení, autentizace, přímé připojení bez ACRIOS Platform | fáze 11 (PoC). Neblokuje návrh tabulek ani fázi 4. Blokuje fázi 12 pro tento přístroj |
+| Dokumentace a vzorky konkrétního ACRIOS: model, revize hardwaru, firmware, skutečně dostupné transporty, topics nebo API, surové i dekódované payloady, fragmentace, jestli fragment nese identifikátor celé zprávy oddělený od `group_key`, rozsah jedinečnosti `group_key`, opakované doručení, rozsah jedinečnosti identifikátoru zprávy, jestli MQTT a HTTPS sdílejí jeden prostor identifikátorů, přesnost času, autentizace, přímé připojení bez ACRIOS Platform | fáze 11 (PoC). Neblokuje návrh tabulek ani fázi 4. Blokuje fázi 12 pro tento přístroj. Do výsledku se `msg_key`, hash těla ani `group_key` nepovažují za identitu zprávy |
 | Zda další model ACRIOS umí totéž co přístroj z PoC | nesmí se předpokládat. Každý model má vlastní záznam schopností a případně vlastní PoC |
 | Zda Platform API vrací stabilní identifikátor koncentrátoru přes výměnu SIM, jaký čas payload nese a zda dekódovaná data obsahují ACC nebo čas měřidla | mapování adaptéru ve fázi 12, ne tvar tabulek |
 | UDP/DTLS port a případný DNAT, pokud PoC přímý UDP potvrdí | samostatná změna mimo repozitář, až po PoC. Teď se port nepublikuje |
