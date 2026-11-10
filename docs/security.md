@@ -15,8 +15,11 @@
 | Útok na web a přihlášení | Traefik, CrowdSec, rate limit, argon2id, povinné MFA administrátora, blokace účtu |
 | Člen vidí cizí data | Kontrola na backendu podle členství a instalace, testy přístupu u každého endpointu |
 | Kompromitované zařízení | Účet a ACL pro každé zařízení, okamžité odvolání, klíče AES jen na serveru, kontroly věrohodnosti |
+| Cizí nebo sdílený účet koncentrátoru | Každý koncentrátor má vlastní `devices.id`. Účet platformy není identita koncentrátorů, které API vypisuje |
 | Podvržené odečty | Šifrovaná měřidla, monotónnost, maximální průtok, korelace více přijímačů, detekce replay |
-| Replay zpráv a telegramů | `msg_key` s `instance_id`, deduplikace, `suspect_replay`, limit stáří, TLS a autentizace ([data-ingestion.md](data-ingestion.md#replay)) |
+| Replay zpráv a telegramů | `msg_key` s `instance_id` u ESP, u ostatních identifikátor zprávy nebo hash těla, deduplikace, `suspect_replay`, limit stáří, TLS a autentizace ([data-ingestion.md](data-ingestion.md#replay)) |
+| Zaplnění disku velkým payloadem | `max_payload_bytes` na koncovém bodu, odmítnutí bez uložení těla |
+| Příjem dat použitý ke změně konfigurace zařízení | Oddělené účty a topic. Adaptér příjmu konfiguraci nezapisuje |
 | Chybné nebo podvržené časy zařízení | Čas zachycení počítá server z epochy bootu, hodiny zařízení jsou jen záložní zdroj, limity pro budoucnost a stáří |
 | Zdvojená spotřeba při změně zdroje | Jediný přiřazený stream, kontrolovaný a auditovaný přechod |
 | Únik databáze | DB jen na interní síti, AES a TOTP šifrované hlavním klíčem mimo DB |
@@ -68,7 +71,7 @@
 
   Zprávy, které po odvolání ještě dorazí přes HTTPS, se odmítnou.
 - **Rotace:** nové údaje se založí dřív, než se staré zruší. Obě sady platí po krátkou přechodnou dobu.
-- **TLS:** MQTT jen na 8883 s TLS ≥ 1.2. Listener 1883 je jen v interní síti. Klientské certifikáty (mTLS) lze doplnit později.
+- **TLS:** MQTT jen na 8883 s TLS ≥ 1.2. Listener 1883 je jen v interní síti. U vlastního ESP je autentizace jméno a heslo. Další metody řeší část [Koncentrátory a příjem](#koncentrátory-a-příjem).
 - **Kompromitace zařízení** (postup v provozní dokumentaci):
   1. odvolat,
   2. zkontrolovat odečty, které zařízení samo doručilo v podezřelém období,
@@ -78,6 +81,21 @@
 - **Věrohodnost odečtů:** pokles kumulativní hodnoty, překročení maximálního průtoku, odečet potvrzený jen jedním zařízením, ačkoli jiná zařízení stejné měřidlo pravidelně přijímají. Všechno se označí pro administrátora a do spotřeby se nepromítne bez potvrzení.
 - **Čas a replay:** zařízení nemůže posunout čas odečtu libovolně. Čas zachycení počítá server z vlastních časů příjmu heartbeatů. Hodiny zařízení se ignorují, když jsou v budoucnosti, a rozpor se hlásí. Opakovaný obsah mimo okno deduplikace se neuloží jako odečet (`suspect_replay`). Kompromitované zařízení s platnými údaji může poslat smyšlený rámec nešifrovaného měřidla. Proti tomu pomáhá jen šifrování měřidel a korelace s jinými přijímači.
 - **Přechod zdroje odečtů** smí provést jen `admin`, s povinným důvodem a auditem hraničních hodnot. Neúspěšné kontroly vyžadují výslovné potvrzení.
+
+## Koncentrátory a příjem
+
+Platí pro ACRIOS a pro každý další koncentrátor. Metoda autentizace se vybere podle modelu, který ověří PoC. Do té doby jsou připravené možnosti a žádná není prohlášená za jedinou. Vlastní ESP dál používá jméno a heslo MQTT. To není volba pro ACRIOS.
+
+- **Vlastní identita.** Každý koncentrátor je řádek `devices` s vlastními údaji. Sdílený účet platformy je `endpoint_credentials` a není `device_id` koncentrátorů, které platforma vypisuje. Koncentrátor se k řádku přiřadí jen přes známé `device_external_ids`. IMSI a IMEI nejsou primární klíč. Výměna SIM historii zařízení nepřetrhne.
+- **TLS.** MQTT a HTTPS jen TLS 1.2 nebo novější. UDP jen se šifrováním (DTLS), a jen když PoC ukáže, že ho vybraný model má. Otevřený UDP se nezapíná. Port pro UDP se nezakládá v této dokumentační změně.
+- **Klientské certifikáty a další metody.** Připravené druhy jsou heslo MQTT, token HTTPS, klientský certifikát a PSK pro DTLS (`device_credentials`) a údaj koncového bodu (`endpoint_credentials`). Zapne se ta, kterou daný kus hardwaru umí. Různá zařízení mohou používat různé metody současně.
+- **MQTT ACL.** Účet smí publikovat jen do svých datových topiců a odebírat jen to, co potřebuje. Výchozí politika je zakázat. Topics ACRIOS se doplní po PoC. Do té doby se jeho účet nezakládá a nepoužije topics vlastního ESP.
+- **Velikost.** Každý `ingest_endpoints` má `max_payload_bytes` a limit počtu položek. Překročení je `ingest_rejections.reason = payload_too_large` a tělo se neukládá.
+- **Replay.** Stejná aplikační pravidla jako u ostatních zdrojů: `msg_key`, deduplikace rámce, `suspect_replay` a `INGEST_MAX_MESSAGE_AGE`. Antireplay na úrovni DTLS, pokud ho model má, kontrolu `msg_key` nenahrazuje.
+- **Stáří.** `INGEST_MAX_MESSAGE_AGE` (návrh 30 dní) platí pro všechny transporty. Starší zpráva je `too_old` a odečet z ní nevznikne.
+- **Audit odmítnutí.** Obálka, ze které nevznikla položka, je v `ingest_rejections`. Odmítnutá položka je příjem s chybovým stavem. Hesla, tokeny a klíče se do důvodu nezapisují.
+- **Příjem a vzdálená konfigurace.** Údaj pro příjem dat neopravňuje měnit whitelist, firmware ani nastavení na platformě. U vlastního ESP zařízení topic `config` jen odebírá a publikuje ho server. Adaptér platformy čte měření. Zápis konfigurace do zařízení je samostatná akce `admin` s auditem a v cestě příjmu není. Když PoC ukáže jeden token, který umí obojí, adaptér stejně použije jen čtení.
+- **Ukládání údajů.** Příchozí tajemství je hash nebo otisk certifikátu. Odchozí token platformy je šifrovaný AES-256-GCM hlavním klíčem aplikace, ve sloupci `endpoint_credentials.secret_enc`. Není v `ingest_endpoints.config`, v payloadu, v logu ani v Gitu. Rotace založí nový řádek dřív, než se starý odvolá.
 
 ## AES klíče měřidel
 
@@ -115,7 +133,8 @@
   - všechny administrátorské změny s hodnotou před a po,
   - opravy s důvodem,
   - změny zařízení a klíčů (bez hodnot), exporty,
-  - retenční mazání.
+  - retenční mazání,
+  - odmítnuté obálky v `ingest_rejections` a chybové stavy příjmů. Jednotlivé neúspěchy autentizace se do `audit_logs` neřadí po jednom, aby hash řetězec nezahltil proud pokusů. Dohledatelný záznam je řádek odmítnutí.
 - **Integrita auditu:** hash řetězec. Aplikační role smí jen INSERT. Ověřuje se při `backup-verify.sh` a `restore-test.sh`.
 
 ## Ochrana osobních údajů
@@ -132,7 +151,7 @@ Správcem je SJV. Projekt dodává technická opatření, ale ne právní dokume
 
 | Událost | První kroky |
 | --- | --- |
-| Kompromitace zařízení | odvolat, revize odečtů, nové údaje |
+| Kompromitace zařízení | odvolat, revize odečtů, nové údaje. Výměna SIM sama o sobě odvolání není: mění se externí identifikátor, `device_id` zůstává |
 | Kompromitace účtu admin | zablokovat, zrušit sezení, revize auditu, reset MFA |
 | Kompromitace VPS | odpojit, na domácím serveru odebrat klíč restic `vps` a heslo uživatele `infrastructure-sjv` v `rest-server`, úplná obnova podle [backup-strategy.md](backup-strategy.md#úplná-obnova-na-novém-vps) s obnovovací sadou, rotace všech secrets a údajů zařízení |
 | Únik databáze | posoudit dopad, rotace KEK a hesel, oznámení podle povinností správce |

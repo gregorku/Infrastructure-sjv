@@ -8,12 +8,12 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 | --- | --- |
 | E1 Incus kontejner, kapacita VPS | nasazení na VPS od fáze 1 (vývoj a testy lze dělat lokálně) |
 | Výsledek ověření ZFS, E5, E6 | fáze 3: vzdálená záloha proti skutečnému domácímu serveru |
-| Upload domácí linky | odhad RTO před DR testem ve fázi 12 |
+| Upload domácí linky | odhad RTO před DR testem ve fázi 13 |
 | Počet měřidel a intervaly vysílání | odhad objemu ve fázi 4 |
 | Vzorky telegramů, typy měřidel tepla, AES klíče | fáze 6 |
 | Hardware ESP | firmware (mimo tento plán, jen návrh) |
-| Dokumentace koncentrátoru | fáze 11 |
-| E2, E3, E4 | ostrý provoz (fáze 12) |
+| Výsledek ACRIOS PoC (fáze 11) | fáze 12 pro adaptér ACRIOS. Návrh tabulek neblokuje |
+| E2, E3, E4 | ostrý provoz (fáze 13) |
 | SMTP (E7) | odesílání notifikací (fáze 9). Do té doby zůstávají ve frontě a v administraci |
 
 ## Fáze
@@ -60,25 +60,30 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 - Alembic podle [database-design.md](database-design.md):
   - kmenová data se soft delete, uživatelé s anonymizací, RBAC (`board` a `technician` nepřiřaditelné),
   - členství, instalace a přiřazení zdrojů s exclusion constrainty,
-  - `source_streams`, `meter_source_assignments`, `device_boots`,
-  - ingest tabulky: partitions, `ingest_message_keys`, `telegram_dedup_keys`, `unknown_meter_sightings`, `decode_queue` s cizím klíčem,
-  - `meter_readings` se `source_key` a triggerem proti změnám, `meter_daily_values`,
+  - `source_streams` včetně `import` a `vendor:acrios` jako řádku katalogu, ne jako vlastní tabulky,
+  - `devices` s neměnným `id`, `device_external_ids`, `device_firmware_history`, `device_placements`, `device_capabilities`,
+  - `device_boots`, `ingest_endpoints`, `endpoint_credentials`,
+  - ingest: partitions, `ingest_payloads`, `ingest_receipts`, `ingest_fragments`, `ingest_fragment_sets`, `ingest_rejections`, `ingest_message_keys`, `telegram_dedup_keys`, `unknown_meter_sightings`, `decode_queue` s cizím klíčem,
+  - `meter_readings` s `reading_kind`, `quality`, `source_key` a triggerem proti změnám, `meter_daily_values`,
   - `notifications`, audit s hash řetězcem.
 - `maintenance.sh`: zakládání partitions, retence v daném pořadí s kontrolami, mazání klíčů po 60 dnech.
-- Odhad objemu podle skutečného počtu měřidel a intervalů.
+- Odhad objemu podle skutečného počtu měřidel a intervalů. Objem payloadů ACRIOS se neodhaduje, dokud není vzorek z PoC.
+- Schéma se nasazuje bez výsledku PoC. Tabulky ani sloupce nenesou jméno modelu ACRIOS.
 - Hotovo, když:
   - `alembic upgrade head` na prázdné DB a `alembic check` projdou,
   - testy constraintů projdou (překryv členství, instalací a přiřazení, změna odečtu, zápis do auditu),
-  - test retence na umělých datech: partitions se smažou, odečty zůstanou beze změny, retence se odloží při čekajícím dekódování.
+  - výměna IMSI ponechá `device_id` a uzavře starý externí identifikátor,
+  - v katalogu tabulek není evidence odečtů pojmenovaná podle transportu nebo výrobce,
+  - test retence na umělých datech: partitions se smažou v pořadí příjem, fragmenty, payload, telegram, odečty zůstanou beze změny, retence se odloží při čekajícím dekódování.
 
 ### 5. Ingest, čas a deduplikace
 
-- Mosquitto (TLS listener s testovacím certifikátem, dynsec, interní listener, `queue_qos0_messages false`), collector s ručním PUBACK, HTTPS ingest.
+- Mosquitto (TLS listener s testovacím certifikátem, dynsec, interní listener, `queue_qos0_messages false`), collector s ručním PUBACK, HTTPS ingest vlastního kontraktu.
 - Časový model: epocha bootu z heartbeatů, zadržení dávky do heartbeatu, validace časů, `captured_at_est`.
-- Normalizace rámce, neznámá měřidla, deduplikace, `suspect_replay`, ACK po COMMIT.
+- Normalizace rámce, neznámá měřidla, deduplikace, `suspect_replay`, ACK po COMMIT, příjem i pro `duplicate_delivery`.
 - Config zařízení přes API a retained topic.
-- Simulátor zařízení.
-- Hotovo, když projdou všechny testy deduplikace, času a idempotence z [data-ingestion.md](data-ingestion.md#testy). Patří k nim paralelní transakce, pozdní doručení přes hranici měsíce, broker držící dávku během výpadku collectoru a opakované odeslání se stejným `captured_at_est`.
+- Simulátor zařízení. Fragmenty a transporty ACRIOS se v této fázi neimplementují. Tabulky pro ně už z fáze 4 jsou.
+- Hotovo, když projdou všechny testy deduplikace, času a idempotence z [data-ingestion.md](data-ingestion.md#testy), které se týkají ESP a společného kontraktu. Patří k nim paralelní transakce, pozdní doručení přes hranici měsíce, broker držící dávku během výpadku collectoru a opakované odeslání se stejným `captured_at_est`.
 
 ### 6. Dekódování (PoC na skutečných datech)
 
@@ -116,11 +121,35 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 - `cert-sync.sh` s timerem, router `noop@internal` pro MQTT hostname, pokud vznikne. Ověření, zda Mosquitto po `SIGHUP` načte nový certifikát, jinak restart.
 - Hotovo, když test obnovy certifikátu (vynucená změna) projde, včetně ověření servírovaného certifikátu a odolnosti klientů proti restartu brokeru.
 
-### 11. Adaptér koncentrátoru
+### 11. ACRIOS PoC
 
-- Až bude dokumentace dodavatele: adaptér, stream `vendor:<kód>`, testy na vzorových zprávách, korelace s rádiovým streamem.
+Samostatná fáze před adaptérem. Ověřuje jeden konkrétní kus, ne „ACRIOS obecně“. Jiný model stejného výrobce není tímto PoC pokrytý. Databáze se podle výsledku nepřestavuje. Když vzorek nejde uložit do stávajícího modelu bez tabulky výrobce, upraví se společný kontrakt, ne schéma ACRIOS.
 
-### 12. Hardening a ostrý provoz
+Před fází 12 musí být zapsané:
+
+- konkrétní zařízení a revize hardwaru,
+- firmware,
+- které z transportů MQTT, UDP/DTLS, HTTPS a Platform API tento kus skutečně má,
+- topics nebo tvar API, až jsou pozorované,
+- ukázky surového payloadu a ukázky dekódovaného payloadu, pokud je zařízení posílá,
+- jestli a jak fragmentuje (identifikátor celé zprávy, pořadí, počet, opakování, timeout),
+- jak vypadá opakované doručení a jestli zpráva nese vlastní identifikátor,
+- jaká autentizace je dostupná (heslo, certifikát, PSK, token platformy). Metoda se v PoC vybírá podle zařízení, ne dopředu,
+- jestli jde přijímat data přímým spojením bez ACRIOS Platform.
+
+Zároveň se zapíše, co z toho plyne pro mapování, aniž by se měnily tabulky: stabilita identifikátoru přes výměnu SIM, jaký čas payload nese, jestli dekódovaná data mají ACC nebo čas měřidla, jestli jeden údaj umí i zápis konfigurace.
+
+Hotovo, když je záznam ověření uložený u projektu a je rozhodnuté, které transporty adaptér tohoto kusu bude implementovat. Neznámá hodnota zůstane neznámá. Úspěch PoC není podmínka fáze 4 ani 5.
+
+### 12. Adaptér koncentrátoru
+
+Až po PoC daného zařízení. První očekávaný partner je ACRIOS, postup je stejný pro dalšího výrobce: vlastní PoC, pak adaptér, stream `vendor:<kód>` jen pro data bez rámce, testy na zaznamenaných zprávách, korelace s rádiovým streamem bez sloučení odečtů.
+
+Adaptér zapisuje interní kontrakt. Parser jednoho modelu ACRIOS, MQTT konfigurace toho modelu a nové Compose služby vznikají v této fázi, ne dřív. Když PoC přímý UDP nepotvrdí, UDP listener se nezakládá.
+
+Hotovo, když vzorky z PoC projdou pěti případy deduplikace, neúplná zpráva se nedekóduje a odečty jsou v `meter_readings` bez tabulky výrobce.
+
+### 13. Hardening a ostrý provoz
 
 - Bezpečnostní review, kontrola logů na osobní údaje, revize CrowdSec na ingestu.
 - `docs/operations.md` a `docs/checks.md`.
@@ -134,7 +163,7 @@ Jen návrh v [firmware-design.md](firmware-design.md). Implementace vyžaduje sa
 
 ## Definice dokončení projektu
 
-- Všechny fáze 1–10 a 12 jsou hotové. Fáze 11 podle dostupnosti dodavatele.
+- Všechny fáze 1–10 a 13 jsou hotové. Fáze 11 je podmínka fáze 12 pro dané zařízení. Fáze 12 se opakuje pro každého dalšího výrobce a na schéma nesahá.
 - Poslední `restore-test.sh` je úspěšný a ne starší než 31 dní.
 - DR test splnil RTO ≤ 4 h a naměřené RPO ≤ 15 min.
 - Provozní dokumentace popisuje všechny postupy, které skripty provádějí.

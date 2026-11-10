@@ -2,6 +2,8 @@
 
 Infrastructure-sjv je samostatný Docker Compose stack pro informační systém SJV na `sjv.serveftp.org`. Běží v samostatném Incus kontejneru na VPS `netcupVPSServer`. Nezávisí na Nextcloudu, Home Assistantu, Authentiku ani Vaultwardenu. Aplikace je jen informační, bez rozúčtování nákladů.
 
+PostgreSQL je centrální a jediný dlouhodobý zdroj pravdy (rozhodnutí 15 v [decisions.md](decisions.md)). ESP, ACRIOS i každý další vstup končí ve stejném modelu. ACRIOS je integrační partner. Konkrétní model a protokol nejsou vybrané a schéma na nich nezávisí.
+
 Související dokumenty:
 
 - rozhodnutí: [decisions.md](decisions.md)
@@ -34,13 +36,21 @@ Volná IP pro kontejner `sjv` není známá a zůstává otevřeným bodem.
 Uživatel ──HTTPS──► HAProxy VPS :443 (SNI, PROXY v2) ──► sjv-traefik :443
                                                           ├─ /api/*  ─► sjv-backend
                                                           └─ /*      ─► sjv-web
-Zařízení ──MQTT/TLS :8883──► nftables DNAT VPS ──► sjv-mosquitto :8883
-Zařízení ──HTTPS──► HAProxy ──► sjv-traefik ──► /api/v1/ingest/* ──► sjv-backend
-sjv-mosquitto :1883 (interní) ──► sjv-collector ──► sjv-postgresql
-sjv-worker: dekódování, agregace, offline detekce, odesílání e-mailů
+ESP ──MQTT/TLS :8883──► nftables DNAT VPS ──► sjv-mosquitto :8883 ──► sjv-collector ─┐
+ESP ──HTTPS──► HAProxy ──► sjv-traefik ──► /api/v1/ingest/* ──► sjv-backend ─────────┤
+ACRIOS MQTT / HTTPS / UDP/DTLS / Platform API  (až po PoC, teď bez portu a bez kontejneru) ─┤
+import CSV ──► administrace ────────────────────────────────────────────────────────┤
+                                                                                     ▼
+                                                              interní kontrakt příjmu
+                                                                                     ▼
+                                                              sjv-postgresql  (jediný zdroj pravdy)
+                                                                                     ▼
+sjv-worker: dekódování, timeout fragmentů, agregace, offline detekce, odesílání e-mailů
 sjv-postgresql ── archive-push ──► repozitář pgBackRest (lokální disk)
 systemd timer ──► restic ──► wg1 ──► MikroTik doma (DNAT) ──► rest-server --append-only (domaPcServer)
 ```
+
+Adaptér jen převede bajty na interní kontrakt z [data-ingestion.md](data-ingestion.md). Cesty ACRIOS na obrázku nejsou služby v Compose. UDP listener a klient Platform API se přidají až po PoC a po samostatném schválení portu. Do té doby nemají kontejner, port ani tajemství. Všechny cesty zapisují stejné tabulky.
 
 ## Služby
 
@@ -193,11 +203,18 @@ Data jsou vždy omezená na období členství ([security.md](security.md), [dat
 | GET, POST | `/admin/meters/{id}/installations` | instalace, výměna, odebrání |
 | GET, POST | `/admin/meters/{id}/source-assignments` | historie a změna preferovaného zdroje |
 | PUT | `/admin/meters/{id}/key` | zápis klíče AES. Hodnota se nikdy nevrací |
-| CRUD | `/admin/devices` | zařízení. Údaje se zobrazí jen při založení |
+| CRUD | `/admin/devices` | zařízení. Údaje se zobrazí jen při založení. `id` se nemění. Výměna SIM není nové zařízení |
+| GET, POST | `/admin/devices/{id}/external-ids` | historie IMSI, IMEI a dalších identifikátorů. Uzavření staré hodnoty a vložení nové |
+| GET, POST | `/admin/devices/{id}/capabilities` | zjištěné nebo zadané schopnosti transportu a payloadu |
+| GET, POST | `/admin/devices/{id}/placements` | historie umístění |
+| GET | `/admin/devices/{id}/firmware` | historie firmware |
 | POST | `/admin/devices/{id}/revoke`, `/admin/devices/{id}/rotate-credentials` | odvolání a rotace |
 | GET, PUT | `/admin/devices/{id}/config` | whitelist, intervaly, discovery, `replay_since` |
 | GET | `/admin/devices/{id}/events` | provozní události |
 | GET | `/admin/telegrams`, `/admin/telegrams/{id}` | telegramy a jejich příjmy |
+| GET | `/admin/ingest/receipts`, `/admin/ingest/payloads/{id}` | příjmy a původní obálka |
+| GET | `/admin/ingest/rejections` | odmítnuté obálky |
+| GET | `/admin/ingest/fragments` | neúplné, kompletní a odmítnuté sady fragmentů |
 | GET | `/admin/decoded-observations` | dekódované hodnoty dodavatelů |
 | GET | `/admin/unknown-meters` | neznámá zachycená měřidla (jen počty) |
 | GET | `/admin/readings` | odečty všech streamů s filtry |
@@ -217,6 +234,8 @@ Data jsou vždy omezená na období členství ([security.md](security.md), [dat
 | POST | `/ingest/events` | události |
 | POST | `/ingest/heartbeat` | stav |
 | GET | `/healthz`, `/readyz` | liveness a readiness, bez dat |
+
+Cesty výše jsou kontrakt vlastního ESP a ručního importu přes administraci. Formát ACRIOS, až bude známý, dostane vlastní cestu nebo topic a zapíše stejné tabulky. Samostatná evidence odečtů pro tu cestu nevznikne. Platform API není příchozí HTTP.
 
 ## Data na disku
 
@@ -275,7 +294,7 @@ Unit soubory budou v `configs/systemd/` a instaluje je `init.sh`. Každý skript
 
 Spolupráci zámků mezi zálohou a vzdálenou kopií popisuje [backup-strategy.md](backup-strategy.md).
 
-Kontinuální práce (dekódovací fronta, offline detekce, odesílání e-mailů z fronty `notifications`) běží ve `sjv-worker`.
+Kontinuální práce (dekódovací fronta, timeout úplnosti fragmentů, offline detekce, odesílání e-mailů z fronty `notifications`) běží ve `sjv-worker`. Timeout fragmentů se uplatní, až bude zapnutý koncový bod, který fragmenty skutečně posílá.
 
 ## Struktura repozitáře
 

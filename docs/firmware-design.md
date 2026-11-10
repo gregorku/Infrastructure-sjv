@@ -2,7 +2,15 @@
 
 Pouze návrh. Firmware se zatím neimplementuje. Umístění (`app/firmware/` nebo samostatný repozitář) se rozhodne při schválení implementace.
 
-Protokol (topics, formát zpráv, ACK, config) je závazně popsaný v [data-ingestion.md](data-ingestion.md). Tento dokument popisuje jen chování zařízení.
+Protokol (topics, formát zpráv, ACK, config) je závazně popsaný v [data-ingestion.md](data-ingestion.md). Tento dokument popisuje jen chování vlastního ESP.
+
+## Místo v datové architektuře
+
+Firmware je jeden vstup, adaptér `esp_v1`, a posílá surové wM-Bus rámce do společného kontraktu. Není to datový model SJV. ACRIOS a další koncentrátory jím neprocházejí a tento dokument jejich protokol nepopisuje.
+
+Dávka v MQTT je seznam celých rámců. Není to fragmentace jednoho rámce. Každá položka má vlastní `msg_key` a odchází v té podobě, v jaké ji rádio přijalo.
+
+Topic `config` je konfigurace směrem k zařízení. Heslo pro odesílání telegramů na publikování do `config` neopravňuje. Stejné oddělení příjmu a konfigurace platí pro ostatní zdroje ([security.md](security.md#koncentrátory-a-příjem)).
 
 ## Neznámé vlastnosti hardwaru
 

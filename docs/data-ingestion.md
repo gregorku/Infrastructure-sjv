@@ -1,34 +1,116 @@
 # Příjem dat
 
-Všechna sběrná zařízení navazují spojení směrem k VPS. Návrh počítá s mobilním CGNAT a nepředpokládá veřejnou IP zařízení. WireGuard pro příjem odečtů potřeba není.
+PostgreSQL je jediný dlouhodobý zdroj pravdy pro data SJV (rozhodnutí 15–19 v [decisions.md](decisions.md)). Každý vstup skončí v modelu z [database-design.md](database-design.md). Adaptér výrobce data jen převede na interní kontrakt. Tabulka odečtů pro ACRIOS ani pro jiný transport nevzniká.
 
-Tabulky jsou popsané v [database-design.md](database-design.md), firmware v [firmware-design.md](firmware-design.md).
+ACRIOS je podporovaný integrační partner. Konkrétní model, revize hardwaru a transport nejsou vybrané. Návrh nepředpokládá, že všechny modely ACRIOS umí stejné formáty nebo protokoly. Dokud to neověří PoC ([implementation-plan.md](implementation-plan.md)), platí pro ACRIOS jen pravidla společná všem zdrojům.
+
+Sběrná zařízení navazují spojení směrem k VPS. Výjimka je dotaz na cizí API, který navazuje server. Návrh počítá s mobilním CGNAT a nepředpokládá veřejnou IP zařízení. WireGuard pro příjem odečtů potřeba není.
+
+Tabulky jsou v [database-design.md](database-design.md), firmware vlastního ESP v [firmware-design.md](firmware-design.md), bezpečnost příjmu v [security.md](security.md).
+
+## Vstupní zdroje
+
+| Zdroj | Transport | Co je známé | Kam patří odečet |
+| --- | --- | --- | --- |
+| ACRIOS MQTT | MQTT/TLS | model a topics až po PoC | `radio`, pokud payload obsahuje rámec; jinak `vendor:acrios` |
+| ACRIOS UDP/DTLS | UDP | až PoC, včetně toho, jestli daný model DTLS má | podle skutečného payloadu, stejně jako u MQTT |
+| ACRIOS HTTPS | HTTPS | až PoC | podle skutečného payloadu |
+| ACRIOS Platform API | odchozí HTTPS serveru | až PoC. Přímé připojení bez platformy je samostatná otázka PoC | podle toho, co API vrací |
+| vlastní ESP32/LILYGO | MQTT/TLS a záložní HTTPS | tento dokument | `radio` |
+| jiný budoucí koncentrátor | podle svého adaptéru | stejná pravidla, vlastní kód `vendor:<kód>` jen pro data bez rámce | `radio` nebo `vendor:<kód>` |
+| ruční import CSV nebo jiného podporovaného souboru | `file_import` | konkrétní rozložení souboru až s adaptérem | stream `import` |
+
+Jeden kus hardwaru může mít víc transportů. Schopnosti se zapisují do `device_capabilities` podle zjištění. Z názvu výrobce se neodvozují.
+
+## Čtyři vrstvy
+
+### A. Původní přijatá data
+
+`ingest_payloads` ukládá obálku v bajtech, ve kterých přišla: dávku MQTT včetně topicu, UDP datagram, tělo HTTPS, soubor CSV, tělo odpovědi API, jeden fragment. U každého záznamu je koncový bod, transport, čas příjmu, hash, velikost a `device_id`, pokud už je z autentizace známé. Metadata vedle bajtů jsou jen netajné údaje (topic, jméno souboru, identifikátor stránky API).
+
+Obsah se nepřekóduje a neořezává. Kanonický rámec a dekódované hodnoty jsou další vrstva a obálku nenahrazují.
+
+Když zdroj pošle jen dekódovanou hodnotu, uloží se její JSON, CSV nebo jiný skutečný payload. Řádek v `raw_telegrams` nevznikne.
+
+Tělo nad `max_payload_bytes` se celé neukládá. V `ingest_rejections` zůstane důvod, transport, velikost a identifikátor volajícího. Do zpracování zpráva nevstoupí. Jinak by šlo zaplnit disk samotnými odmítnutími.
+
+### B. Evidence příjmu
+
+Každý přijatý vstup má dohledatelný záznam.
+
+- Položka, kterou adaptér oddělil (telegram, dekódovaná hodnota, řádek importu, heartbeat, událost), má řádek v `ingest_receipts`.
+- Obálka, ze které položka nevznikla (autentizace, velikost, nečitelný formát, neúplné fragmenty), má řádek v `ingest_rejections`.
+- Opakované doručení stejného `msg_key` má další příjem `duplicate_delivery` a zvýší `delivery_count`. Nový odečet nevznikne.
+
+Příjem nese autentizované `device_id`, transport, `msg_key`, identifikátor zprávy zdroje, pokud ho poslal, `server_received_at`, odhad času zachycení a jeho nejistotu, stav a vazbu na payload. U rámce i vazbu na `raw_telegrams`. Pořadí fragmentů je na `ingest_fragments`, ne na odečtu.
+
+`device_id` se z těla zprávy nebere. Tělo může nést externí identifikátor, který se mapuje přes `device_external_ids` jen když už k zařízení patří. Neznámý identifikátor zařízení nezaloží.
+
+### C. Normalizovaná data
+
+Dekódovaný odečet je řádek `meter_readings`. Nese měřidlo, veličinu, hodnotu, jednotku, čas měření, stream, způsob získání (`source_kind`, adaptér a jeho verze, u rádia i dekodér a normalizátor), kvalitu a vazbu na telegram nebo pozorování.
+
+`reading_kind` je `cumulative`, `interval` nebo `event`. Do spotřeby a do aktuálního stavu podle R15 vstupuje jen kumulativní primární hodnota. Interval a událost se jako další stav téhož počítadla nepočítají.
+
+### D. Historie a provozní evidence
+
+Historie přežije výměnu SIM, firmware i koncentrátoru, protože visí na neměnném `devices.id` a na měřidle:
+
+- externí identifikátory a firmware (`device_external_ids`, `device_firmware_history`),
+- umístění zařízení (`device_placements`),
+- instalace měřidla (`meter_installations`),
+- přiřazení streamu k měřidlu (`meter_source_assignments`),
+- opravy odečtů (nový řádek a `audit_logs`),
+- zpracování a odmítnutí po dobu retence (`ingest_receipts`, `ingest_rejections`).
+
+Měřidlo nemá cizí klíč na koncentrátor. Kdo telegram zachytil, je na příjmech a v `capture_device_ids`.
+
+## Interní kontrakt
+
+Adaptér smí předat dál jen tuto položku. Zápis do `meter_readings`, `raw_telegrams` a deduplikačních klíčů dělá společný postup, stejný pro všechny zdroje.
+
+| Pole | Pravidlo |
+| --- | --- |
+| endpoint | koncový bod, který data přijal |
+| device_id | z autentizace, nebo z už uloženého externího identifikátoru u záznamu z platformy |
+| message_kind | `raw_wmbus`, `decoded`, `event`, `heartbeat`, `import_row` |
+| msg_key | idempotence doručení, viz [Identita zprávy](#identita-zprávy) |
+| external_message_id | identifikátor výrobce, jen když v datech je |
+| capture | jen časové údaje, které zdroj skutečně poslal |
+| frame | jen skutečný wM-Bus rámec |
+| decoded | hodnoty včetně veličiny, jednotky a druhu `cumulative`, `interval` nebo `event` |
+| fragment | identifikace celé zprávy, pořadí a počet nebo příznak konce, jen když to zdroj označil |
+| payload_id | nezměněná obálka |
+| adapter, adapter_version | verze, která položku oddělila |
+
+Heartbeat a událost nevytvářejí odečet. `import_row` vytvoří odečet se `source_kind = import` až po validaci řádku. Neplatný řádek je příjem `invalid` a původní text řádku zůstane v payloadu.
 
 ## Dva druhy dat
 
 | Druh | Obsah | Typický zdroj | Stream | Cesta v systému |
 | --- | --- | --- | --- | --- |
-| `raw` | původní wM-Bus rámec v hex | vlastní ESP, koncentrátor s exportem rámců | `radio` | `telegram_receipts` → `raw_telegrams` → dekódování → `meter_readings` |
-| `decoded` | hodnoty, které už dekódoval zdroj | koncentrátor dodavatele | `vendor:<kód>` | `decoded_observations` → `meter_readings` |
+| `raw` | skutečný wM-Bus rámec | vlastní ESP, kterýkoli koncentrátor, který rámec předá | `radio` | `ingest_payloads` → `ingest_receipts` → `raw_telegrams` → dekódování → `meter_readings` |
+| `decoded` | hodnoty, které už dekódoval zdroj | koncentrátor nebo API bez rámce, import souboru | `vendor:<kód>` nebo `import` | `ingest_payloads` → `decoded_observations` → `meter_readings` |
 
 Podpora koncentrátorů, které posílají jen dekódované hodnoty:
 
-- druh zprávy `decoded` v obou transportech (MQTT topic `readings`, HTTPS `POST /api/v1/ingest/readings`),
-- tabulka `decoded_observations` a mapování identifikátorů dodavatele (`meter_external_ids`),
-- vlastní pravidla idempotence a korelace (níže),
-- adaptér pro každého dodavatele. Konkrétní adaptér vznikne až podle skutečné dokumentace zařízení.
+- druh zprávy `decoded` v transportech, které ho nesou (u vlastního ESP topic `readings` a `POST /api/v1/ingest/readings`; u ACRIOS až cesta, kterou ukáže PoC),
+- tabulka `decoded_observations` a mapování identifikátorů (`meter_external_ids`),
+- stejná idempotence doručení jako u rámců a korelace popsaná níže,
+- adaptér pro každého partnera. Adaptér ACRIOS vznikne až po PoC. Jiný výrobce dostane vlastní adaptér a stejné tabulky.
 
 Co z dekódovaných dat zjistit nejde, popisuje část [Omezení dekódovaných dat](#omezení-dekódovaných-dat).
 
 ## Identita zprávy
 
-- `device_id` se vždy bere z autentizace (MQTT účet nebo API token), nikdy z těla zprávy.
-- `msg_key` je idempotentní klíč zprávy, unikátní pro zařízení:
+- `device_id` se vždy bere z autentizace (MQTT účet, API token, klientský certifikát nebo PSK), nikdy z těla zprávy. U Platform API je autentizovaný koncový bod a koncentrátor uvnitř odpovědi se přiřadí jen přes už uložené `device_external_ids`.
+- `msg_key` je idempotentní klíč doručení, unikátní v rámci jednoho `device_id`:
   - **vlastní ESP:** `<instance_id>-<boot_counter>-<seq>`.
     - `instance_id` je náhodné 64bitové číslo v hex. Vygeneruje se při prvním startu a znovu po každém vymazání flash, takže reset `boot_counter` nikdy nevytvoří klíč, který server už zná.
     - `boot_counter` je v NVS a roste při každém startu.
     - `seq` je čítač v RAM od nuly v každém bootu.
-  - **koncentrátor dodavatele:** id zprávy dodavatele. Když ho nemá, je klíč `sha256` kanonického těla položky.
+  - **koncentrátor včetně ACRIOS:** identifikátor zprávy, který zdroj skutečně posílá. Když ho PoC v datech nenajde, je klíč `sha256` kanonického těla položky. Formát identifikátoru se dopředu nepředepisuje.
+  - **složená zpráva z fragmentů:** jeden `msg_key` celé zprávy, až když je sada úplná. Fragment vlastní `msg_key` odečtu nemá.
 
 ## Časový model
 
@@ -80,7 +162,7 @@ Postup podle priority:
 
 **Zadržení:** Když přijde MQTT dávka pro aktuální boot, jehož epocha zatím není známá (typicky hned po připojení), collector zprávu nepotvrdí a počká na první heartbeat, nejdéle `COLLECTOR_EPOCH_WAIT` (návrh 150 s, víc než dvojnásobek intervalu heartbeatu). Když heartbeat nepřijde, použije se pořadí 2 a 3. Horní mez z obálky se uloží jen jako příznak `epoch_from_envelope` a pro kotvu se nepoužije.
 
-**Koncentrátory** posílají vlastní čas. U nich se použije `device_clock` s offsetem měřeným z HTTPS požadavků, jinak `server_only`.
+**Koncentrátory** posílají vlastní čas, pokud ho jejich payload má. U nich se použije `device_clock` s offsetem měřeným z příjmu v reálném čase (HTTPS, a MQTT jen když zpráva nečekala ve frontě brokeru; UDP frontu brokeru nemá). Jinak `server_only`. Čas, který přidala až platforma, má `source_time_kind = platform_time` a jako čas zachycení na rádiu se nepoužije. Jaký čas ACRIOS skutečně posílá, určí PoC. Chybějící `rx_uptime` se pro něj nevytváří.
 
 ### Validace času
 
@@ -123,7 +205,7 @@ sjv/v1/dev/{device}/ack         server → zařízení   QoS 1      výsledek po
 sjv/v1/dev/{device}/config      server → zařízení   retained   konfigurace zařízení
 ```
 
-`{device}` je kód zařízení (`ESP-SJV-001`). Je zároveň uživatelským jménem a client ID v Mosquitto Dynamic Security.
+`{device}` je kód zařízení (`ESP-SJV-001`). Je zároveň uživatelským jménem a client ID v Mosquitto Dynamic Security. Topics ACRIOS nejsou tyto topics. Jejich podoba není známá a do konfigurace se doplní až po PoC. Do té doby účet ACRIOS v brokeru není.
 
 ### ACL
 
@@ -225,19 +307,29 @@ Zařízení smaže zprávu z fronty po každém z těchto stavů. Bez ACK ji po 
 | `POST /api/v1/ingest/events` | události |
 | `POST /api/v1/ingest/heartbeat` | stav, stejný formát jako MQTT |
 
-- **Autentizace:** `Authorization: Bearer <token zařízení>`. Token se ukládá jako hash. mTLS lze doplnit, až bude známa podpora u dodavatele.
+- **Autentizace vlastního ESP:** `Authorization: Bearer <token zařízení>`. Token se ukládá jako hash.
+- **Autentizace koncentrátoru:** heslo, token, klientský certifikát nebo PSK podle toho, co model umí. Pro ACRIOS není metoda vybraná. mTLS je připravené, není povinné.
 - **Odpověď:** `200` s výsledkem pro každou položku, ve stejných stavech jako ACK. `200` znamená, že data jsou v DB. Při `5xx` musí zdroj poslat znovu. Duplicitní doručení je bezpečné.
 - **Limity:** velikost těla, počet položek v dávce a rate limit na token, vše v aplikaci.
 - **CrowdSec:** ingest router v Traefiku má vlastní řetězec middleware. CrowdSec se na něj aplikuje opatrně, protože zařízení za CGNAT sdílejí veřejné IP s cizími klienty a blokace podle IP by mohla odříznout vlastní zařízení. Hlavní ochranou je autentizace a limit na token.
+
+## Další transporty
+
+Platí, i když konkrétní datagram, topic nebo JSON ACRIOS ještě nejsou známé.
+
+- **UDP/DTLS.** Každý datagram je jeden `ingest_payloads` s `content_kind = udp_datagram`. Otevřený UDP se nezapíná. DTLS se použije, až PoC ukáže, že ho vybraný model má. Session DTLS nenahrazuje aplikační `msg_key`. Port se do Compose ani do firewallu nepřidává, dokud PoC přímý UDP potvrdí a změna mimo repozitář bude zvlášť schválená.
+- **Platform API.** Server se dotazuje sám, z procesu na síti `sjv-egress`. Odpověď je payload `api_response`. Záznamy uvnitř se rozdělí adaptérem na položky kontraktu. Účet platformy není `device_id` koncentrátoru. Koncentrátor se pozná jen podle `device_external_ids`. Neznámý identifikátor zařízení nezaloží a příjem má `device_attribution = unattributed`.
+- **Import souboru.** Celý soubor je jeden payload. Řádek, který projde validací, je položka `import_row` a odečet se `source_kind = import` a `source_key = import:<payload_id>:<řádek>`. Ruční odečet zadaný ve formuláři zůstává `manual` a souborem není.
 
 ## Deduplikace raw telegramů
 
 ### Cíle
 
-- Každý příjem se eviduje zvlášť (`telegram_receipts`).
-- Stejný rádiový telegram zachycený více zařízeními, nebo opakovaně jedním, má jeden `raw_telegrams` a nejvýš jeden odečet.
-- Dva různé telegramy se stejnou hodnotou spotřeby se nesloučí.
+- Každý příjem se eviduje zvlášť (`ingest_receipts`), včetně opakovaného doručení stejného `msg_key`.
+- Stejný rádiový telegram zachycený více zařízeními, nebo opakovaně jedním v nové zprávě, má jeden `raw_telegrams` a nejvýš jeden aktivní odečet.
+- Dva různé telegramy se stejnou hodnotou spotřeby se nesloučí. Stejná hodnota není deduplikační klíč.
 - Deduplikace funguje pro opožděné doručení z fronty ESP, i když jiný přijímač poslal stejný telegram už dříve, a funguje při souběžném zpracování.
+- Pravidla jsou společná pro ESP i pro každý koncentrátor, který předá skutečný rámec, včetně budoucího ACRIOS. Zařízení, které předá jen JSON, touto větou neprojde a rámec se pro něj nevytvoří.
 
 ### Normalizace rámce (verzovaná, `normalizer_version`)
 
@@ -264,7 +356,14 @@ Zařízení smaže zprávu z fronty po každém z těchto stavů. Bez ACK ji po 
 ```text
 BEGIN
  1. INSERT INTO ingest_message_keys (device_id, msg_key, …) ON CONFLICT DO NOTHING
-    → nic nevloženo: duplicate_delivery, vrátit původní výsledek, COMMIT, ACK
+    → nic nevloženo: opakované doručení.
+       INSERT ingest_receipts se statusem duplicate_delivery,
+       navázaný na původní raw_telegram_id nebo decoded_observation_id
+       a na původní partition_month.
+       UPDATE ingest_message_keys SET delivery_count = delivery_count + 1,
+              last_received_at = now()
+       COMMIT, ACK duplicate_delivery.
+       Telegram, pozorování ani odečet se nevkládá.
  2. validace časů a výpočet captured_at_est, time_source, partition_month
     → too_old nebo invalid: receipt bez telegramu, COMMIT, ACK
  3. normalizace → při chybě receipt crc_error nebo invalid, COMMIT, ACK
@@ -284,8 +383,8 @@ BEGIN
                          capture_device_ids, first_server_received_at = least(…)
                   UPDATE meter_readings (receipt_count, capture_device_ids),
                          pokud odečet už existuje
- 8. INSERT telegram_receipts (… raw_id, partition_month …)
- 9. UPDATE ingest_message_keys SET outcome, receipt_id
+ 8. INSERT ingest_receipts (… raw_id, payload_id, partition_month …)
+ 9. UPDATE ingest_message_keys SET outcome, receipt_id, delivery_count = 1
 COMMIT → PUBACK brokeru a ACK zařízení
 ```
 
@@ -311,11 +410,11 @@ ESP-SJV-001 je v bootu 17. Jeho epocha je ze heartbeatů známá s nejistotou po
 | 10:00–13:10 | ESP je bez internetu, F a G drží ve flash frontě | |
 | 13:10:02 | ESP se připojí, pošle heartbeat a dávku s F (`age_ms = 11 401 850`) | kotva = epocha + 87 000 250 ms ≈ 10:00:00,25 → konflikt s R1 → příjem 3 k **R1** |
 | 13:10:02 | stejná dávka obsahuje G | konflikt s R2 → příjem 4 k **R2** |
-| 13:10:03 | ACK se ztratí, ESP pošle F znovu se stejným `msg_key` a stejným `rx` | `duplicate_delivery`, nic nového |
+| 13:10:03 | ACK se ztratí, ESP pošle F znovu se stejným `msg_key` a stejným `rx` | `duplicate_delivery`, další příjem, žádný nový telegram ani odečet |
 
-Výsledek: dva telegramy, čtyři příjmy, dva odečty se stejnou hodnotou. Spotřeba je správná, protože se počítá z kumulativních hodnot.
+Výsledek: dva telegramy, pět příjmů, dva odečty se stejnou hodnotou. Pátý příjem je opakované doručení F a odečet nezakládá. Spotřeba je správná, protože se počítá z kumulativních hodnot.
 
-Stejný výsledek vyjde, i když collector byl hodinu mimo provoz a broker dávku držel. Kotva vychází z `rx.uptime_ms` a epochy z heartbeatů, ne z času doručení.
+Stejný výsledek vyjde, i když collector byl hodinu mimo provoz a broker dávku držel. Kotva vychází z `rx.uptime_ms` a epochy z heartbeatů, ne z času doručení. Stejné sloučení nastane, když druhý přijímač není ESP, ale koncentrátor včetně ACRIOS, pokud předá stejný rámec. Jeho `device_id` je jiné, `msg_key` je jiné a `telegram_dedup_keys` oba příjmy spojí s jedním telegramem.
 
 ### Kotva `server_only`
 
@@ -331,24 +430,98 @@ Bitově shodný rámec včetně ACC nejde odlišit od kopie, takže nejde o slou
 
 Shodný obsah mimo okno, ale do 60 dní, dostane `decode_status = suspect_replay`: bez odečtu, s událostí a upozorněním administrátorovi. Administrátor může telegram ručně uvolnit k dekódování (s auditem), třeba u měřidel, jejichž telegram neobsahuje měnící se čas ani čítač a po přetočení ACC se skutečně zopakoval.
 
-## Dekódované hodnoty (koncentrátory dodavatele)
+## Pět případů, které se nesmí slít
+
+| Případ | Jak se pozná | Co vznikne |
+| --- | --- | --- |
+| 1. Opakované doručení stejné zprávy | stejné autentizované `device_id` a stejný `msg_key` | další `ingest_receipts` se stavem `duplicate_delivery`, `delivery_count + 1`, žádný nový odečet |
+| 2. Stejný telegram, víc koncentrátorů | jiné `device_id`, jiný `msg_key`, stejné `(meter_key, ACC, frame_hash)` v okně W | jeden `raw_telegrams`, N příjmů, jeden odečet `raw:<id>` |
+| 3. Nový telegram se stejnou hodnotou | jiný ACC nebo jiný `frame_hash`; u dat bez rámce jiný čas zdroje nebo jiné tělo zprávy | nový telegram nebo pozorování a nový odečet. Shoda samotné hodnoty zprávy nespojí |
+| 4. Fragmenty jedné zprávy | stejné `(device_id, group_key)`, různý `fragment_index` | žádný odečet, dokud sada není `complete`. Pak jeden průchod případů 1–3 |
+| 5. Nové dekódování starých dat | stejný `source_key`, jiná `decoder_version` nebo `adapter_version` | druhý aktivní odečet nevznikne. Shoda hodnoty jen audit. Jiná hodnota je oprava, která původní řádek označí `superseded_at` |
+
+Případ 3 a případ 1 se u zdroje bez identifikátoru zprávy rozliší tělem položky. `sha256` kanonického těla je klíč doručení. Nové měření se stejnou hodnotou a jiným časem má jiné tělo. Dvě doručení téhož těla jsou případ 1, ne dva odečty.
+
+U dekódovaných dat bez rámce platí navíc částečný unikátní index `(meter_id, source_stream_id, measured_at)`. To je identita času uvnitř streamu, ne identita hodnoty. Stejný čas a stejná hodnota je duplicita. Stejný čas a jiná hodnota je `conflict`, původní odečet se nepřepíše. Stejná hodnota v jiném čase jsou dva odečty. Blízké, ale různé časy se podle hodnoty neslučují. Jestli ACRIOS posílá stabilní čas, ukáže PoC. Do té doby se časy nesbližují heuristikou.
+
+Opětovné dekódování (případ 5):
+
+- slepý opakovaný běh narazí na `UNIQUE (source_key)` a řádek nevloží,
+- řízený běh nové verze porovná nový výstup s uloženou hodnotou,
+- stejná hodnota: odečet se nemění, audit dostane `redecode_unchanged` se starou a novou verzí,
+- jiná hodnota: vznikne řádek `correction` s novou verzí, původní dostane `superseded_at`, důvod je `decoder_upgrade`. Oba aktivní nezůstanou.
+
+## Fragmentace
+
+Fragment není položka dekodéru. Dekodér a deduplikace telegramu dostanou až složený payload sady ve stavu `complete`.
+
+Postup jednoho fragmentu:
+
+```text
+BEGIN
+ 1. device_id z autentizace. Bez něj se sada nezaloží (odmítnutí fragment_unidentified).
+ 2. group_key a fragment_index musí přijít od zdroje. Když chybí, payload se uloží,
+    ingest_rejections.reason = fragment_unidentified, COMMIT. Sada nevznikne.
+ 3. Najdi sadu (device_id, group_key) ve stavu collecting.
+    Není-li a existuje uzavřená sada se stejným klíčem v tomto měsíci:
+       odmítnutí, k sadě se fragment nepřidá, COMMIT.
+    Není-li žádná: založ collecting, deadline = now + INGEST_FRAGMENT_TIMEOUT,
+       expected_count jen pokud ho fragment uvedl.
+ 4. INSERT fragmentu na (sada, fragment_index).
+       stejný content_hash: delivery_count + 1
+       jiný hash: sada conflict, ingest_rejections fragment_conflict, COMMIT.
+       Dekodér se nevolá.
+ 5. Když fragmenty uvádějí různý expected_count, sada je conflict a dál se neskládá.
+ 6. Když jsou přítomné všechny indexy 0 .. expected_count-1
+    (nebo zdroj označil konec a indexy tvoří souvislou řadu od nuly):
+       slož bajty v pořadí indexů do ingest_payloads s origin = assembled,
+       sada complete,
+       složený payload vstupuje jednou do běžné transakce položky.
+COMMIT
+```
+
+Neúplná sada zůstane `collecting`. Worker po `deadline_at` nastaví `timed_out`, zapíše `ingest_rejections` s důvodem `fragment_timeout` a dekodér nezavolá. Chybějící fragment se nulami nedoplňuje. Nejvyšší přijatý index se nepovažuje za důkaz, že zpráva je celá: bez `expected_count` nebo příznaku konce od zdroje sada do `complete` nepřejde.
+
+Ochrana proti záměně:
+
+- klíč sady je autentizované `device_id` plus `group_key` od zdroje, ne samotný index,
+- fragment jiného `group_key` je jiná sada, i když má stejný index a přišel ve stejnou sekundu,
+- fragment jiného zařízení se do sady nepřipojí, i když uvede stejné `group_key`,
+- opakovaný fragment se stejným hashem počet odečtů nemění,
+- konflikt hashů sadu uzavře bez dekódování.
+
+`INGEST_FRAGMENT_TIMEOUT` se číselně doplní, až PoC ukáže, jestli vybraný model vůbec fragmentuje a jak rychle zbytek posílá. ESP dávkuje celé rámce. Dávka není fragmentace a touto cestou nejde.
+
+## Dekódované hodnoty (koncentrátory)
 
 ### Adaptér
 
-- Pro každého dodavatele převede formát na kanonický záznam `decoded`: `external_meter_ref`, `source_measured_at`, `source_time_kind`, `access_number` (pokud ho zdroj má) a `values` s jednotkami a registry.
-- Má verzi (`adapter_version`) a testy na vzorových zprávách od dodavatele.
-- Neznámé pole nebo jednotka znamená stav `invalid` s uloženým `vendor_payload`. Žádný odhad.
-- Neznámý `external_meter_ref` znamená stav `unknown_meter`. Pozorování se uloží (hodnoty, ne rámec), aby šlo měřidlo po namapování přiřadit.
+- Pro každého partnera, včetně ACRIOS, převede formát na kanonický záznam `decoded`: `external_meter_ref`, `source_measured_at`, `source_time_kind`, `access_number` (pokud ho zdroj má), `reading_kind` a `values` s veličinou a jednotkou.
+- Má verzi (`adapter_version`) a testy na vzorových zprávách, které dodal PoC nebo výrobce. Vzor, který PoC nepřinesl, se v testu nevymýšlí.
+- Neznámé pole nebo jednotka znamená stav `invalid` s uloženým původním payloadem. Žádný odhad a žádný doplněný rámec.
+- Neznámý `external_meter_ref` znamená stav `unknown_meter`. Pozorování se uloží (hodnoty a původní payload, ne rámec), aby šlo měřidlo po namapování přiřadit.
+- Neznámý identifikátor koncentrátoru měřidlo ani zařízení nezaloží. Payload zůstane. Příjem má `device_attribution = unattributed`.
+
+### Omezení dekódovaných dat
+
+Bez rámce a bez ACC nelze:
+
+- rozhodnout, že JSON a rádiový telegram jsou totéž vysílání,
+- spočítat `frame_hash` ani doplnit RSSI, který zdroj neposlal,
+- odlišit nový telegram se stejnou hodnotou od staršího jinak než časem zdroje a tělem zprávy,
+- použít okno W. To patří jen surovému rámci.
+
+Korelace níže je proto jen záznam shody, ne sloučení odečtů.
 
 ### Idempotence a deduplikace
 
-1. **Doručení:** `ingest_message_keys (device_id, msg_key)`. Když dodavatel id zprávy nemá, je `msg_key` hash kanonického těla. Stejné tělo poslané znovu je duplicitní doručení.
-2. **Opakované poslání stejného měření v nové zprávě** (např. denní přeposlání posledních 7 dní): částečný unikátní index `meter_readings (meter_id, source_stream_id, measured_at) WHERE source_kind = 'vendor_decoded' AND superseded_at IS NULL`. Stejná hodnota je duplicita. Jiná hodnota pro stejný čas se nepřepíše: uloží se do `decoded_observations` se stavem `conflict` a upozorní administrátora.
-3. Pravidlo 2 platí jen uvnitř jednoho streamu, kde je `(měřidlo, čas zdroje)` identitou měření.
+1. **Doručení:** `ingest_message_keys (device_id, msg_key)`. Když zdroj id zprávy nemá, je `msg_key` hash kanonického těla. Stejné tělo poslané znovu je případ 1 (duplicitní doručení) a má vlastní příjem.
+2. **Stejné měření v nové zprávě** (například denní přeposlání posledních 7 dní): částečný unikátní index `meter_readings (meter_id, source_stream_id, measured_at) WHERE source_kind = 'vendor_decoded' AND superseded_at IS NULL`. Rozhoduje trojice měřidlo, stream a čas zdroje. Stejná hodnota v jiném čase duplicita není. Jiná hodnota pro stejný čas se nepřepíše: uloží se do `decoded_observations` se stavem `conflict` a upozorní administrátora.
+3. Pravidlo 2 platí jen uvnitř jednoho streamu. `vendor:acrios` a `vendor:<jiný kód>` se neslučují. Dva koncentrátory téhož partnera sdílejí stream `vendor:<kód>`, každý se svým `device_id`, a příjmy zůstávají oddělené.
 
 ### Korelace se surovými telegramy
 
-Stejné rádiové vysílání může přijmout ESP (raw) i koncentrátor (decoded). Tato data se **neslučují do jednoho odečtu**, protože bez ACC a rámce nejde bezpečně rozhodnout, že jde o stejný telegram.
+Stejné rádiové vysílání může přijmout ESP (raw) i koncentrátor (decoded), a to i když oba nesou značku ACRIOS. Raw a decoded se **neslučují do jednoho odečtu**, protože bez ACC a rámce nejde bezpečně rozhodnout, že jde o stejný telegram. Koncentrátor, který předá rámec, je ve streamu `radio` a slučuje se podle `frame_hash`. Koncentrátor, který předá jen hodnoty, je ve `vendor:<kód>`.
 
 - Každý stream má vlastní odečty.
 - Shoda se zaznamená jen v tomto případě: dekódovaná data obsahují čas z hodin měřidla nebo ACC a stejné měřidlo má odečet z rádia se stejným časem nebo ACC a stejnou hodnotou. Odečty se propojí jako vzájemné potvrzení, žádný se nesmaže.
@@ -374,8 +547,8 @@ Každé měřidlo má v každém okamžiku právě jeden přiřazený stream (`m
   - kumulativní hodnota neklesá,
   - přírůstek nepřekročí `max_flow_per_hour`.
 
-  Porušení znamená příznak a anomálii. Odečet se uloží, ale do spotřeby se nezapočte do rozhodnutí administrátora.
-- `decoder_version` se ukládá k odečtu. Opakované dekódování po změně verze se dělá řízeně: nevytváří nové odečty a změnu zapíše do auditu.
+  Porušení znamená `quality = suspect`, příznak a anomálii. Odečet se uloží, ale do spotřeby se nezapočte, dokud administrátor nevyplní `accepted_at`. Hodnota se tím nemění.
+- `decoder_version` a u dat z adaptéru i `adapter_version` se ukládají k odečtu v okamžiku, kdy hodnota vznikla. Opětovné dekódování je případ 5 v [Pět případů, které se nesmí slít](#pět-případů-které-se-nesmí-slít): druhý aktivní odečet nevznikne.
 - Výsledky: `decoded`, `no_key`, `failed`.
 
 ## Monitoring zařízení
@@ -389,7 +562,8 @@ Každé měřidlo má v každém okamžiku právě jeden přiřazený stream (`m
   - sílu signálu,
   - stav NTP,
   - počet odfiltrovaných neznámých měřidel.
-- Administrace ukazuje u každého měřidla přiřazený stream a zařízení, která ho naposledy zachytila. U každého zařízení ukazuje frontu, boot, epochu a posun hodin.
+- Administrace ukazuje u každého měřidla přiřazený stream a zařízení, která ho naposledy zachytila. U každého zařízení ukazuje frontu, boot, epochu a posun hodin, pokud je zařízení posílá.
+- U koncentrátoru, který heartbeat ve tvaru ESP neposílá, se poslední kontakt bere z posledního příjmu na jeho transportech. Pole fronty a `rx_uptime` se pro něj nevyplňují. Verze firmware z payloadu, když v něm je, se zapíše do `device_firmware_history`. Jak vypadá stavová zpráva ACRIOS, určí PoC.
 
 ## Testy
 
@@ -407,8 +581,11 @@ Každé měřidlo má v každém okamžiku právě jeden přiřazený stream (`m
   - hodiny zařízení v budoucnosti,
   - regrese `boot_counter`,
   - nové `instance_id` po vymazání flash.
-- **Idempotence:** opakované doručení po ztraceném ACK a po pádu collectoru před a po COMMIT.
-- **Dekódovaná data:** opakované poslání, konflikt hodnot, korelace s rádiem.
+- **Idempotence:** opakované doručení po ztraceném ACK a po pádu collectoru před a po COMMIT. Druhé doručení má příjem `duplicate_delivery` a stejný počet odečtů.
+- **Pět případů:** opakované doručení, dva koncentrátory se stejným rámcem, nový telegram se stejnou hodnotou a jiným ACC, fragmenty, opětovné dekódování se stejnou i jinou hodnotou. Deduplikace podle samotné hodnoty musí v testu selhat, pokud by sloučila různá měření.
+- **Fragmenty:** neúplná sada, opakovaný fragment se stejným hashem, fragment s jiným hashem, fragment cizího `group_key` nebo cizího zařízení, timeout. Dekodér dostane v testu jen kompletní sadu.
+- **Dekódovaná data:** opakované poslání, konflikt hodnot, stejná hodnota v jiném čase jako dva odečty, korelace s rádiem bez sloučení, JSON bez vyrobeného rámce.
+- **Identita zařízení:** výměna IMSI ponechá `device_id` a historii. Stejné IMSI u jiného zařízení je konflikt a zařízení se nezaloží z těla zprávy.
 - **Preferovaný zdroj:**
   - přechod s úspěšnou kontrolou,
   - zablokovaný přechod (pokles hodnoty, nereálný průtok),

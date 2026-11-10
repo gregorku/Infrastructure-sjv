@@ -1,6 +1,6 @@
 # Rozhodnutí
 
-Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026. R15 je schválené rozhodnutí. Schválení dokumentace neznamená souhlas s nasazením.
+Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19). R15 zůstává schválené a beze změny. Schválení dokumentace neznamená souhlas s nasazením.
 
 ## Potvrzená rozhodnutí
 
@@ -20,21 +20,25 @@ Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026. R15 je schválen�
 | 12 | Dokumentace malými písmeny | Stejná konvence jako `Infrastructure-Nextcloud-Lu` |
 | 13 | Aplikace je jen informační | Bez rozúčtování nákladů a bez výpočtu cen |
 | 14 | Člen vidí aktuální kumulativní stav měřidla a historii jen za své členství | Hodnota je celkový stav počítadla, ne osobní spotřeba. Administrátor má kompletní historii |
+| 15 | PostgreSQL je centrální a jediný dlouhodobý zdroj pravdy | Všechna data z koncentrátoru, zařízení, transportu i importu se evidují v jednom modelu SJV. Model nezávisí na výrobci, modelu zařízení ani protokolu |
+| 16 | ACRIOS je integrační partner, ne vlastník modelu | Adaptér převádí příjem na jeden interní kontrakt. Oddělený model výrobce ani evidence odečtů podle transportu nevzniká |
+| 17 | `devices.id` je neměnné a měřidlo nepatří koncentrátoru | IMSI a IMEI jsou externí identifikátory s historií. Výměna SIM nezakládá nové zařízení ani novou historii |
+| 18 | Deduplikace raw telegramů zůstává a rozšiřuje se na pět případů příjmu | Stejná naměřená hodnota sama o sobě zprávy neslučuje. Neúplná fragmentovaná zpráva se dekodéru nepředává |
+| 19 | Schéma je nezávislé na ACRIOS PoC | PoC je podmínka adaptéru daného zařízení, ne podmínka tabulek. Stejná brána platí pro dalšího výrobce |
 
 ## Retence
 
 | Data | Retence | Mechanismus |
 | --- | --- | --- |
 | Odečty (`meter_readings`) a denní hodnoty (`meter_daily_values`) | trvale | tabulky bez partitioningu, bez cizích klíčů na data s retencí |
-| Surové telegramy (`raw_telegrams`), dekódovaná pozorování (`decoded_observations`) | 24 měsíců | měsíční partitions, mazání celé partition |
-| Příjmy telegramů (`telegram_receipts`) | 24 měsíců | měsíční partitions, mažou se před telegramy |
+| Původní obálky (`ingest_payloads`), příjmy (`ingest_receipts`), fragmenty (`ingest_fragments`, `ingest_fragment_sets`), odmítnuté obálky (`ingest_rejections`), surové telegramy (`raw_telegrams`), dekódovaná pozorování (`decoded_observations`) | 24 měsíců | měsíční partitions, mazání celé partition. `ingest_receipts` nahrazuje dřívější `telegram_receipts` |
 | Události zařízení (`device_events`) | 12 měsíců | měsíční partitions |
 | Audit (`audit_logs`) | dlouhodobě | bez partitioningu, hash řetězec, jen INSERT |
 | Klíče idempotence a deduplikace, epochy bootů | 60 dní | `DELETE` v dávkách. Delší než maximální stáří zprávy (30 dní) |
 | Neznámá měřidla (`unknown_meter_sightings`) | 90 dní od posledního zachycení | `DELETE` |
 | Pokusy o přihlášení, notifikace | 90 dní (návrh k potvrzení) | `DELETE` |
 
-Mazání respektuje vazby: nejdřív příjmy, potom telegramy a pozorování. Retence se odloží, pokud v měsíci čekají telegramy na dekódování, nebo dekódovanému telegramu chybí odečet. Pořadí je v [database-design.md](database-design.md#retence-a-vazby).
+Mazání respektuje vazby: nejdřív příjmy, fragmenty a odmítnutí, potom payloady, telegramy a pozorování. Retence se odloží, pokud v měsíci čekají telegramy na dekódování, dekódovanému telegramu chybí odečet, nebo na mazaný payload ještě odkazuje příjem. Pořadí je v [database-design.md](database-design.md#retence-a-vazby).
 
 Zálohy prodlužují faktickou dobu uložení. Roční snapshot restic drží data až 3 roky po jejich smazání z databáze. Patří to do záznamů o zpracování osobních údajů.
 
@@ -61,6 +65,20 @@ Změny proti dokumentaci z kola 2. Všech devět dokumentů je s nimi sladěnýc
 | R15 | Aktuální stav pro člena | Nebylo určeno | Schváleno. Člen vidí aktuální kumulativní stav měřidla, označený jako celkový stav počítadla, ne jako osobní spotřebu. Historické odečty a vypočítanou spotřebu vidí jen za období svého členství. Administrátor má kompletní historii |
 | R16 | Retence odečtů | „dlouhodobě“ | „trvale“, podle zadání |
 
+## Doplnění 10. 11. 2026: univerzální datová vrstva a ACRIOS
+
+Rozhodnutí 15–19. Podrobnosti jsou v [architecture.md](architecture.md), [data-ingestion.md](data-ingestion.md), [database-design.md](database-design.md), [security.md](security.md) a [implementation-plan.md](implementation-plan.md).
+
+| # | Pravidlo |
+| --- | --- |
+| 15 | Cokoli přijde z ACRIOS MQTT, ACRIOS UDP/DTLS, ACRIOS HTTPS, ACRIOS Platform API, vlastního ESP32/LILYGO, jiného koncentrátoru nebo z importu CSV a dalších podporovaných souborů, uloží se do PostgreSQL. Databáze není model výrobce. |
+| 16 | Adaptér umí jen převod na interní kontrakt. Když zdroj pošle jen dekódovanou hodnotu, uloží se původní JSON nebo CSV. Chybějící raw telegram se nevymýšlí. |
+| 17 | Interní `device_id` se po založení nemění a znovu se nepřiděluje. Výměna SIM uzavře staré IMSI nebo ICCID a přidá nové ke stejnému zařízení. Nový řádek `devices` vzniká při výměně hardwaru, ne při výměně SIM. Měřidlo nemá vazbu „patří koncentrátoru“. |
+| 18 | Pět případů se eviduje odděleně: opakované doručení stejné zprávy, stejný telegram od více koncentrátorů, nový telegram se stejnou hodnotou, fragmenty jedné zprávy, opětovné dekódování novou verzí dekodéru. Každý příjem má záznam. Jeden skutečný odečet má jeden aktivní řádek `meter_readings`. |
+| 19 | Fáze ACRIOS PoC ověří konkrétní zařízení dřív, než vznikne jeho adaptér. Tabulky na výsledek PoC nečekají a neobsahují sloupce jednoho modelu. Další výrobce dostane vlastní PoC a stejný model. |
+
+R15 se tím nemění. Aktuální stav pro člena je dál poslední kumulativní stav přiřazeného streamu, označený jako celkový stav počítadla. Intervalové hodnoty a události ho nenahrazují.
+
 Další upřesnění bez samostatného čísla:
 
 - Uživatel se nemaže, ale anonymizuje (vazby na členství a audit). Kmenová data mají soft delete.
@@ -76,13 +94,16 @@ Hodnoty, které nejsou známé, se nedoplňují odhadem.
 | Volná IP v `incusbr0` a kapacita VPS (`<CPU>`, `<RAM>`, disk) | E1, nasazení na VPS |
 | Zda lze na `serveftp.org` založit `sjv-mqtt.serveftp.org` a jak se jméno udržuje | E2, MQTT hostname |
 | Skutečný ZFS pool a výsledek ověření. `zfs-RAID-6TB` v NixOS konfiguraci `domaPcServer` není | E6, fáze 3 |
-| Upload domácí linky | odhad RTO |
+| Upload domácí linky | odhad RTO před DR testem ve fázi 13 |
 | WireGuard rozhraní MikroTiku, LAN IP `domaPcServer`, porty `<P>` a `<P2>` | E5 |
 | SMTP účet | E7, notifikace |
 | Retence ZFS snapshotů, pokusů o přihlášení a notifikací | E6, fáze 4 |
 | Maximální stáří zprávy (návrh 30 dní) | fáze 5 |
 | Hardware ESP (čip, rádio, flash, konektivita, napájení) | firmware |
 | Vzorky telegramů, typy měřidel tepla, AES klíče | fáze 6 |
-| Dokumentace koncentrátoru dodavatele | fáze 11 |
+| Dokumentace a vzorky konkrétního ACRIOS: model, revize hardwaru, firmware, skutečně dostupné transporty, topics nebo API, surové i dekódované payloady, fragmentace, opakované doručení, autentizace, přímé připojení bez ACRIOS Platform | fáze 11 (PoC). Neblokuje návrh tabulek ani fázi 4. Blokuje fázi 12 pro tento přístroj |
+| Zda další model ACRIOS umí totéž co přístroj z PoC | nesmí se předpokládat. Každý model má vlastní záznam schopností a případně vlastní PoC |
+| Zda Platform API vrací stabilní identifikátor koncentrátoru přes výměnu SIM, jaký čas payload nese a zda dekódovaná data obsahují ACC nebo čas měřidla | mapování adaptéru ve fázi 12, ne tvar tabulek |
+| UDP/DTLS port a případný DNAT, pokud PoC přímý UDP potvrdí | samostatná změna mimo repozitář, až po PoC. Teď se port nepublikuje |
 | Počet měřidel a intervaly vysílání | odhad objemu, fáze 4 |
 | Verze software a ověření bodů „k ověření“ | fáze 1–3 |

@@ -8,10 +8,10 @@ Stav: etapa B1b (instalační základ, Traefik a CrowdSec). Aplikace, databáze,
 
 | Dokument | Obsah |
 | --- | --- |
-| [docs/decisions.md](docs/decisions.md) | rozhodnutí R1–R16 a otevřené body |
+| [docs/decisions.md](docs/decisions.md) | rozhodnutí 1–19, revize R1–R16 a otevřené body |
 | [docs/architecture.md](docs/architecture.md) | služby, sítě, adresáře, tok dat |
 | [docs/database-design.md](docs/database-design.md) | schéma PostgreSQL a role |
-| [docs/data-ingestion.md](docs/data-ingestion.md) | příjem dat z koncentrátoru a ESP |
+| [docs/data-ingestion.md](docs/data-ingestion.md) | jednotný příjem: ESP, ACRIOS, další koncentrátory a importy |
 | [docs/security.md](docs/security.md) | bezpečnostní model |
 | [docs/backup-strategy.md](docs/backup-strategy.md) | zálohy a obnova |
 | [docs/external-changes.md](docs/external-changes.md) | změny mimo repozitář (E1–E7) |
