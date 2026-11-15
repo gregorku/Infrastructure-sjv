@@ -10,6 +10,26 @@ env_warn() { ENV_WARNINGS+=("$*"); }
 
 readonly ENV_EMAIL_RE='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
 readonly ENV_HOSTNAME_RE='^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$'
+
+# example.com is the documentation zone shipped in .env.example. A name in
+# that zone, including mqtt.example.com, is not a production hostname.
+env_is_documentation_hostname() {
+    local host="${1,,}"
+    [[ "${host}" == example.com || "${host}" == *.example.com ]]
+}
+
+# Accepts a DNS hostname of at most 253 characters. Rejects the documentation
+# zone before the general pattern, so example.com cannot pass production.
+env_check_dns_hostname() {
+    local key="$1" value="$2"
+    if env_is_documentation_hostname "${value}"; then
+        env_err "${key} is a documentation placeholder (${value}) and is not usable in production."
+        return
+    fi
+    if (( ${#value} > 253 )) || [[ ! "${value}" =~ ${ENV_HOSTNAME_RE} ]]; then
+        env_err "${key} is not a valid DNS host name."
+    fi
+}
 readonly ENV_PG_NAME_RE='^[a-z_][a-z0-9_]{0,62}$'
 readonly ENV_MQTT_USER_RE='^[a-z][a-z0-9-]{2,31}$'
 readonly ENV_GENERATED_SECRET_RE='^[A-Za-z0-9_-]+$'
@@ -365,14 +385,9 @@ env_validate() {
     [[ "${env_val_ref[COMPOSE_PROJECT_NAME]}" == "${STACK_NAME}" ]] || env_err "COMPOSE_PROJECT_NAME must be ${STACK_NAME}."
     [[ "${env_val_ref[DATA_DIR]}" == "${PRODUCTION_DATA_DIR}" ]] || env_err "DATA_DIR must be ${PRODUCTION_DATA_DIR}."
     [[ "${env_val_ref[BACKUP_LOCAL_DIR]}" == "${PRODUCTION_BACKUP_LOCAL_DIR}" ]] || env_err "BACKUP_LOCAL_DIR must be ${PRODUCTION_BACKUP_LOCAL_DIR}."
-    [[ "${env_val_ref[SJV_DOMAIN]}" == "${SJV_DOMAIN}" ]] || env_err "SJV_DOMAIN must be ${SJV_DOMAIN}."
     [[ "${env_val_ref[TZ]}" =~ ^(UTC|[A-Z][A-Za-z_]+(/[A-Za-z0-9_+-]+)+)$ ]] || env_err "TZ is not an IANA time zone name."
-
-    local allowed found=0
-    for allowed in "${MQTT_HOSTNAME_ALLOWED[@]}"; do
-        [[ "${env_val_ref[MQTT_HOSTNAME]}" == "${allowed}" ]] && found=1
-    done
-    (( found == 1 )) || env_err "MQTT_HOSTNAME must be one of: ${MQTT_HOSTNAME_ALLOWED[*]}."
+    env_check_dns_hostname SJV_DOMAIN "${env_val_ref[SJV_DOMAIN]}"
+    env_check_dns_hostname MQTT_HOSTNAME "${env_val_ref[MQTT_HOSTNAME]}"
 
     env_check_images "$1"
     env_check_networks "$1"

@@ -107,7 +107,7 @@ Platí pro ACRIOS a pro každý další koncentrátor. Metoda autentizace se vyb
 
 ## Secrets a konfigurace
 
-- Konvence z reference: runtime `.env` je jen v `/docker-data/stacks/infrastructure-sjv/.env` s právy `600`. Šablona `.env.example` obsahuje jen placeholdery `set_*`, které `check-env.sh` odmítne. Generovaná hesla se nikdy nevypisují.
+- Konvence z reference: runtime `.env` je jen v `/docker-data/stacks/infrastructure-sjv/.env` s právy `600`. Šablona `.env.example` nemá skutečné domény ani hesla. Dokumentační jména `example.com` a `mqtt.example.com` i placeholdery `set_*` `check-env.sh` odmítne. `SJV_DOMAIN` a `MQTT_HOSTNAME` jsou uživatelské, takže synchronizace existující jména nepřepíše. Generovaná hesla se nikdy nevypisují.
 - `test.sh --static` ověří, že `.env`, klíče, `acme.json`, `htpasswd` ani soubory dynsec nejsou v checkoutu a že je ignoruje `.gitignore`.
 - Hesla jdou do psql přes `\getenv` a do Mosquitta přes soubor, nikdy jako argument procesu.
 
@@ -116,7 +116,7 @@ Platí pro ACRIOS a pro každý další koncentrátor. Metoda autentizace se vyb
 - Ven publikují porty jen `sjv-traefik` (80, 443) a `sjv-mosquitto` (8883).
 - PostgreSQL je jen na `sjv-internal` (`internal: true`), bez portu.
 - Traefik nemá `docker.sock`.
-- PROXY protocol jen od adresy HAProxy jako `/32` (předpoklad `10.10.10.1/32`, ověří se pozorováním). `insecure` je zakázané a forwarded hlavičky se nedůvěřují. Převzato z reference včetně testů.
+- PROXY protocol jen od adresy HAProxy jako `/32`. V šabloně je očekávaná adresa `10.10.10.1/32`. Před spolehnutím se na ni se potvrdí skutečným provozem. `insecure` je zakázané a forwarded hlavičky se nedůvěřují. Převzato z reference včetně testů.
 - Dashboard Traefiku jen na entrypointu `admin` s allowlistem a BasicAuth.
 
 ## CrowdSec

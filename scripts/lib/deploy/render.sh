@@ -326,7 +326,8 @@ deploy_render_runtime() {
     render_chains "${dynamic}" "${crowdsec}"
     [[ "${crowdsec}" == yes ]] && render_crowdsec_middleware "${dynamic}"
     render_app "${dynamic}" "${RUNTIME_ENV[SJV_DOMAIN]}" "${RUNTIME_ENV[TRAEFIK_TLS_MODE]}"
-    if [[ "${RUNTIME_ENV[MQTT_HOSTNAME]}" == "sjv-mqtt.serveftp.org" && "${RUNTIME_ENV[TRAEFIK_TLS_MODE]}" == letsencrypt ]]; then
+    local mqtt_host="${RUNTIME_ENV[MQTT_HOSTNAME],,}" site_host="${RUNTIME_ENV[SJV_DOMAIN],,}"
+    if [[ "${RUNTIME_ENV[TRAEFIK_TLS_MODE]}" == letsencrypt && "${mqtt_host}" != "${site_host}" ]]; then
         render_mqtt_certificate "${dynamic}" "${RUNTIME_ENV[MQTT_HOSTNAME]}"
     else
         rm -f -- "${dynamic}/mqtt-cert.yml"

@@ -40,4 +40,8 @@ mapfile -t pending < <(env_list_placeholders "${ENV_FILE}")
 if (( ${#pending[@]} > 0 )); then
     warn "Still placeholders (edit ${ENV_FILE}): ${pending[*]}"
 fi
-print_footer "Next: replace the remaining set_ values, then run ./scripts/check-env.sh"
+mapfile -t documentation_hosts < <(env_list_documentation_hostnames "${ENV_FILE}")
+if (( ${#documentation_hosts[@]} > 0 )); then
+    warn "Documentation hostnames are not usable in production (edit ${ENV_FILE}): ${documentation_hosts[*]}"
+fi
+print_footer "Next: replace documentation hostnames and the remaining set_ values, then run ./scripts/check-env.sh"

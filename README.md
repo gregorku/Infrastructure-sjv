@@ -1,6 +1,6 @@
 # Infrastructure-sjv
 
-Informační systém SJV na `sjv.serveftp.org`: sběr odečtů měřidel (wM-Bus), aplikace pro členy a správu, zálohy. Běží jako Docker stack v samostatném Incus kontejneru.
+Informační systém SJV: sběr odečtů měřidel (wM-Bus), aplikace pro členy a správu, zálohy. Běží jako Docker stack v Incus kontejneru `sjv-monitoring`. Veřejné jméno je hodnota `SJV_DOMAIN` v runtime `.env`.
 
 Stav: etapa B1b (instalační základ, Traefik a CrowdSec). Aplikace, databáze, MQTT ani zálohy zatím nejsou implementované.
 
@@ -38,4 +38,5 @@ Podrobnosti jsou v [docs/operations.md](docs/operations.md).
 ## Pravidla repozitáře
 
 - Runtime `.env`, klíče, certifikáty ani data nepatří do Gitu. Hlídá to `.gitignore` a `test.sh`.
+- Veřejné domény jsou jen v runtime `.env` (`SJV_DOMAIN`, `MQTT_HOSTNAME`). V Gitu zůstávají dokumentační hodnoty `example.com` a `mqtt.example.com`.
 - Dokumentace je česky, kód a komentáře anglicky, názvy souborů v `docs/` malými písmeny.

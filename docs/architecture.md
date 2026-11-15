@@ -1,6 +1,6 @@
 # Architektura
 
-Infrastructure-sjv je samostatný Docker Compose stack pro informační systém SJV na `sjv.serveftp.org`. Běží v samostatném Incus kontejneru na VPS `netcupVPSServer`. Nezávisí na Nextcloudu, Home Assistantu, Authentiku ani Vaultwardenu. Aplikace je jen informační, bez rozúčtování nákladů.
+Infrastructure-sjv je samostatný Docker Compose stack pro informační systém SJV. Veřejné jméno je `SJV_DOMAIN` v runtime `.env`. Běží v Incus kontejneru `sjv-monitoring` na VPS `netcupVPSServer`. Nezávisí na Nextcloudu, Home Assistantu, Authentiku ani Vaultwardenu. Aplikace je jen informační, bez rozúčtování nákladů.
 
 PostgreSQL je centrální a jediný dlouhodobý zdroj pravdy (rozhodnutí 15 v [decisions.md](decisions.md)). ESP, ACRIOS i každý další vstup končí ve stejném modelu. ACRIOS je integrační partner. Konkrétní model a protokol nejsou vybrané a schéma na nich nezávisí.
 
@@ -17,18 +17,18 @@ Související dokumenty:
 
 ## Kontext VPS
 
-Zjištěno čtením repozitáře NixOS. Nic z toho tento projekt nemění.
+Aktuální nasazení. Tento repozitář DNS, HAProxy ani Incus nemění.
 
 | Fakt | Zdroj |
 | --- | --- |
 | HAProxy na hostiteli: port 80 v režimu HTTP podle `Host`, port 443 jako TCP passthrough podle SNI, do Incusu s `send-proxy-v2` | `modules/server/haproxy-netcupVPSServer.nix` |
-| `default_backend` míří na Nextcloud Gregora. Bez nové routy by provoz pro `sjv.serveftp.org` skončil tam | tamtéž |
-| Incus síť `incusbr0` = `10.10.10.0/24`, brána `10.10.10.1`, úložiště `dir` | `modules/server/incus-netcupVPSServer.nix` |
+| `default_backend` míří na Nextcloud Gregora. Bez routy pro `SJV_DOMAIN` provoz pro jméno SJV skončí tam | tamtéž |
+| Incus síť `incusbr0` = `10.10.10.0/24`, brána `10.10.10.1`, kontejner `sjv-monitoring` = `10.10.10.20` | aktuální nasazení |
+| `PROXY_PROTOCOL_TRUSTED_IPS=10.10.10.1/32` je očekávaná zdrojová adresa HAProxy. Před spolehnutím se na ni se potvrdí skutečným provozem | runtime `.env` |
 | V DNAT pravidlech jsou použité adresy `10.10.10.10`, `.11`, `.12`, `.100` | `modules/server/firewall/dnat-netcupVPSServer.nix` |
-| Forward chain povoluje provoz do i z `incusbr0`. Provoz z Incusu do `wg1` se maskuje | `modules/server/firewall/firewall-vps-netcup.nix` |
-| `wg1` = `10.100.100.0/24`, VPS `10.100.100.1`, MikroTik doma `10.100.100.100/32` | `modules/server/wireguard-*.nix` |
-
-Volná IP pro kontejner `sjv` není známá a zůstává otevřeným bodem.
+| Forward chain povoluje provoz do i z `incusbr0`. Provoz z Incusu do WireGuardu se maskuje | `modules/server/firewall/firewall-vps-netcup.nix` |
+| WireGuard: `10.100.101.0/24` (správa z domova), `10.110.110.0/24`, `10.120.120.0/24` | aktuální nasazení |
+| Výchozí Docker bridge `172.17.0.0/16` | Docker v kontejneru |
 
 ## Toky
 
@@ -89,7 +89,7 @@ V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefi
 - Pevná adresa Traefiku na `sjv-proxy` je první adresa za branou této sítě. Počítá ji `deploy.sh` a předá ji Compose jako `TRAEFIK_PROXY_ADDRESS`. V `.env` tato hodnota není.
 - Traefik má jen file provider. `docker.sock` se nikam nemountuje. Porty hosta jsou jen 80 a 443. Entrypoint `admin` se publikuje jen do stackové kopie `compose/15-traefik-admin-port.yml`, a jen když existuje heslo dashboardu a `TRAEFIK_ADMIN_PUBLISH`.
 - Routy `sjv-api` (`http://sjv-backend:8000`) a `sjv-web` (`http://sjv-web:8080`) jsou připravené. Kontejnery těchto služeb tato etapa nespouští.
-- Samostatný certifikát MQTT se vykreslí jen při `MQTT_HOSTNAME=sjv-mqtt.serveftp.org` a `TRAEFIK_TLS_MODE=letsencrypt`.
+- Samostatný certifikát MQTT se vykreslí, když se `MQTT_HOSTNAME` liší od `SJV_DOMAIN` a `TRAEFIK_TLS_MODE=letsencrypt`.
 - CrowdSec je na `sjv-internal` a `sjv-egress`, bez portu na hostu. LAPI je `crowdsec:8080`. Healthcheck volá `cscli lapi status`, takže Traefik čeká na skutečně dostupnou LAPI, ne na verzi binárky. Bouncer middleware se připojí až po `post-deploy.sh`, protože klíč v tu chvíli teprve vzniká.
 - Traefik má kořen souborového systému jen pro čtení, zahozené capabilities kromě `NET_BIND_SERVICE` a zapisuje jen do ACME, logů a `/plugins-storage`. CrowdSec má zahozené všechny capabilities. Nepřepíná se na jiného uživatele: oficiální entrypoint zapisuje `/etc/crowdsec` a databázi a image nemá neprivilegovaný účet, pod kterým by tyto zápisy prošly.
 - `traefik.log` rotuje Traefik sám (`maxSize` 20 MB, `maxAge` 14 dní, `maxBackups` 14, komprese). `access.log` rotuje `scripts/rotate-traefik-logs.sh` přes copytruncate, aby CrowdSec zůstal na stejném inode. Návrh timeru je v `ops/systemd/` a do NixOS se neinstaluje.
@@ -108,21 +108,23 @@ Proč čtyři sítě:
 - Kontejner, který je jen na síti `internal: true`, nemůže publikovat port ani navázat odchozí spojení. Proto Mosquitto potřebuje `sjv-mqtt` a CrowdSec, worker a restic potřebují `sjv-egress`.
 - PostgreSQL a collector jsou jen na `sjv-internal` a ven se nedostanou.
 
-Podsítě se zadávají v `.env` jako hodnoty `set_*`. `check-env.sh` odmítne překryv mezi nimi a s `10.10.10.0/24`, `10.100.100.0/24`, `10.110.100.0/24` a `10.120.100.0/24`.
+Projektové sítě v `.env` jsou `172.20.0.0/24`, `172.21.0.0/24`, `172.22.0.0/24` a `172.23.0.0/24`, každá s branou `.1`. Jsou uživatelské, takže `update-env.sh` existující hodnoty ponechá. `check-env.sh` odmítne překryv mezi nimi a s `10.10.10.0/24`, `10.100.101.0/24`, `10.110.110.0/24`, `10.120.120.0/24` a `172.17.0.0/16`.
 
 ## Hostnames a TLS
 
-| Jméno | Účel | Stav |
-| --- | --- | --- |
-| `sjv.serveftp.org` | web, API, HTTPS ingest. MQTT, pokud nevznikne samostatné jméno | potvrzeno |
-| `sjv-mqtt.serveftp.org` | samostatné jméno pro MQTT | návrh. Zda ho jde založit, je otevřené |
+| Proměnná | Účel |
+| --- | --- |
+| `SJV_DOMAIN` | web, API, HTTPS ingest |
+| `MQTT_HOSTNAME` | jméno brokeru. Stejná hodnota jako `SJV_DOMAIN` znamená MQTT na jménu webu. Jiné platné DNS jméno dostane vlastní certifikát |
 
-Samostatné MQTT jméno doporučuji. Zařízení pak mají v konfiguraci jméno, které se nezmění ani při přesunu brokeru, a certifikát pro MQTT je oddělený od webu. Když jméno nebude dostupné, MQTT poběží na `sjv.serveftp.org:8883` a nic jiného se nemění.
+Obě proměnné jsou uživatelské. Šablona v Gitu má `example.com` a `mqtt.example.com`. `check-env.sh` tato dokumentační jména odmítne. `update-env.sh` existující hodnotu v runtime `.env` ponechá a ze šablony ji nepřepíše.
+
+Samostatné MQTT jméno drží adresu brokeru stabilní i při přesunu a oddělí certifikát MQTT od webu. Když druhé jméno není k dispozici, `MQTT_HOSTNAME` se nastaví na stejnou hodnotu jako `SJV_DOMAIN` a broker poslouchá na `<SJV_DOMAIN>:8883`.
 
 ### Obnova certifikátů
 
 1. Traefik získává certifikáty Let's Encrypt přes HTTP-01 na entrypointu `web`. Vyžaduje routu HAProxy na portu 80 (E3 v [external-changes.md](external-changes.md)).
-2. Pro samostatné MQTT jméno existuje soubor `configs/traefik/dynamic/mqtt-cert.yml` s routerem `Host(sjv-mqtt…)`, certResolverem `letsencrypt` a službou `noop@internal`. Jediný účel routeru je, aby Traefik certifikát vyžádal a obnovoval.
+2. Když se MQTT jméno liší od jména webu, `deploy.sh` zapíše `runtime/traefik/dynamic/mqtt-cert.yml` s routerem `Host(<MQTT_HOSTNAME>)`, certResolverem `letsencrypt` a službou `noop@internal`. Router jen zařídí, aby Traefik certifikát vyžádal a obnovoval.
 3. `scripts/cert-sync.sh` spouští timer `sjv-cert-sync.timer` každých 6 h. Skript:
    - přečte `acme.json` (jen čtení, `jq`),
    - vybere certifikát pro MQTT jméno,

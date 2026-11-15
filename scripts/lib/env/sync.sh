@@ -276,3 +276,15 @@ env_list_placeholders() {
         fi
     done < <(env_keys_in_order "${file}")
 }
+
+# Prints the names of keys whose value is still a documentation hostname.
+env_list_documentation_hostnames() {
+    local file="$1" key
+    local -A values=()
+    env_parse_file "${file}" values
+    while IFS= read -r key; do
+        if env_is_documentation_hostname "${values[${key}]}"; then
+            printf '%s\n' "${key}"
+        fi
+    done < <(env_keys_in_order "${file}")
+}

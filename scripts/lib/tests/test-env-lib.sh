@@ -11,7 +11,9 @@ fixture_valid_env() {
     local key
     fixture_ref=()
     env_parse_file "${ENV_EXAMPLE_FILE}" fixture_ref
-    fixture_ref[MQTT_HOSTNAME]="sjv-mqtt.serveftp.org"
+    fixture_ref[SJV_DOMAIN]="app.example.net"
+    fixture_ref[MQTT_HOSTNAME]="mqtt.example.net"
+    fixture_ref[TRAEFIK_ACME_EMAIL]="admin@example.net"
     fixture_ref[DOCKER_PROXY_SUBNET]="172.30.10.0/24"
     fixture_ref[DOCKER_PROXY_GATEWAY]="172.30.10.1"
     fixture_ref[DOCKER_INTERNAL_SUBNET]="172.30.11.0/24"
@@ -155,14 +157,28 @@ test_env_validate() {
     expect_valid "haproxy with a private /32" TRAEFIK_TLS_MODE=letsencrypt TRAEFIK_ACME_EMAIL=admin@example.org \
         PROXY_PROTOCOL_MODE=haproxy PROXY_PROTOCOL_TRUSTED_IPS=10.10.10.1/32
     expect_valid "a private admin publish address" TRAEFIK_ADMIN_PUBLISH=10.66.0.5:8443:8443
-    expect_valid "a remote restic repository" "RESTIC_REPOSITORY=rest:https://infrastructure-sjv@10.100.100.100:8000/infrastructure-sjv/" \
+    expect_valid "a remote restic repository" "RESTIC_REPOSITORY=rest:https://infrastructure-sjv@10.100.101.100:8000/infrastructure-sjv/" \
         RESTIC_REST_PASSWORD=fixture-rest-password-0123
     expect_valid "a complete SMTP configuration" SMTP_HOST=smtp.example.org SMTP_USER=sjv SMTP_PASSWORD=fixture-smtp \
         MAIL_FROM=sjv@example.org SMTP_SECURITY=tls SMTP_PORT=465
 
+    expect_valid "the four selected Docker subnets" \
+        DOCKER_PROXY_SUBNET=172.20.0.0/24 DOCKER_PROXY_GATEWAY=172.20.0.1 \
+        DOCKER_INTERNAL_SUBNET=172.21.0.0/24 DOCKER_INTERNAL_GATEWAY=172.21.0.1 \
+        DOCKER_MQTT_SUBNET=172.22.0.0/24 DOCKER_MQTT_GATEWAY=172.22.0.1 \
+        DOCKER_EGRESS_SUBNET=172.23.0.0/24 DOCKER_EGRESS_GATEWAY=172.23.0.1
+    expect_valid "a general DNS host name" MQTT_HOSTNAME=broker.a.example.net
+    expect_valid "a hyphenated DNS host name" SJV_DOMAIN=my-app.example.net
+    expect_valid "MQTT on the same host name as the site" MQTT_HOSTNAME=app.example.net
+
     expect_invalid "a placeholder" "Placeholder is not usable: MQTT_HOSTNAME" MQTT_HOSTNAME=set_mqtt_hostname
     expect_invalid "an empty required value" "Empty variable: PG_DB" PG_DB=
-    expect_invalid "an unknown MQTT host name" "MQTT_HOSTNAME must be one of" MQTT_HOSTNAME=mqtt.example.org
+    expect_invalid "example.com as the site domain" "documentation placeholder (example.com)" SJV_DOMAIN=example.com
+    expect_invalid "mqtt.example.com as the MQTT domain" "documentation placeholder (mqtt.example.com)" MQTT_HOSTNAME=mqtt.example.com
+    expect_invalid "another name in the example.com zone" "documentation placeholder (status.example.com)" MQTT_HOSTNAME=status.example.com
+    expect_invalid "a documentation name in another case" "documentation placeholder (Example.COM)" SJV_DOMAIN=Example.COM
+    expect_invalid "a single-label host name" "not a valid DNS host name" SJV_DOMAIN=sjv
+    expect_invalid "a host name with an underscore" "not a valid DNS host name" MQTT_HOSTNAME=mqtt_broker.example.net
     expect_invalid "a changed framework path" "DATA_DIR must be" DATA_DIR=/srv/sjv
     expect_invalid "an invalid time zone" "TZ is not" "TZ=Prague"
 
@@ -184,9 +200,16 @@ test_env_validate() {
     expect_invalid "a /8 subnet" "prefix must be between" DOCKER_PROXY_SUBNET=10.0.0.0/8 DOCKER_PROXY_GATEWAY=10.0.0.1
     expect_invalid "a public subnet" "RFC 1918" DOCKER_PROXY_SUBNET=8.8.8.0/24 DOCKER_PROXY_GATEWAY=8.8.8.1
     expect_invalid "overlapping stack subnets" "overlap" DOCKER_EGRESS_SUBNET=172.30.10.0/25 DOCKER_EGRESS_GATEWAY=172.30.10.1
-    expect_invalid "overlap with incusbr0" "10.10.10.0/24" DOCKER_MQTT_SUBNET=10.10.10.0/24 DOCKER_MQTT_GATEWAY=10.10.10.1
-    expect_invalid "overlap with wg1" "10.100.100.0/24" DOCKER_MQTT_SUBNET=10.100.0.0/16 DOCKER_MQTT_GATEWAY=10.100.0.1
+    expect_invalid "proxy overlap with Incus" "10.10.10.0/24" DOCKER_PROXY_SUBNET=10.10.0.0/16 DOCKER_PROXY_GATEWAY=10.10.0.1
+    expect_invalid "internal overlap with WireGuard 10.100.101.0/24" "10.100.101.0/24" \
+        DOCKER_INTERNAL_SUBNET=10.100.0.0/16 DOCKER_INTERNAL_GATEWAY=10.100.0.1
+    expect_invalid "mqtt overlap with WireGuard 10.110.110.0/24" "10.110.110.0/24" \
+        DOCKER_MQTT_SUBNET=10.110.0.0/16 DOCKER_MQTT_GATEWAY=10.110.0.1
+    expect_invalid "egress overlap with WireGuard 10.120.120.0/24" "10.120.120.0/24" \
+        DOCKER_EGRESS_SUBNET=10.120.0.0/16 DOCKER_EGRESS_GATEWAY=10.120.0.1
     expect_invalid "overlap with the Docker default bridge" "172.17.0.0/16" DOCKER_MQTT_SUBNET=172.17.5.0/24 DOCKER_MQTT_GATEWAY=172.17.5.1
+    expect_valid "10.100.100.0/24 can be a project subnet" \
+        DOCKER_MQTT_SUBNET=10.100.100.0/24 DOCKER_MQTT_GATEWAY=10.100.100.1
 
     expect_invalid "an allowlist for every address" "must not allow every address" ADMIN_IP_ALLOWLIST=0.0.0.0/0
     expect_invalid "a public allowlist entry" "only private ranges" ADMIN_IP_ALLOWLIST=8.8.8.8/32
@@ -231,13 +254,15 @@ test_env_validate() {
     expect_invalid "admin entrypoint on a public address" "never 0.0.0.0 or a public" TRAEFIK_ADMIN_PUBLISH=8.8.8.8:8443:8443
     expect_invalid "an admin publish with another port" "must look like" TRAEFIK_ADMIN_PUBLISH=10.66.0.5:9000:8443
     expect_invalid "haproxy without letsencrypt" "requires TRAEFIK_TLS_MODE=letsencrypt" \
-        PROXY_PROTOCOL_MODE=haproxy PROXY_PROTOCOL_TRUSTED_IPS=10.10.10.1/32
+        TRAEFIK_TLS_MODE=local PROXY_PROTOCOL_MODE=haproxy PROXY_PROTOCOL_TRUSTED_IPS=10.10.10.1/32
     expect_invalid "a PROXY trust range wider than /32" "single /32" TRAEFIK_TLS_MODE=letsencrypt TRAEFIK_ACME_EMAIL=admin@example.org \
         PROXY_PROTOCOL_MODE=haproxy PROXY_PROTOCOL_TRUSTED_IPS=10.10.10.0/24
     expect_invalid "haproxy without trusted sources" "requires PROXY_PROTOCOL_TRUSTED_IPS" TRAEFIK_TLS_MODE=letsencrypt \
-        TRAEFIK_ACME_EMAIL=admin@example.org PROXY_PROTOCOL_MODE=haproxy
-    expect_invalid "trusted sources in local mode" "requires an empty" PROXY_PROTOCOL_TRUSTED_IPS=10.10.10.1/32
-    expect_invalid "letsencrypt with a placeholder email" "TRAEFIK_ACME_EMAIL is still a placeholder" TRAEFIK_TLS_MODE=letsencrypt
+        TRAEFIK_ACME_EMAIL=admin@example.org PROXY_PROTOCOL_MODE=haproxy PROXY_PROTOCOL_TRUSTED_IPS=
+    expect_invalid "trusted sources in local mode" "requires an empty" \
+        PROXY_PROTOCOL_MODE=local PROXY_PROTOCOL_TRUSTED_IPS=10.10.10.1/32
+    expect_invalid "letsencrypt with a placeholder email" "TRAEFIK_ACME_EMAIL is still a placeholder" \
+        TRAEFIK_TLS_MODE=letsencrypt TRAEFIK_ACME_EMAIL=set_acme_email
     expect_invalid "an unknown TLS mode" "TRAEFIK_TLS_MODE must be" TRAEFIK_TLS_MODE=off
 
     expect_invalid "a short generated secret" "PG_API_PASSWORD is shorter" PG_API_PASSWORD=short-secret-1234
@@ -253,14 +278,14 @@ test_env_validate() {
     expect_invalid "a non-numeric message age" "whole number" INGEST_MAX_MESSAGE_AGE_DAYS=30d
 
     expect_invalid "a password inside the restic URL" "without a password in the URL" \
-        "RESTIC_REPOSITORY=rest:https://infrastructure-sjv:pw@10.100.100.100:8000/infrastructure-sjv/" RESTIC_REST_PASSWORD=fixture-rest-password-0123
+        "RESTIC_REPOSITORY=rest:https://infrastructure-sjv:pw@10.100.101.100:8000/infrastructure-sjv/" RESTIC_REST_PASSWORD=fixture-rest-password-0123
     expect_invalid "a restic URL for another user" "must be rest:https://infrastructure-sjv@" \
-        "RESTIC_REPOSITORY=rest:https://sjv-vps@10.100.100.100:8000/infrastructure-sjv/" RESTIC_REST_PASSWORD=fixture-rest-password-0123
+        "RESTIC_REPOSITORY=rest:https://sjv-vps@10.100.101.100:8000/infrastructure-sjv/" RESTIC_REST_PASSWORD=fixture-rest-password-0123
     expect_invalid "plain HTTP to rest-server" "must be rest:https://" \
-        "RESTIC_REPOSITORY=rest:http://infrastructure-sjv@10.100.100.100:8000/infrastructure-sjv/" RESTIC_REST_PASSWORD=fixture-rest-password-0123
+        "RESTIC_REPOSITORY=rest:http://infrastructure-sjv@10.100.101.100:8000/infrastructure-sjv/" RESTIC_REST_PASSWORD=fixture-rest-password-0123
     expect_invalid "a rest-server password without repository" "RESTIC_REPOSITORY is empty" RESTIC_REST_PASSWORD=fixture-rest-password-0123
     expect_invalid "a short rest-server password" "at least 16" \
-        "RESTIC_REPOSITORY=rest:https://infrastructure-sjv@10.100.100.100:8000/infrastructure-sjv/" RESTIC_REST_PASSWORD=short
+        "RESTIC_REPOSITORY=rest:https://infrastructure-sjv@10.100.101.100:8000/infrastructure-sjv/" RESTIC_REST_PASSWORD=short
 
     expect_invalid "SMTP without credentials" "SMTP_USER is required" SMTP_HOST=smtp.example.org MAIL_FROM=sjv@example.org SMTP_PASSWORD=x
     expect_invalid "unencrypted SMTP" "Unencrypted SMTP is not allowed" SMTP_SECURITY=none
@@ -305,6 +330,10 @@ test_env_validate() {
 expect_valid_quiet() {
     local -A cfg=()
     fixture_valid_env cfg
+    cfg[TRAEFIK_TLS_MODE]=local
+    cfg[PROXY_PROTOCOL_MODE]=local
+    cfg[PROXY_PROTOCOL_TRUSTED_IPS]=""
+    cfg[TRAEFIK_ACME_EMAIL]=set_acme_email
     [[ "${cfg[TRAEFIK_ACME_EMAIL]}" == set_* && "${cfg[TRAEFIK_TLS_MODE]}" == local ]] || return 1
     env_validate cfg
 }
@@ -340,7 +369,12 @@ test_env_sync() {
     t_check "all generated secrets are created (${count}/${#secrets[@]})" test "${count}" -eq "${#secrets[@]}" -a "${count}" -gt 0
     t_check "generated secrets are all different" test "$(printf '%s\n' "${secrets[@]}" | sort -u | wc -l)" -eq "${#secrets[@]}"
     t_check "creating .env prints no secret value" t_no_secret_in "${out}" "${secrets[@]}"
-    t_check "user placeholders stay placeholders" grep -qx 'MQTT_HOSTNAME=set_mqtt_hostname' "${target}"
+    t_check "new .env keeps the documentation hostnames from the template" \
+        bash -c 'grep -qx "SJV_DOMAIN=example.com" "$1" && grep -qx "MQTT_HOSTNAME=mqtt.example.com" "$1"' _ "${target}"
+    local -a doc_names=()
+    mapfile -t doc_names < <(env_list_documentation_hostnames "${target}")
+    t_check "documentation hostnames are listed by name" \
+        bash -c '[[ "$1" == *SJV_DOMAIN* && "$1" == *MQTT_HOSTNAME* ]]' _ "${doc_names[*]}"
 
     local before after
     before="$(file_state "${target}")"
@@ -353,11 +387,12 @@ test_env_sync() {
 
     local old_secret
     old_secret="$(grep '^PG_API_PASSWORD=' "${target}")"
-    sed -i 's/^MQTT_HOSTNAME=.*/MQTT_HOSTNAME=sjv-mqtt.serveftp.org/; s/^COMPOSE_PROJECT_NAME=.*/COMPOSE_PROJECT_NAME=tampered/' "${target}"
+    sed -i 's/^SJV_DOMAIN=.*/SJV_DOMAIN=app.example.net/; s/^MQTT_HOSTNAME=.*/MQTT_HOSTNAME=mqtt.example.net/; s/^COMPOSE_PROJECT_NAME=.*/COMPOSE_PROJECT_NAME=tampered/' "${target}"
     local tampered_sum
     tampered_sum="$(sha256sum < "${target}")"
     t_run env_sync_file "${ENV_EXAMPLE_FILE}" "${target}"
-    t_check "keeps a user value" grep -qx 'MQTT_HOSTNAME=sjv-mqtt.serveftp.org' "${target}"
+    t_check "keeps the runtime site domain" grep -qx 'SJV_DOMAIN=app.example.net' "${target}"
+    t_check "keeps the runtime MQTT domain" grep -qx 'MQTT_HOSTNAME=mqtt.example.net' "${target}"
     t_check "keeps an existing generated secret" grep -qxF "${old_secret}" "${target}"
     t_check "restores a framework value" grep -qx 'COMPOSE_PROJECT_NAME=infrastructure-sjv' "${target}"
     local backup

@@ -91,24 +91,21 @@ readonly DEPLOY_ITEMS=(
     configs
 )
 
-readonly SJV_DOMAIN="sjv.serveftp.org"
-readonly MQTT_HOSTNAME_ALLOWED=(
-    "sjv.serveftp.org"
-    "sjv-mqtt.serveftp.org"
-)
+# Public hostnames are user-managed. The Git template only carries the
+# documentation names example.com and mqtt.example.com.
 
 readonly NETWORK_PROXY="sjv-proxy"
 readonly NETWORK_INTERNAL="sjv-internal"
 readonly NETWORK_MQTT="sjv-mqtt"
 readonly NETWORK_EGRESS="sjv-egress"
 
-# Networks already used on the VPS (incusbr0, wg1 and the other WireGuard
-# tunnels) and the Docker default bridge. Stack subnets must not overlap them.
+# Networks already used on the VPS. Stack subnets must not overlap them.
+# Incus bridge, the three WireGuard tunnels, and the Docker default bridge.
 readonly RESERVED_SUBNETS=(
     "10.10.10.0/24"
-    "10.100.100.0/24"
-    "10.110.100.0/24"
-    "10.120.100.0/24"
+    "10.100.101.0/24"
+    "10.110.110.0/24"
+    "10.120.120.0/24"
     "172.17.0.0/16"
 )
 

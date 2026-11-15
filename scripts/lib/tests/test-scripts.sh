@@ -42,7 +42,7 @@ fill_fixture_values() {
     local file="$1" key
     local -A cfg=()
     fixture_valid_env cfg
-    for key in MQTT_HOSTNAME ADMIN_IP_ALLOWLIST \
+    for key in SJV_DOMAIN MQTT_HOSTNAME TRAEFIK_ACME_EMAIL ADMIN_IP_ALLOWLIST \
         DOCKER_PROXY_SUBNET DOCKER_PROXY_GATEWAY DOCKER_INTERNAL_SUBNET DOCKER_INTERNAL_GATEWAY \
         DOCKER_MQTT_SUBNET DOCKER_MQTT_GATEWAY DOCKER_EGRESS_SUBNET DOCKER_EGRESS_GATEWAY; do
         set_env_value "${file}" "${key}" "${cfg[${key}]}"
@@ -160,7 +160,9 @@ test_scripts_env() {
     t_check "runtime .env has mode 600" test "$(stat -c %a "${env_file}")" = 600
     mapfile -t secrets < <(runtime_secrets)
     t_check "update-env.sh prints no secret value" t_no_secret_in "${T_OUT}" "${secrets[@]}"
-    t_check "update-env.sh lists remaining placeholders by name" t_contains "${T_OUT}" "MQTT_HOSTNAME"
+    t_check "update-env.sh lists remaining placeholders by name" t_contains "${T_OUT}" "TRAEFIK_ACME_EMAIL"
+    t_check "update-env.sh names documentation hostnames" \
+        bash -c '[[ "$1" == *"Documentation hostnames are not usable in production"* && "$1" == *"SJV_DOMAIN"* && "$1" == *"MQTT_HOSTNAME"* ]]' _ "${T_OUT}"
 
     before="$(tree_state)"
     sleep 1
@@ -172,9 +174,11 @@ test_scripts_env() {
 
     before="$(tree_state)"
     run_script check-env.sh
-    t_check "check-env.sh rejects placeholders" \
-        bash -c '(( $1 != 0 )) && [[ "$2" == *"Placeholder is not usable: MQTT_HOSTNAME"* ]]' _ "${T_RC}" "${T_OUT}"
-    t_check "check-env.sh reports every problem at once" t_contains "${T_OUT}" "Placeholder is not usable: DOCKER_EGRESS_SUBNET"
+    t_check "check-env.sh rejects example.com as a production domain" \
+        bash -c '(( $1 != 0 )) && [[ "$2" == *"SJV_DOMAIN is a documentation placeholder (example.com)"* ]]' _ "${T_RC}" "${T_OUT}"
+    t_check "check-env.sh rejects mqtt.example.com" \
+        t_contains "${T_OUT}" "MQTT_HOSTNAME is a documentation placeholder (mqtt.example.com)"
+    t_check "check-env.sh reports every problem at once" t_contains "${T_OUT}" "TRAEFIK_ACME_EMAIL is still a placeholder"
     t_check "check-env.sh prints no secret value" t_no_secret_in "${T_OUT}" "${secrets[@]}"
     t_check "a failing check-env.sh changes nothing" test "${before}" = "$(tree_state)"
 
@@ -202,6 +206,9 @@ test_scripts_env() {
     before="$(sha256sum < "${env_file}")"
     run_script update-env.sh
     t_check "update-env.sh keeps filled-in user values" test "$(sha256sum < "${env_file}")" = "${before}"
+    t_check "update-env.sh does not overwrite runtime domains from the template" \
+        bash -c 'grep -qx "SJV_DOMAIN=app.example.net" "$1" && grep -qx "MQTT_HOSTNAME=mqtt.example.net" "$1" && [[ "$2" != *"Documentation hostnames"* ]]' \
+        _ "${env_file}" "${T_OUT}"
 
     chmod 644 "${env_file}"
     run_script check-env.sh

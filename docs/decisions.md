@@ -132,8 +132,8 @@ Hodnoty, které nejsou známé, se nedoplňují odhadem.
 
 | Bod | Blokuje |
 | --- | --- |
-| Volná IP v `incusbr0` a kapacita VPS (`<CPU>`, `<RAM>`, disk) | E1, nasazení na VPS |
-| Zda lze na `serveftp.org` založit `sjv-mqtt.serveftp.org` a jak se jméno udržuje | E2, MQTT hostname |
+| Kapacita VPS (`<CPU>`, `<RAM>`, disk). Kontejner `sjv-monitoring` má adresu `10.10.10.20` | E1, měření zátěže |
+| Zda DNS účet dovolí druhé veřejné jméno (`MQTT_HOSTNAME` jiné než `SJV_DOMAIN`) a jak se to jméno udržuje | E2, MQTT hostname |
 | Skutečný ZFS pool a výsledek ověření. `zfs-RAID-6TB` v NixOS konfiguraci `domaPcServer` není | E6, fáze 3 |
 | Upload domácí linky | odhad RTO před DR testem ve fázi 13 |
 | WireGuard rozhraní MikroTiku, LAN IP `domaPcServer`, porty `<P>` a `<P2>` | E5 |

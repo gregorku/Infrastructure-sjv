@@ -219,9 +219,11 @@ test_infra_render() {
     t_check "TLS 1.2 is the minimum" grep -q 'minVersion: VersionTLS12' "${dynamic}/tls.yml"
     t_check "the allowlist is rendered from the fixture" grep -q '10.66.0.2/32' "${dynamic}/ip-allowlist.yml"
     t_check "future API and web routes are present" grep -q 'http://sjv-backend:8000' "${dynamic}/app.yml"
+    t_check "the site router uses the runtime domain" grep -q 'Host(`app.example.net`)' "${dynamic}/app.yml"
+    t_check "a distinct MQTT hostname gets a certificate router" \
+        grep -q 'Host(`mqtt.example.net`)' "${dynamic}/mqtt-cert.yml"
     t_check "the bouncer middleware waits for the key file" test ! -e "${dynamic}/crowdsec.yml"
     t_check "no dashboard router without a password file" test ! -e "${dynamic}/dashboard.yml"
-    t_check "no MQTT certificate router in local TLS mode" test ! -e "${dynamic}/mqtt-cert.yml"
     t_check "Traefik's proxy address is the gateway plus one" \
         bash -c '[[ "$(cat "$1")" == 172.30.10.2 ]]' _ "${stack}/runtime/traefik-proxy-address"
     t_check "the git admin compose file was not rewritten" \
@@ -234,6 +236,19 @@ test_infra_render() {
     t_check "a second render succeeds" test "${T_RC}" -eq 0
     t_check "a second render keeps the static Traefik file" \
         bash -c '[[ "$(cksum "$1")" == "$2" ]]' _ "${stack}/runtime/traefik/traefik.yml" "${before}"
+
+    set_env_value "${env_file}" MQTT_HOSTNAME "app.example.net"
+    run_script deploy.sh --render-only
+    t_check "a shared site and MQTT name renders again" test "${T_RC}" -eq 0
+    t_check "a shared host name has no separate MQTT certificate" test ! -e "${dynamic}/mqtt-cert.yml"
+
+    set_env_value "${env_file}" MQTT_HOSTNAME "mqtt.example.net"
+    set_env_value "${env_file}" TRAEFIK_TLS_MODE "local"
+    set_env_value "${env_file}" PROXY_PROTOCOL_MODE "local"
+    set_env_value "${env_file}" PROXY_PROTOCOL_TRUSTED_IPS ""
+    run_script deploy.sh --render-only
+    t_check "local TLS mode renders again" test "${T_RC}" -eq 0
+    t_check "local TLS mode has no MQTT certificate router" test ! -e "${dynamic}/mqtt-cert.yml"
 }
 
 test_infra_key_and_compose() {

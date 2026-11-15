@@ -176,6 +176,12 @@ static_test_repository() {
     found="$(grep -nE ':latest([^A-Za-z0-9_]|$)' "${REPO_ROOT}/.env.example" "${REPO_ROOT}/scripts/config.sh" || true)"
     t_check "no latest tag in .env.example or config.sh" test -z "${found}"
     [[ -z "${found}" ]] || printf '    %s\n' "${found}"
+
+    local public_domain="serve"
+    public_domain+="ftp.org"
+    found="$(grep -RInFi --exclude-dir=.git --exclude-dir=.test-tmp -- "${public_domain}" "${REPO_ROOT}" || true)"
+    t_check "the checkout contains no real public domain" test -z "${found}"
+    [[ -z "${found}" ]] || printf '    %s\n' "${found}"
 }
 
 static_test_env_example() {
@@ -194,21 +200,46 @@ static_test_env_example() {
     t_check ".env.example contains no secret values" test "${#bad[@]}" -eq 0
     (( ${#bad[@]} == 0 )) || printf '    %s\n' "${bad[@]}"
 
-    bad=()
-    for key in "${!example[@]}"; do
-        if [[ "${ENV_POLICY[${key}]}" == user ]] && [[ "${key}" == DOCKER_*_SUBNET || "${key}" == DOCKER_*_GATEWAY || "${key}" == MQTT_HOSTNAME ]] \
-            && ! env_is_placeholder "${example[${key}]}"; then
-            bad+=("${key}")
-        fi
-    done
-    t_check "undecided values (subnets, MQTT host name) stay placeholders" test "${#bad[@]}" -eq 0
+    t_check "SJV_DOMAIN is user-managed" test "${ENV_POLICY[SJV_DOMAIN]}" = user
+    t_check "MQTT_HOSTNAME is user-managed" test "${ENV_POLICY[MQTT_HOSTNAME]}" = user
+    t_check "SJV_DOMAIN in .env.example is the documentation hostname" test "${example[SJV_DOMAIN]}" = example.com
+    t_check "MQTT_HOSTNAME in .env.example is the documentation hostname" test "${example[MQTT_HOSTNAME]}" = mqtt.example.com
+    t_check "example.com is a documentation hostname" env_is_documentation_hostname example.com
+    t_check "mqtt.example.com is a documentation hostname" env_is_documentation_hostname mqtt.example.com
+    local reserved="10.10.10.0/24 10.100.101.0/24 10.110.110.0/24 10.120.120.0/24 172.17.0.0/16"
+    t_check "reserved subnets are the current VPS ranges" test "${RESERVED_SUBNETS[*]}" = "${reserved}"
+    t_check "the example proxy subnet is 172.20.0.0/24" test "${example[DOCKER_PROXY_SUBNET]}" = "172.20.0.0/24" -a "${example[DOCKER_PROXY_GATEWAY]}" = "172.20.0.1"
+    t_check "the example internal subnet is 172.21.0.0/24" test "${example[DOCKER_INTERNAL_SUBNET]}" = "172.21.0.0/24" -a "${example[DOCKER_INTERNAL_GATEWAY]}" = "172.21.0.1"
+    t_check "the example mqtt subnet is 172.22.0.0/24" test "${example[DOCKER_MQTT_SUBNET]}" = "172.22.0.0/24" -a "${example[DOCKER_MQTT_GATEWAY]}" = "172.22.0.1"
+    t_check "the example egress subnet is 172.23.0.0/24" test "${example[DOCKER_EGRESS_SUBNET]}" = "172.23.0.0/24" -a "${example[DOCKER_EGRESS_GATEWAY]}" = "172.23.0.1"
 
     local -A sample=()
     env_parse_file "${ENV_EXAMPLE_FILE}" sample
     if env_validate sample; then
         t_fail ".env.example as-is is rejected by the validator"
     else
-        t_pass ".env.example as-is is rejected by the validator ($(printf '%s\n' "${ENV_ERRORS[@]}" | grep -c 'Placeholder') placeholders)"
+        t_pass ".env.example as-is is rejected by the validator"
+    fi
+
+    local key
+    for key in "${!ENV_POLICY[@]}"; do
+        if [[ "${ENV_POLICY[${key}]}" == generated ]]; then
+            sample[${key}]="$(env_generate_secret)"
+        fi
+    done
+    sample[TRAEFIK_ACME_EMAIL]="admin@example.net"
+    if env_validate sample; then
+        t_fail "documentation hostnames are rejected when the rest of .env.example is complete"
+    else
+        local joined
+        joined="$(printf '%s\n' "${ENV_ERRORS[@]}")"
+        if [[ "${joined}" == *"SJV_DOMAIN is a documentation placeholder (example.com)"* \
+            && "${joined}" == *"MQTT_HOSTNAME is a documentation placeholder (mqtt.example.com)"* ]]; then
+            t_pass "documentation hostnames are rejected when the rest of .env.example is complete"
+        else
+            t_fail "documentation hostnames are rejected when the rest of .env.example is complete"
+            printf '    %s\n' "${joined}"
+        fi
     fi
 }
 

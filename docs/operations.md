@@ -30,8 +30,8 @@ Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Tr
 ## Postup první instalace
 
 1. `sudo ./scripts/init.sh` vytvoří adresáře a zkopíruje `.env.example` do stacku. `.env` nevytváří.
-2. `sudo ./scripts/update-env.sh` vytvoří `.env` (práva 600), vygeneruje hesla a vypíše jména proměnných, které ještě obsahují `set_*`.
-3. Doplň hodnoty `set_*` v `/docker-data/stacks/infrastructure-sjv/.env` ručně, bez uvozovek.
+2. `sudo ./scripts/update-env.sh` vytvoří `.env` (práva 600), vygeneruje hesla a vypíše jména proměnných, které ještě obsahují `set_*` nebo dokumentační hostname.
+3. V `/docker-data/stacks/infrastructure-sjv/.env` nahraď `example.com` a `mqtt.example.com` skutečnými jmény a doplň zbylé `set_*`. Hodnoty piš bez uvozovek. Existující domény další běh `update-env.sh` nepřepíše.
 4. `sudo ./scripts/check-env.sh` musí skončit bez chyb. Varování (například chybějící vzdálená záloha) je třeba vědomě přijmout.
 5. `sudo ./scripts/create-dashboard-user.sh` uloží heslo dashboardu. Bez tohoto kroku se dashboard nepublikuje.
 6. `sudo ./scripts/deploy.sh` vykreslí Traefik, založí čtyři sítě projektu a spustí jen `sjv-traefik` a `sjv-crowdsec`.
@@ -43,14 +43,15 @@ Opakované spuštění je bezpečné. Pokud se nic nezměnilo, soubory se nepře
 
 | Proměnná | Kdy | Poznámka |
 | --- | --- | --- |
-| `MQTT_HOSTNAME` | před nasazením | `sjv-mqtt.serveftp.org`, pokud jde jméno založit, jinak `sjv.serveftp.org` |
-| `DOCKER_*_SUBNET`, `DOCKER_*_GATEWAY` | před nasazením | čtyři privátní sítě /16 až /28, bez překryvu navzájem ani s 10.10.10.0/24, 10.100.100.0/24, 10.110.100.0/24, 10.120.100.0/24 a 172.17.0.0/16 |
+| `SJV_DOMAIN` | před nasazením | uživatelská hodnota, platné DNS jméno. V šabloně je `example.com`. `check-env.sh` ho odmítne |
+| `MQTT_HOSTNAME` | před nasazením | uživatelská hodnota, platné DNS jméno. V šabloně je `mqtt.example.com`. Stejné jméno jako `SJV_DOMAIN`, nebo jiné jméno pro samostatný certifikát |
+| `DOCKER_*_SUBNET`, `DOCKER_*_GATEWAY` | v šabloně, kategorie `user` | `172.20.0.0/24`, `172.21.0.0/24`, `172.22.0.0/24`, `172.23.0.0/24`, brány `.1`. Bez překryvu navzájem ani s `10.10.10.0/24`, `10.100.101.0/24`, `10.110.110.0/24`, `10.120.120.0/24` a `172.17.0.0/16`. Existující hodnotu sync ponechá |
 | `ADMIN_IP_ALLOWLIST` | před nasazením | privátní CIDR oddělené mezerou, nikdy `0.0.0.0/0` |
 | `TRAEFIK_ACME_EMAIL` | před `TRAEFIK_TLS_MODE=letsencrypt` | v režimu `local` může zůstat placeholder |
 | `TRAEFIK_IMAGE`, `CROWDSEC_IMAGE` | v šabloně | tag a index digest, kategorie `framework` |
 | `CROWDSEC_BOUNCER_PLUGIN` | v šabloně | verze pluginu `v1.8.1`, ne API klíč |
 | `CROWDSEC_BOUNCER_PLUGIN_HASH` | v šabloně | sha256 zipu z `plugins.traefik.io`, ne API klíč |
-| `PROXY_PROTOCOL_TRUSTED_IPS` | před `PROXY_PROTOCOL_MODE=haproxy` | zjištěná zdrojová adresa HAProxy jako /32 |
+| `PROXY_PROTOCOL_TRUSTED_IPS` | před `PROXY_PROTOCOL_MODE=haproxy` | `10.10.10.1/32` je očekávaná zdrojová adresa HAProxy. Před spolehnutím se na ni se potvrdí skutečným provozem z kontejneru |
 | `RESTIC_REPOSITORY`, `RESTIC_REST_PASSWORD` | před ostrými daty | závisí na E5, E6; prázdné = varování |
 | `SMTP_*`, `MAIL_FROM` | fáze 9 | závisí na E7; prázdný `SMTP_HOST` = notifikace zůstávají ve frontě |
 

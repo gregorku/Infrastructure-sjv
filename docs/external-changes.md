@@ -8,9 +8,9 @@ Stav všech položek: **navrženo, neschváleno**.
 
 | # | Systém | Změna | Potřeba pro |
 | --- | --- | --- | --- |
-| E1 | VPS (Incus) | Nový kontejner `sjv` | vše |
-| E2 | DNS (`serveftp.org`) | `sjv.serveftp.org`, volitelně `sjv-mqtt.serveftp.org` | web, ACME, MQTT |
-| E3 | VPS (NixOS, HAProxy) | Routy pro `sjv.serveftp.org` na 80 a 443 | web, ACME, HTTPS ingest |
+| E1 | VPS (Incus) | Kontejner `sjv-monitoring` na `10.10.10.20` | vše |
+| E2 | DNS | `SJV_DOMAIN`, volitelně jiné `MQTT_HOSTNAME` | web, ACME, MQTT |
+| E3 | VPS (NixOS, HAProxy) | Routy pro `SJV_DOMAIN` na 80 a 443 | web, ACME, HTTPS ingest |
 | E4 | VPS (NixOS, nftables) | DNAT TCP 8883 do kontejneru `sjv` | MQTT |
 | E5 | MikroTik doma | DNAT z WireGuardu na `rest-server`, vypnutá pravidla pro obnovovací instanci | vzdálené zálohy, obnova |
 | E6 | domaPcServer | ZFS dataset, `rest-server`, obnovovací instance, firewall, snapshoty, prune, kontrola | vzdálené zálohy, obnova |
@@ -20,32 +20,34 @@ Stav všech položek: **navrženo, neschváleno**.
 
 Úložiště Incus na VPS je typu `dir`, síť `incusbr0` je `10.10.10.0/24`.
 
-Návrh (ručně, ne přes tento repozitář):
+Aktuální kontejner je `sjv-monitoring` na `10.10.10.20`. Tento repozitář ho nezakládá znovu. Záznam vzniku, ručně a mimo tento repozitář:
 
 ```bash
-incus launch images:debian/13 sjv \
+incus launch images:debian/13 sjv-monitoring \
   -c security.nesting=true \
   -c limits.cpu=<CPU> -c limits.memory=<RAM>
-incus config device override sjv eth0 ipv4.address=10.10.10.<X>
+incus config device override sjv-monitoring eth0 ipv4.address=10.10.10.20
 incus storage volume create default sjv-data
-incus config device add sjv docker-data disk pool=default source=sjv-data path=/docker-data
+incus config device add sjv-monitoring docker-data disk pool=default source=sjv-data path=/docker-data
 ```
 
 Ověřit:
 
-- volnou adresu `<X>` (`incus list`). Obsazené jsou nejméně `.10`, `.11`, `.12` a `.100`,
+- adresu `10.10.10.20` (`incus list`). Obsazené jsou nejméně `.10`, `.11`, `.12`, `.20` a `.100`,
 - volné místo a výkon VPS. Hodnoty `<CPU>` a `<RAM>` se stanoví až podle volné kapacity VPS a měření zátěže ve fázi 4,
 - zda Docker uvnitř kontejneru potřebuje kromě `security.nesting` ještě další nastavení (`security.syscalls.intercept.*`). Ověří se na testovacím kontejneru.
 
 V kontejneru: Docker Engine a Compose v2 (zafixovaná verze), `rsync`, `jq`, `openssl`, `git`. Projekt je neinstaluje, stejně jako reference.
 
-Rollback: `incus stop sjv && incus delete sjv` po ověření, že data nejsou potřeba.
+Rollback: `incus stop sjv-monitoring && incus delete sjv-monitoring` po ověření, že data nejsou potřeba.
 
 ## E2: DNS
 
-- `sjv.serveftp.org` A → veřejná IPv4 VPS.
-- Volitelně `sjv-mqtt.serveftp.org` A → stejná IP. Doporučené kvůli oddělení MQTT, viz [architecture.md](architecture.md).
-- Ověřit: `serveftp.org` vypadá jako sdílená DDNS doména No-IP. Je potřeba zjistit, zda lze založit další jméno a zda na účtu nejde o funkci, kterou je nutné pravidelně obnovovat (jinak jméno vyprší).
+Jména se do tohoto repozitáře nezapisují. Patří do runtime `.env`.
+
+- `SJV_DOMAIN` A → veřejná IPv4 VPS.
+- Volitelně jiné `MQTT_HOSTNAME` A → stejná IP. Doporučené kvůli oddělení MQTT, viz [architecture.md](architecture.md).
+- Ověřit u DNS účtu, zda lze založit druhé jméno a zda ho je nutné pravidelně obnovovat.
 
 ## E3: HAProxy na VPS (`modules/server/haproxy-netcupVPSServer.nix`)
 
@@ -53,23 +55,23 @@ Dnes `default_backend nextcloud_http/https` posílá neznámá jména na Nextclo
 
 ```text
 # frontend http
-use_backend sjv_http   if { hdr(host) -i sjv.serveftp.org }
-use_backend sjv_http   if { hdr(host) -i sjv-mqtt.serveftp.org }   # jen kvůli ACME, pokud jméno vznikne
+use_backend sjv_http   if { hdr(host) -i <SJV_DOMAIN> }
+use_backend sjv_http   if { hdr(host) -i <MQTT_HOSTNAME> }   # jen kvůli ACME, když se jméno liší
 
 backend sjv_http
     mode http
-    server sjv 10.10.10.<X>:80 send-proxy-v2
+    server sjv 10.10.10.20:80 send-proxy-v2
 
 # frontend https
-use_backend sjv_https  if { req_ssl_sni -i sjv.serveftp.org }
+use_backend sjv_https  if { req_ssl_sni -i <SJV_DOMAIN> }
 
 backend sjv_https
     mode tcp
-    server sjv 10.10.10.<X>:443 send-proxy-v2
+    server sjv 10.10.10.20:443 send-proxy-v2
 ```
 
-- Traefik v kontejneru `sjv` přijme PROXY protocol jen od zdrojové adresy HAProxy jako `/32`. Očekávaná adresa je `10.10.10.1` a ověří se pozorováním v režimu `local`, stejně jako v referenci.
-- Volitelně později: záložní MQTT přes 443 podle SNI `sjv-mqtt.serveftp.org` pro sítě, které blokují 8883. Vyžaduje ověřit podporu PROXY protocolu v Mosquittu, jinak broker uvidí jako klienta jen HAProxy.
+- Traefik v kontejneru `sjv-monitoring` přijme PROXY protocol jen od zdrojové adresy HAProxy jako `/32`. V `.env` je očekávaná adresa `10.10.10.1/32`. Před spolehnutím se na ni se potvrdí skutečným provozem.
+- Volitelně později: záložní MQTT přes 443 podle SNI `<MQTT_HOSTNAME>` pro sítě, které blokují 8883. Vyžaduje ověřit podporu PROXY protocolu v Mosquittu, jinak broker uvidí jako klienta jen HAProxy.
 - Rollback: odebrat řádky a `nixos-rebuild switch`.
 
 ## E4: DNAT 8883 (`modules/server/firewall/dnat-netcupVPSServer.nix`)
@@ -79,28 +81,28 @@ Do seznamu `public`:
 ```nix
 {
   port = 8883;
-  target = "10.10.10.<X>:8883";
+  target = "10.10.10.20:8883";
 }
 ```
 
-- Generátor vytvoří `iifname "ens3" tcp dport 8883 dnat ip to 10.10.10.<X>:8883`. Forward chain už má `oifname "incusbr0" accept`, input chain se nemění.
+- Generátor vytvoří `iifname "ens3" tcp dport 8883 dnat ip to 10.10.10.20:8883`. Forward chain už má `oifname "incusbr0" accept`, input chain se nemění.
 - DNAT zachová skutečnou IP klienta. Mosquitto ji vidí a loguje.
 - Rollback: odebrat položku a `nixos-rebuild switch`.
 
 ## E5: MikroTik doma
 
-Provoz z kontejneru `sjv` do `wg1` je na VPS maskovaný na `10.100.100.1`. VPS dosáhne jen na `10.100.100.100` (MikroTik). Návrh podle vzoru Metabase:
+Domácí WireGuard je `10.100.101.0/24`. Pravidlo povolí jen adresu VPS v této síti a jen vybraný port. `<VPS-WG-IP>` a `<MIKROTIK-WG-IP>` se opíší z běžícího tunelu. Návrh podle vzoru Metabase:
 
 ```text
-/ip firewall nat add chain=dstnat in-interface=<wg1-rozhraní> src-address=10.100.100.1 \
-    dst-address=10.100.100.100 protocol=tcp dst-port=<P> \
+/ip firewall nat add chain=dstnat in-interface=<wg-rozhraní> src-address=<VPS-WG-IP> \
+    dst-address=<MIKROTIK-WG-IP> protocol=tcp dst-port=<P> \
     action=dst-nat to-addresses=<LAN-IP-domaPcServer> to-ports=8000 comment="sjv restic"
-/ip firewall filter add chain=forward in-interface=<wg1-rozhraní> src-address=10.100.100.1 \
+/ip firewall filter add chain=forward in-interface=<wg-rozhraní> src-address=<VPS-WG-IP> \
     dst-address=<LAN-IP-domaPcServer> protocol=tcp dst-port=8000 action=accept comment="sjv restic"
 ```
 
-- Potřebné údaje: název rozhraní, LAN IP `domaPcServer`, port `<P>`.
-- Povolit jen zdroj `10.100.100.1` a jen tento port. Celá VPN síť se nepovoluje.
+- Potřebné údaje: název rozhraní, `<VPS-WG-IP>`, `<MIKROTIK-WG-IP>`, LAN IP `domaPcServer`, port `<P>`.
+- Povolit jen zdroj `<VPS-WG-IP>` a jen tento port. Celá VPN síť se nepovoluje.
 - Pro obnovovací instanci `rest-server-sjv-recovery` se připraví stejný pár pravidel s portem `<P2>`, komentářem `sjv restic recovery` a ve stavu `disabled=yes`. Zapíná se jen při obnově, se zdrojovou adresou nového hostitele ([backup-strategy.md](backup-strategy.md#úplná-obnova-na-novém-vps)).
 - Rollback: smazat pravidla podle komentáře.
 
@@ -131,7 +133,7 @@ services.restic.server = {
 - Port 8000 je výchozí port `rest-server`. Jiný port lze zvolit podle obsazenosti na `domaPcServer`.
 - Uživatel `infrastructure-sjv` má přístup jen k repozitáři `infrastructure-sjv/`. S `--private-repos` musí jméno uživatele odpovídat první části cesty.
 - Vlastní certifikát pro TLS. Jeho otisk se pinuje na VPS přes `--cacert`. Na LAN úseku za MikroTikem by jinak heslo `rest-server` šlo nešifrovaně.
-- Firewall `domaPcServer`: port 8000 jen ze zdroje, který po DNAT na MikroTiku přichází (`10.100.100.1` nebo adresa MikroTiku podle NAT). Ověří se pozorováním.
+- Firewall `domaPcServer`: port 8000 jen ze zdroje, který po DNAT na MikroTiku přichází (`<VPS-WG-IP>` nebo adresa MikroTiku podle NAT). Ověří se pozorováním.
 
 ### Obnovovací instance `rest-server-sjv-recovery`
 
@@ -168,8 +170,8 @@ Rollback: vypnout služby. Data datasetu se nemažou bez samostatného rozhodnut
 
 ## Údaje, které potřebuji pro tyto změny
 
-- Volná IP v `incusbr0` a kapacita VPS (`<CPU>`, `<RAM>`, disk).
-- Možnost založit jména na `serveftp.org`.
+- Kapacita VPS (`<CPU>`, `<RAM>`, disk). Adresa kontejneru je `10.10.10.20`.
+- Možnost založit druhé veřejné jméno v DNS účtu.
 - Název WireGuard rozhraní na MikroTiku doma, LAN IP `domaPcServer` a porty `<P>` a `<P2>`.
 - Výsledek ověření ZFS a kvóta `<Q>`.
 - Verze nixpkgs na `domaPcServer` (názvy voleb `services.restic.server`).

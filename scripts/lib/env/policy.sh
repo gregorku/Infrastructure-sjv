@@ -10,7 +10,7 @@ declare -gA ENV_POLICY=(
     [COMPOSE_PROJECT_NAME]=framework
     [DATA_DIR]=framework
     [BACKUP_LOCAL_DIR]=framework
-    [SJV_DOMAIN]=framework
+    [SJV_DOMAIN]=user
     [MQTT_HOSTNAME]=user
 
     [DOCKER_PROXY_SUBNET]=user
