@@ -107,13 +107,35 @@ docker_cli_available() {
     docker compose version >/dev/null 2>&1
 }
 
+# TRAEFIK_PROXY_ADDRESS is computed at render time and is intentionally absent
+# from .env. Compose fails closed without it, so the rendered file is the only
+# value passed into the compose process.
+docker_read_proxy_address() {
+    local file="${RUNTIME_DIR}/traefik-proxy-address" address octet
+    [[ ! -L "${file}" ]] || fail "Traefik proxy address file is a symlink. Refusing to read it."
+    [[ -f "${file}" ]] \
+        || fail "Traefik proxy address file is missing. Render the runtime configuration first."
+    address="$(<"${file}")"
+    [[ "${address}" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] \
+        || fail "Traefik proxy address file does not contain an IPv4 address."
+    for octet in "${BASH_REMATCH[@]:1}"; do
+        [[ "${octet}" == 0 || "${octet}" != 0* ]] \
+            || fail "Traefik proxy address file does not contain an IPv4 address."
+        (( 10#${octet} <= 255 )) \
+            || fail "Traefik proxy address file does not contain an IPv4 address."
+    done
+    printf '%s\n' "${address}"
+}
+
 docker_compose() {
+    local address
     [[ "${SJV_TEST_MODE}" -eq 0 ]] || fail "Test mode cannot run docker compose."
     case "${1:-}" in
         up) ;;
         *) fail "Refusing docker compose ${1:-<empty>}." ;;
     esac
-    docker compose \
+    address="$(docker_read_proxy_address)"
+    TRAEFIK_PROXY_ADDRESS="${address}" docker compose \
         --project-name "${STACK_NAME}" \
         --project-directory "${STACK_DIR}" \
         -f "${STACK_DIR}/compose.yml" \
@@ -122,7 +144,9 @@ docker_compose() {
 
 # Read-only resolution. It does not create containers or networks.
 docker_compose_config() {
-    docker compose \
+    local address
+    address="$(docker_read_proxy_address)"
+    TRAEFIK_PROXY_ADDRESS="${address}" docker compose \
         --project-directory "${STACK_DIR}" \
         -f "${STACK_DIR}/compose.yml" \
         config

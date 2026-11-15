@@ -57,6 +57,15 @@ fi
 deploy_ensure_networks
 deploy_assert_own_containers
 print_section "Compose"
+if [[ "${RUNTIME_ENV[PROXY_PROTOCOL_MODE]}" == haproxy ]]; then
+    info "Entrypoints web and websecure trust PROXY protocol only from ${RUNTIME_ENV[PROXY_PROTOCOL_TRUSTED_IPS]}. Confirm that address is the live HAProxy source during the operational test."
+fi
+if [[ "${RUNTIME_ENV[TRAEFIK_TLS_MODE]}" == letsencrypt ]]; then
+    info "Let's Encrypt will request a certificate for ${RUNTIME_ENV[SJV_DOMAIN]}."
+    if [[ "${RUNTIME_ENV[MQTT_HOSTNAME],,}" != "${RUNTIME_ENV[SJV_DOMAIN],,}" ]]; then
+        info "Let's Encrypt will request a separate certificate for ${RUNTIME_ENV[MQTT_HOSTNAME]}. It stays in acme.json for a later Mosquitto handoff."
+    fi
+fi
 docker_compose up -d traefik crowdsec
 ok "Traefik and CrowdSec were reconciled. Other projects were not changed."
 deploy_crowdsec_install_collections
