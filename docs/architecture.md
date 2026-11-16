@@ -87,7 +87,7 @@ V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefi
 
 - Sítě jsou `external`. Zakládá je `deploy.sh` a označí je `com.infrastructure-sjv.managed=true`. Cizí síť se stejným jménem skript nemění ani nemaže. `sjv-internal` vzniká s `--internal`.
 - Pevná adresa Traefiku na `sjv-proxy` je první adresa za branou této sítě. Počítá ji `deploy.sh` a předá ji Compose jako `TRAEFIK_PROXY_ADDRESS`. V `.env` tato hodnota není.
-- Traefik má jen file provider. `docker.sock` se nikam nemountuje. Porty hosta jsou jen 80 a 443. Entrypoint `admin` se publikuje jen do stackové kopie `compose/15-traefik-admin-port.yml`, a jen když existuje heslo dashboardu a `TRAEFIK_ADMIN_PUBLISH`.
+- Traefik má jen file provider. `docker.sock` se nikam nemountuje. Veřejné webové porty jsou 80 a 443. Samostatný administrační port 8443 se publikuje pouze na `10.10.10.20` a je dostupný jen přes WireGuard podle následujícího bodu.
 - **Administrace Traefiku:** samostatný entrypoint `admin` na TCP portu `8443`. Port se publikuje pouze na `10.10.10.20:8443` v Incus kontejneru `sjv-monitoring`. Přístup vede přes WireGuard `wg1` na VPS `10.100.101.1:8443`, odkud VPS provoz přesměruje na kontejner. Firewall VPS povoluje tento provoz pouze z `10.100.101.0/24` přes `wg1`. Dashboard chrání Traefik `ipAllowList`, BasicAuth a CrowdSec. Heslo je uloženo jako bcrypt hash mimo Git.
 - Routy `sjv-api` (`http://sjv-backend:8000`) a `sjv-web` (`http://sjv-web:8080`) jsou připravené. Kontejnery těchto služeb tato etapa nespouští.
 - Samostatný certifikát MQTT se vykreslí, když se `MQTT_HOSTNAME` liší od `SJV_DOMAIN` a `TRAEFIK_TLS_MODE=letsencrypt`.

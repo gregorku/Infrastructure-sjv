@@ -113,7 +113,7 @@ Platí pro ACRIOS a pro každý další koncentrátor. Metoda autentizace se vyb
 
 ## Síť
 
-- Ven publikují porty jen `sjv-traefik` (80, 443) a `sjv-mosquitto` (8883).
+- Veřejné služby publikují porty `sjv-traefik` (80, 443) a `sjv-mosquitto` (8883). Samostatný administrační port Traefiku (8443) je publikován pouze na privátní adrese `10.10.10.20` a přístupný přes WireGuard `wg1`.
 - PostgreSQL je jen na `sjv-internal` (`internal: true`), bez portu.
 - Traefik nemá `docker.sock`.
 - PROXY protocol jen od adresy HAProxy jako `/32`. V šabloně je očekávaná adresa `10.10.10.1/32`. Před spolehnutím se na ni se potvrdí skutečným provozem. `insecure` je zakázané a forwarded hlavičky se nedůvěřují. Převzato z reference včetně testů.
