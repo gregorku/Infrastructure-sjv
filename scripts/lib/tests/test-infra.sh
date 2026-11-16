@@ -262,7 +262,8 @@ test_infra_render() {
 
 test_infra_key_and_compose() {
     print_section "Bouncer key file"
-    local stack key_file dynamic fixture git_admin
+    local stack key_file dynamic fixture git_admin docker_data_before
+    docker_data_before="$(docker_data_snapshot)"
     stack="${T_BASE}/stacks/infrastructure-sjv"
     key_file="${T_BASE}/infrastructure-sjv/traefik/crowdsec/BOUNCER_KEY_sjv-traefik"
     dynamic="${stack}/runtime/traefik/dynamic"
@@ -314,7 +315,8 @@ test_infra_key_and_compose() {
     git_admin="$(cksum "${REPO_ROOT}/compose/15-traefik-admin-port.yml")"
     t_check "compose config left the git admin file unchanged" \
         bash -c '[[ "$(cksum "$1")" == "$2" ]]' _ "${REPO_ROOT}/compose/15-traefik-admin-port.yml" "${git_admin}"
-    t_check "no /docker-data directory was created" test ! -e /docker-data
+    t_check "the /docker-data path is unchanged" \
+        bash -c '[[ "$1" == "$2" ]]' _ "${docker_data_before}" "$(docker_data_snapshot)"
 }
 
 test_infra_log_rotation() {

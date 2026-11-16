@@ -19,6 +19,93 @@ refuse_test_base() {
     ! sjv_test_base_acceptable "$1" "$2"
 }
 
+# Production mode refuses every uid other than root. The suite may itself
+# be root, so the child has to change uid. An existing account is used;
+# none is created. direct means the suite is already unprivileged.
+UNPRIV_MODE=""
+UNPRIV_UID=""
+UNPRIV_GID=""
+UNPRIV_SKIP_REASON=""
+
+# Prints the child EUID only when every uid and gid is non-zero, the
+# capability sets are empty, and no-new-privs is set. Anything else prints
+# nothing, so a partial drop cannot pass the test.
+unpriv_probe() {
+    local got=""
+    got="$("$@" bash -c '[[ "${EUID}" != "0" && -r "$1" && -x "$1" ]] || exit 0
+        awk "
+            function ids_ok(    i) {
+                if (NF < 5) return 0
+                for (i = 2; i <= NF; i++) if (\$i == 0) return 0
+                return 1
+            }
+            /^Uid:/ { uid = ids_ok() }
+            /^Gid:/ { gid = ids_ok() }
+            /^Cap(Inh|Prm|Eff|Bnd|Amb):/ { if (\$2 ~ /^0+$/) caps++ }
+            /^NoNewPrivs:/ { nnp = \$2 }
+            END { exit !(uid && gid && caps == 5 && nnp == 1) }
+        " /proc/self/status >/dev/null || exit 0
+        printf "%s" "${EUID}"' _ "${REPO_ROOT}/scripts/init.sh" 2>/dev/null || true)"
+    [[ -n "${got}" && "${got}" != "0" ]]
+}
+
+prepare_unprivileged_launch() {
+    UNPRIV_MODE=""
+    UNPRIV_UID=""
+    UNPRIV_GID=""
+    UNPRIV_SKIP_REASON=""
+    if [[ "${EUID}" -ne 0 ]]; then
+        UNPRIV_MODE="direct"
+        return 0
+    fi
+    local uid="" gid=""
+    uid="$(id -u nobody 2>/dev/null || true)"
+    gid="$(id -g nobody 2>/dev/null || true)"
+    if [[ -z "${uid}" || -z "${gid}" || "${uid}" == "0" ]]; then
+        UNPRIV_SKIP_REASON="non-root refusal (the existing nobody account is missing or is uid 0)"
+        return 1
+    fi
+    if ! command -v setpriv >/dev/null 2>&1; then
+        UNPRIV_SKIP_REASON="non-root refusal (setpriv is not available)"
+        return 1
+    fi
+    if unpriv_probe setpriv --nnp --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+        --reuid="${uid}" --regid="${gid}" --clear-groups; then
+        UNPRIV_MODE="setpriv"
+        UNPRIV_UID="${uid}"
+        UNPRIV_GID="${gid}"
+        return 0
+    fi
+    UNPRIV_SKIP_REASON="non-root refusal (setpriv could not run the scripts as nobody without capabilities)"
+    return 1
+}
+
+# absent, or the device, inode and file type of an existing path.
+# A refused command must leave this value unchanged.
+docker_data_snapshot() {
+    if [[ -e /docker-data || -L /docker-data ]]; then
+        stat -c '%d %i %F' /docker-data
+    else
+        printf 'absent\n'
+    fi
+}
+
+run_unprivileged() {
+    case "${UNPRIV_MODE}" in
+        direct)
+            t_run "$@"
+            ;;
+        setpriv)
+            t_run setpriv --nnp --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+                --reuid="${UNPRIV_UID}" --regid="${UNPRIV_GID}" --clear-groups \
+                "$@"
+            ;;
+        *)
+            fail "unprivileged launch was not prepared"
+            ;;
+    esac
+}
+
 # Snapshot of names, modes, inodes, sizes and mtimes under the base.
 tree_state() {
     find "${T_BASE}" -printf '%P %m %i %s %T@\n' | sort
@@ -91,23 +178,38 @@ test_scripts_guard() {
     run_script init.sh --bogus
     t_check "an unknown option is refused" bash -c '(( $1 != 0 )) && [[ "$2" == *"Unknown option"* ]]' _ "${T_RC}" "${T_OUT}"
 
-    local script
-    for script in init.sh update-env.sh check-env.sh deploy.sh post-deploy.sh reload.sh create-dashboard-user.sh rotate-traefik-logs.sh; do
-        t_run env -u SJV_TEST_BASE_DIR NO_COLOR=1 "${REPO_ROOT}/scripts/${script}"
-        t_check "${script} without root is refused" \
-            bash -c '(( $1 != 0 )) && [[ "$2" == *"must be run as root"* ]]' _ "${T_RC}" "${T_OUT}"
-    done
-    t_check "a refused non-root run creates no /docker-data" test ! -e /docker-data
+    local script docker_data_before ns_err=""
+    docker_data_before="$(docker_data_snapshot)"
+    if prepare_unprivileged_launch; then
+        for script in init.sh update-env.sh check-env.sh deploy.sh post-deploy.sh reload.sh create-dashboard-user.sh rotate-traefik-logs.sh; do
+            run_unprivileged env -u SJV_TEST_BASE_DIR NO_COLOR=1 "${REPO_ROOT}/scripts/${script}"
+            t_check "${script} without root is refused" \
+                bash -c '(( $1 != 0 )) && [[ "$2" == *"must be run as root"* ]]' _ "${T_RC}" "${T_OUT}"
+        done
+    else
+        t_skip "${UNPRIV_SKIP_REASON}"
+    fi
+    t_check "a refused non-root run creates no /docker-data" \
+        bash -c '[[ "$1" == "$2" ]]' _ "${docker_data_before}" "$(docker_data_snapshot)"
 
-    if command -v unshare >/dev/null 2>&1; then
+    # --map-root-user maps this process to root inside a user namespace.
+    # --map-auto is not used: it needs subordinate ids and fails for root
+    # in the Incus container, before the script can run. An existing
+    # /docker-data is the production disk, so the scripts are not started.
+    if [[ -e /docker-data || -L /docker-data ]]; then
+        t_skip "missing /docker-data mount (/docker-data already exists; production scripts are not run against it)"
+    elif ! command -v unshare >/dev/null 2>&1; then
+        t_skip "missing /docker-data mount (unshare is not available)"
+    elif ! ns_err="$(unshare --map-root-user true 2>&1)"; then
+        t_skip "missing /docker-data mount (user namespace is not available: ${ns_err})"
+    else
         for script in update-env.sh check-env.sh init.sh deploy.sh post-deploy.sh reload.sh create-dashboard-user.sh rotate-traefik-logs.sh; do
-            t_run unshare --map-auto --map-root-user env -u SJV_TEST_BASE_DIR NO_COLOR=1 "${REPO_ROOT}/scripts/${script}"
+            t_run unshare --map-root-user env -u SJV_TEST_BASE_DIR NO_COLOR=1 "${REPO_ROOT}/scripts/${script}"
             t_check "${script} refuses a missing /docker-data mount" \
                 bash -c '(( $1 != 0 )) && [[ "$2" == *"/docker-data does not exist"* ]]' _ "${T_RC}" "${T_OUT}"
         done
-        t_check "a refused mount check creates no /docker-data" test ! -e /docker-data
-    else
-        t_skip "missing /docker-data mount (unshare is not available)"
+        t_check "a refused mount check creates no /docker-data" \
+            bash -c '[[ "$1" == "$2" ]]' _ "${docker_data_before}" "$(docker_data_snapshot)"
     fi
 }
 
