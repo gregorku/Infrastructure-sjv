@@ -202,6 +202,15 @@ test_infra_render() {
         bash -c '(( $1 != 0 )) && [[ "$2" == *"cannot create Docker networks"* ]]' _ "${T_RC}" "${T_OUT}"
     t_check "a refused deploy creates no runtime directory" test ! -e "${stack}/runtime"
     run_script deploy.sh --render-only
+    t_check "publish without a dashboard password is refused" \
+        bash -c '(( $1 != 0 )) && [[ "$2" == *"dashboard password file is missing"* ]]' _ "${T_RC}" "${T_OUT}"
+    t_check "a refused publish leaves the stack admin file without a host port" \
+        bash -c '! grep -q "8443:8443" "$1"' _ "${stack}/compose/15-traefik-admin-port.yml"
+    t_check "a refused publish does not rewrite the git admin file" \
+        bash -c '[[ "$(cksum "$1")" == "$2" ]]' _ \
+        "${REPO_ROOT}/compose/15-traefik-admin-port.yml" "${git_admin}"
+    set_env_value "${env_file}" TRAEFIK_ADMIN_PUBLISH ""
+    run_script deploy.sh --render-only
     if (( T_RC == 0 )); then
         t_pass "deploy.sh --render-only succeeds"
     else

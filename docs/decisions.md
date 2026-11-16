@@ -1,6 +1,6 @@
 # Rozhodnutí
 
-Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Nové číslo rozhodnutí nevzniklo. R15 zůstává schválené a beze změny. Schválení dokumentace neznamená souhlas s nasazením.
+Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Dne 16. 11. 2026 přibylo rozhodnutí R31 o výměnách a metrologické historii. Téhož dne se uzavřely jeho tři otevřené body: metrologické lhůty a upozornění, význam `failed` a shoda `location`. R1–R30 zůstávají schválené a beze změny. Schválení dokumentace neznamená souhlas s nasazením.
 
 ## Potvrzená rozhodnutí
 
@@ -36,6 +36,7 @@ Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11
 | 28 | Provenience neobsahuje id smazaných řádků | Nese zdroj, který odečet založil, a jen potvrzené další zdroje |
 | 29 | MQTT a HTTPS nesdílejí `msg_key`, dokud to kontrakt neprokáže | Výchozí `msg_key_scope = transport`. Stejný text na druhém transportu je `id_collision` |
 | 30 | `meter_readings_vendor_time_guard` chrání jen projekci | Konfliktní pozorování se vloží dřív než odečet a index je nesmaže |
+| 31 | Výměna je servisní událost mezi původní a novou instalací. Metrologická historie patří fyzickému měřidlu | Stavy a plomby zůstávají v `meter_installations`. Fotografie a protokoly se neukládají. Znění je v R31 |
 
 ## Retence
 
@@ -47,6 +48,7 @@ Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11
 | Fragmentové sady (`ingest_fragment_sets`) a fragmenty (`ingest_fragments`) | 24 měsíců od `first_received_at` a od `received_at` | bez partitioningu. Nejdřív `DELETE` fragmentů, potom sady, na kterou už žádný fragment neukazuje. Pozdní fragment sadu podrží. Každé doručení fragmentu je vlastní řádek |
 | Události zařízení (`device_events`) | 12 měsíců | měsíční partitions |
 | Audit (`audit_logs`) | dlouhodobě | bez partitioningu, hash řetězec, jen INSERT |
+| Výměny (`meter_replacement_events`) a metrologická historie (`meter_verifications`) | trvale | bez partitioningu, řádky se nemažou. Skončená platnost ověření řádek nemaže |
 | Klíče idempotence a deduplikace, epochy bootů | 60 dní | `DELETE` v dávkách. Delší než maximální stáří zprávy (30 dní) |
 | Neznámá měřidla (`unknown_meter_sightings`) | 90 dní od posledního zachycení | `DELETE` |
 | Pokusy o přihlášení, notifikace | 90 dní (návrh k potvrzení) | `DELETE` |
@@ -125,6 +127,28 @@ Další upřesnění bez samostatného čísla:
 - Dva procesy, které současně nezaloží sadu, drží `pg_advisory_xact_lock` na rozsahu jedinečnosti. Konflikt unikátního indexu zopakuje vyhledání. Fragment se nezahodí a nepřipojí se k jiné sadě.
 - Ruční PUBACK v paho-mqtt 2.x (`manual_ack`), `SIGHUP` u Mosquitta, podpora PROXY protocolu v Mosquittu, volba `expire-auto` v pgBackRest, atomičnost zápisu WAL a názvy voleb `services.restic.server` v NixOS jsou označené jako „k ověření“.
 - Runbook úplné obnovy na novém VPS (kroky 0–13) je v [backup-strategy.md](backup-strategy.md#úplná-obnova-na-novém-vps).
+
+## Doplnění 16. 11. 2026: výměny a metrologická historie
+
+**R31 – Výměny a metrologická historie měřidel**
+
+Výměna měřidla je samostatná servisní událost propojující původní a novou instalaci. Počáteční a konečné stavy a čísla plomb zůstávají v `meter_installations`. Metrologická ověření, kalibrace a kontroly se evidují samostatně u konkrétního fyzického měřidla. Fotografie a protokoly se v systému neukládají; uchovává je předseda SJV. Výměna a změny metrologické historie jsou auditované.
+
+R31 nerozporuje dřívější rozhodnutí a jejich znění nemění:
+
+- R8 dál zakazuje `installation_id` v `meter_readings`. Výměna ho nepřidává.
+- R15 a rozhodnutí 7 a 14 dál určují, co člen vidí. Výměna ani metrologická historie viditelnost člena nemění.
+- Rozhodnutí 8 nechává role `board` a `technician` nepřiřaditelné. `performed_by` je jméno technika nebo firmy, ne přidělení role.
+- Rozhodnutí 13 nechává aplikaci informační. R31 nezavádí rozúčtování, cenu ani metrologickou lhůtu.
+- R3 a výpočet spotřeby zůstávají. Spotřeba se dál počítá uvnitř jedné instalace a jednoho počítadla.
+
+Podrobnosti, constraint trigger a transakce jsou v [database-design.md](database-design.md). Oprávnění jsou v [security.md](security.md). Zobrazení metrologického záznamu drží výsledek úkonu a časové pokrytí odděleně. Věta R31 se tím nemění.
+
+Uzavření tří otevřených bodů R31, 16. 11. 2026. Věta R31 ani rozhodnutí R1–R30 se nemění.
+
+- Metrologické lhůty sleduje SJV samostatně mimo systém. Systém `valid_until` nepočítá, lhůtu podle druhu ani konstrukce měřidla neodvozuje, upozornění na blížící se ani prošlý termín nevytváří a odpovědnost za sledování těchto termínů nepřebírá. Tabulka `meter_verifications` zůstává. Administrátor může `performed_at`, `valid_from` a `valid_until` zapsat ručně, když údaje zná. Systém uložené údaje zobrazuje a povinnost dalšího úkonu z nich nedělá. Obecné notifikace ostatních provozních událostí zůstávají.
+- `result` zůstává provozním označením výsledku konkrétního úkonu: `passed`, `failed`, `not_assessed`. Není to právní klasifikace. Systém z `failed` neoznačí měřidlo jako právně nezpůsobilé, neukončí ani nezruší jiné metrologické záznamy, nezakáže používání měřidla, nepočítá náhradní spotřebu a nevyvozuje sankce ani jiné právní důsledky. Výsledek a časové pokrytí zůstávají oddělené. Platí pro `verification`, `calibration` i `inspection`. O právních a provozních důsledcích rozhoduje SJV podle konkrétního úkonu a jeho podkladů.
+- Výměna dál vyžaduje stejný byt, rozdílné fyzické měřidlo, časovou návaznost instalací a vyplněné konečné a počáteční stavy. Shoda `location` se nevyžaduje. Umístění je samostatný údaj každé instalace, při výměně se nekopíruje a jeho změna je přípustná.
 
 ## Otevřené body
 

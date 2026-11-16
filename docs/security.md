@@ -24,7 +24,8 @@
 | Zdvojená spotřeba při změně zdroje | Jediný přiřazený stream, kontrolovaný a auditovaný přechod |
 | Únik databáze | DB jen na interní síti, AES a TOTP šifrované hlavním klíčem mimo DB |
 | Kompromitace VPS | Zálohy append-only, mazání jen z domácího serveru, obnovovací sada mimo VPS |
-| Neoprávněná změna dat | Opravy jen novým záznamem, audit s hash řetězcem a právem jen na INSERT |
+| Neoprávněná změna dat | Běžné opravy historických a provozních dat jdou podle pravidel příslušné tabulky. Výjimka R31 dovoluje auditovaný `UPDATE` jen u `meter_replacement_events` a `meter_verifications`. Každý takový `UPDATE` je ve stejné transakci s novým řádkem `audit_logs`, který nese `before`, `after` a povinný `reason`. `audit_logs` zůstává append-only, jen INSERT, a jeho pravidla se nemění. Výjimka nezakládá `UPDATE` jiných historických záznamů |
+| Člen změní instalaci, výměnu nebo metrologickou historii | Tyto zápisy mají jen oprávnění administrátora. Role `member` k nim endpoint nemá |
 
 ## Uživatelé
 
@@ -47,17 +48,18 @@
 
 | Role | Stav | Oprávnění |
 | --- | --- | --- |
-| `admin` | aktivní | správa uživatelů, budov, bytů, členství, měřidel, zařízení, opravy, audit, exporty všech dat |
-| `member` | aktivní | jen vlastní byty, jen za období členství, vlastní exporty |
+| `admin` | aktivní | správa uživatelů, budov, bytů, členství, měřidel, instalací, výměn, metrologické historie, zařízení, opravy, audit, exporty všech dat |
+| `member` | aktivní | jen vlastní byty, jen za období členství, vlastní exporty. Instalace, výměny a metrologickou historii nemění |
 | `board` | v datech, nepřiřaditelná | připraveno: čtení všech dat bez úprav |
-| `technician` | v datech, nepřiřaditelná | připraveno: měřidla a zařízení bez osobních údajů |
+| `technician` | v datech, nepřiřaditelná | připraveno: měřidla a zařízení bez osobních údajů. R31 tuto roli nezpřístupňuje |
 
 - Autorizace jde přes oprávnění (`permissions`), ne přes jména rolí v kódu. Nová role je jen nová sada oprávnění.
 - Každý endpoint deklaruje potřebné oprávnění. Testy ověří, že neexistuje endpoint bez deklarace.
 - **Data členů** filtruje repozitářová vrstva, ne UI: měřidlo instalované v bytě v čase odečtu a čas uvnitř členství. Id bytu nebo měřidla z URL se vždy ověří proti těmto pravidlům. Neexistující a cizí objekt vrací stejnou odpověď `404`. Celé pravidlo je v [database-design.md](database-design.md#historie-bytu-přístup-oddělený-od-spotřeby).
 - **Přístup je oddělený od spotřeby.** Data spotřeby patří bytu a měřidlu, členství jen určuje viditelné období. Změna vlastníka nemění data spotřeby, takže nový vlastník nevidí historii předchozího a předchozí vlastník po skončení členství nevidí nová data.
 - **Aktuální stav měřidla (R15, schváleno):** člen vidí aktuální kumulativní stav počítadla, stejný jako na fyzickém displeji. Rozhraní ho označuje jako celkový stav měřidla, ne jako osobní spotřebu, protože zahrnuje i spotřebu před členstvím. Historické odečty a vypočítanou spotřebu vidí jen za období svého členství. Administrátor má kompletní historii ([decisions.md](decisions.md)).
-- **Historie pro administrátora:** `GET /admin/apartments/{id}/history` vrací instalace a výměny měřidel, členství a přiřazení zdrojů v čase. Přístup do ní se audituje.
+- **Historie pro administrátora:** `GET /admin/apartments/{id}/history` vrací instalace a výměny měřidel, členství a přiřazení zdrojů v čase. Metrologická historie je na měřidle, ne na bytové ose. Přístup do ní se audituje.
+- **Výměny a ověření** zapisuje jen `admin`. `member` tyto endpointy nemá a R15 tím nemění, co smí vidět.
 - Testy přístupu: pro každý endpoint člena se ověří cizí byt, období před členstvím a po jeho skončení, dvě oddělená období jednoho člena a měřidlo po výměně.
 
 ## Zařízení
@@ -141,6 +143,9 @@ Platí pro ACRIOS a pro každý další koncentrátor. Metoda autentizace se vyb
 - **Audit** zaznamenává:
   - přihlášení a odhlášení, selhání, změny MFA,
   - všechny administrátorské změny s hodnotou před a po,
+  - výměnu měřidla: kdo ji zapsal, kdo ji provedl, kdy proběhla, která instalace a které měřidlo skončilo a které začalo. Počáteční a konečná hodnota a číslo plomby jsou v auditu instalací téže transakce, se stejným `request_id`,
+  - metrologickou událost: fyzické měřidlo, typ úkonu (`verification`, `calibration`, `inspection`) a kdo záznam vytvořil. Oprava nese hodnoty před a po, povinný důvod a změnu evidovaných údajů, zejména `result`, `performed_at`, poskytovatele a časové pokrytí (`valid_from`, `valid_until`),
+  - opravu výměny s hodnotou před a po a s povinným důvodem,
   - opravy s důvodem,
   - změny zařízení a klíčů (bez hodnot), exporty,
   - retenční mazání,
@@ -151,7 +156,7 @@ Platí pro ACRIOS a pro každý další koncentrátor. Metoda autentizace se vyb
 
 Správcem je SJV. Projekt dodává technická opatření, ale ne právní dokumenty.
 
-- **Minimalizace:** ukládá se jen nutné. Rámce cizích měřidel se neukládají (whitelist v zařízení, na serveru jen počet zachycení v `unknown_meter_sightings`).
+- **Minimalizace:** ukládá se jen nutné. Rámce cizích měřidel se neukládají (whitelist v zařízení, na serveru jen počet zachycení v `unknown_meter_sightings`). Fotografie měřidel a servisní ani předávací protokoly se neukládají, včetně odkazů a metadat. Uchovává je předseda SJV mimo systém.
 - **Retence** podle [decisions.md](decisions.md). Zálohy prodlužují uložení až o 3 roky (roční snapshoty). Musí to být v záznamech o zpracování.
 - **Odečty se uchovávají trvale** a patří bytu, ne osobě. Osobní údaj vzniká jen spojením s členstvím. Po anonymizaci uživatele zůstanou odečty bez vazby na osobu.
 - **Práva subjektu:** export vlastních dat (CSV a PDF) pro člena, export za člena pro administrátora, anonymizace účtu.

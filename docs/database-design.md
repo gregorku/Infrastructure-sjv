@@ -1,6 +1,6 @@
 # Databázový návrh
 
-PostgreSQL 18.x, databáze `sjv`, schéma `public`, je centrální a jediný dlouhodobý zdroj pravdy pro data SJV (rozhodnutí 15–30 v [decisions.md](decisions.md)). Konkrétní model ACRIOS, jeho firmware ani protokol tvar tabulek nemění. ACRIOS je kód partnera a adaptéru, ne předpona tabulek.
+PostgreSQL 18.x, databáze `sjv`, schéma `public`, je centrální a jediný dlouhodobý zdroj pravdy pro data SJV (rozhodnutí 15–30 a R31 v [decisions.md](decisions.md)). Konkrétní model ACRIOS, jeho firmware ani protokol tvar tabulek nemění. ACRIOS je kód partnera a adaptéru, ne předpona tabulek.
 
 - ORM SQLAlchemy 2 s psycopg 3, migrace Alembic.
 - Rozšíření `btree_gist` (exclusion constrainty) a `citext` (e-maily).
@@ -25,7 +25,7 @@ PostgreSQL 18.x, databáze `sjv`, schéma `public`, je centrální a jediný dlo
    - `telegram_dedup_keys` s exclusion constraintem přes časové okno. Potvrzená shoda rámce platí jen uvnitř okna s důvěryhodnou kotvou.
 
    Klíče mají retenci 60 dní. Ingest odmítne zprávy starší než `INGEST_MAX_MESSAGE_AGE` (30 dní). Opakování prokázaného identifikátoru, které se ještě vejde do stáří, narazí na existující klíč. Stejný hash bez identifikátoru na klíč nenarazí.
-3. **Trvalé tabulky se nepartitionují** a mají globální `UNIQUE`: `meter_readings`, `meter_daily_values`, `audit_logs`, `ingest_sources`, `reading_provenance`, kmenová data.
+3. **Trvalé tabulky se nepartitionují** a mají globální `UNIQUE`: `meter_readings`, `meter_daily_values`, `audit_logs`, `ingest_sources`, `reading_provenance`, `meter_replacement_events`, `meter_verifications`, kmenová data.
 4. **`partition_month` je klíč partition.** Je to `date`, první den měsíce v UTC. Čas, kdy bajty dorazily, je vždy samostatný sloupec `received_at` nebo `server_received_at`.
    - `ingest_payloads.partition_month` je měsíc `received_at`.
    - `ingest_receipts.partition_month`, `ingest_dedup_candidates.partition_month` a `decoded_observations.partition_month` jsou měsíc `server_received_at`. Retence příjmu a pozorování je 24 měsíců od tohoto měsíce, ne od stáří telegramu, na který odkazují.
@@ -114,8 +114,146 @@ Pravidlo vynucuje repozitářová vrstva backendu jedním společným predikáte
 `id`, `meter_id`, `apartment_id`, `location`, `installed_at`, `removed_at NULL`, `initial_value`, `final_value NULL`, `reason`, `seal_number`, `created_by`
 
 - `EXCLUDE USING gist (meter_id WITH =, tstzrange(installed_at, removed_at, '[)') WITH &&)`
-- Výměna = ukončení instalace s `final_value` a nová instalace nového měřidla s `initial_value`. Obojí v jedné transakci a s auditem.
+- Výměna = ukončení instalace s `final_value` a nová instalace nového fyzického měřidla s `initial_value`. Obě instalace spojí `meter_replacement_events` v jedné transakci a s auditem (R31).
+- `initial_value` je povinné číslo. `final_value` smí být NULL, dokud instalace není původní stranou servisní výměny. Číselná nula je v obou sloupcích platný stav počítadla. NULL znamená, že hodnota chybí.
+- `initial_value`, `final_value` a `seal_number` zůstávají jen na tomto řádku.
 - Spotřeba různých fyzických měřidel v bytě (kuchyň, koupelna, staré a nové po výměně) se sčítá. Jde o různá počítadla, ne o dva zdroje téhož počítadla.
+- Zákaz `DELETE` této tabulky je v odstavci Zákaz DELETE.
+
+### `meter_replacement_events`
+
+Servisní zásah, který spojí ukončenou a novou instalaci. Tabulka nepočítá spotřebu a nepřebírá stavy ani plomby.
+
+`id`, `performed_at timestamptz`, `performed_by`, `reason`, `old_installation_id → meter_installations`, `new_installation_id → meter_installations`, `note NULL`, `created_by → users`, `created_at`
+
+- `CHECK (old_installation_id <> new_installation_id)`
+- `UNIQUE (old_installation_id)` a `UNIQUE (new_installation_id)`. Jedna instalace vystupuje nejvýš v jedné výměně jako původní a nejvýš v jedné jako nová.
+- Oba cizí klíče jsou `ON DELETE RESTRICT`. Účinek je v odstavci Zákaz DELETE.
+- `performed_by` je jméno technika nebo servisní firmy. Není to uživatelský účet a roli `technician` nezakládá. Ta zůstává nepřiřaditelná (rozhodnutí 8).
+- `created_by` je administrátor, který záznam uložil. `created_at` je čas uložení a od `performed_at` se liší.
+
+Důvod výměny je `meter_replacement_events.reason`. `reason` původní instalace se při výměně nemění, protože nese důvod jejího založení. Nová instalace dostane do svého povinného `reason` stejný text jako událost.
+
+**Kontrola integrity**
+
+`CHECK` ani cizí klíč neumí porovnat byt, měřidlo a časy dvou odkazovaných řádků, pokud se `apartment_id` a `meter_id` neuloží podruhé. Druhá kopie se nezakládá. Shodu hlídá jeden odložený constraint trigger. PostgreSQL 18 ho umí a nové rozšíření kvůli němu není potřeba. Trigger je odložený na konec transakce, takže vidí všechny její zápisy.
+
+Trigger integrity je na dvou tabulkách:
+
+- `meter_replacement_events` při `INSERT` a `UPDATE`,
+- `meter_installations` při `UPDATE` řádku, na který po této transakci nějaká servisní událost odkazuje jako na původní nebo novou instalaci.
+
+Tento trigger `DELETE` neodmítá. Samostatný trigger pro `DELETE` na `meter_installations`, `meter_replacement_events` ani `meter_verifications` definovaný není. Zákaz `DELETE` u těchto tří tabulek vynucuje oprávnění role `sjv_api`, ne aplikační kontrola a ne trigger. `UPDATE` tím zakázán není.
+
+Při `UPDATE` události se kontrola řídí `old_installation_id` a `new_installation_id` tak, jak jsou po změně. Načte obě aktuálně odkazované instalace a ověří na nich celou vazbu, i když se změnil jen jeden odkaz a i když se řádek nově odkazované instalace v téže transakci sám nemění. Instalace, na kterou událost po změně už neodkazuje, do kontroly této události nepatří.
+
+`INSERT` instalace sám událost nevyžaduje. První instalace a odebrání bez náhrady jím procházejí. Když stejná transakce vloží i událost, kontrola na konci obě strany spojí.
+
+Kontrola načte událost a obě instalace a vyžaduje současně:
+
+- obě instalace existují a jejich `id` se liší,
+- obě mají stejné `apartment_id`,
+- `meter_id` obou se liší,
+- `removed_at` původní instalace a `installed_at` nové instalace se rovnají `performed_at`,
+- `removed_at` původní instalace je pozdější než její `installed_at`,
+- `final_value` původní instalace není NULL,
+- `initial_value` nové instalace není NULL,
+- `reason` nové instalace se rovná `reason` události.
+
+Nula v `final_value` nebo `initial_value` kontrolou projde. `reason` původní instalace se s událostí neporovnává. `location` se nekopíruje a shoda místa se nevyžaduje. Umístění zůstává samostatným údajem každé instalace a jeho změna je přípustná.
+
+**Oprava už uložené výměny**
+
+Stejná kontrola se zopakuje, když se později změní událost nebo kterákoli z obou instalací. Transakce, která vazbu poruší, se nepotvrdí.
+
+| Změna | Důsledek |
+| --- | --- |
+| `old_installation_id` nebo `new_installation_id` | kontrola použije oba odkazy po změně a vyžaduje na nich celou sadu podmínek. Neplatná nová dvojice se nepotvrdí. Platná oprava odkazu se potvrdí a dřívější instalace už podmínkám této události nepodléhá |
+| `apartment_id` jedné instalace | potvrzení selže, když se byty rozcházejí |
+| `meter_id` tak, že obě instalace míří na stejné měřidlo | potvrzení selže |
+| `installed_at` nové instalace nebo `removed_at` původní | potvrzení selže, když se čas nerovná `performed_at`. Oprava času mění událost i instalaci v jedné transakci |
+| `final_value` původní instalace na NULL | potvrzení selže. Jiné číslo včetně nuly projde |
+| `initial_value` nové instalace na NULL | potvrzení selže. Jiné číslo včetně nuly projde |
+| `reason` nové instalace nebo `reason` události | potvrzení selže, když se texty liší. Oprava důvodu mění oba řádky v jedné transakci |
+| `reason` nebo `initial_value` původní instalace | výměnu samy nerozbijí. `initial_value` původní instalace zůstává povinné číslo sloupce a nula je platná |
+| `location` původní nebo nové instalace | výměnu nerozbije. Místo se nekopíruje, shoda se nevyžaduje a změna umístění je přípustná |
+| `removed_at` nové instalace | původní výměnu nemění. Pozdější ukončení nové instalace je další zásah nebo odebrání |
+
+Každá taková oprava zapíše ve stejné transakci audit s hodnotou před změnou, po změně a s důvodem. `created_by` a `created_at` události se nemění.
+
+**Transakce**
+
+PostgreSQL při chybě vrátí celou otevřenou transakci. Nepozná, že uzavření instalace v jednom požadavku a založení jiné instalace v dalším požadavku měly být jedna výměna. Odebrání bez náhrady a první instalace jsou samostatné platné operace a řádek `meter_replacement_events` nezakládají.
+
+Výměna je jedna transakce:
+
+1. uzavření původní instalace (`removed_at`, `final_value`; `reason` původního řádku se nemění),
+2. vložení nové instalace nového fyzického měřidla, včetně povinného čísla `initial_value`, `seal_number` a `reason`,
+3. vložení `meter_replacement_events`,
+4. vložení `audit_logs` k oběma instalacím a k události.
+
+Nový řádek `meters` vzniká v téže transakci, pokud fyzické měřidlo ještě neexistuje. Odložený trigger doběhne až na konci, takže pořadí těchto zápisů uvnitř transakce není podmínka. Selhání kteréhokoli kroku nic z transakce neponechá. Všechny auditní řádky zásahu mají stejné `request_id`.
+
+Oprava je `UPDATE` ve stejné transakci jako nový auditní řádek s `before`, `after` a povinným `reason`. `created_by` a `created_at` se nemění. Předchozí podoba zůstane v řetězu `audit_logs`.
+
+**Zákaz DELETE**
+
+Zákaz `DELETE` u těchto tří tabulek vynucuje databázové oprávnění role `sjv_api`. Aplikační kontrola ho nenahrazuje. Trigger pro `DELETE` na nich není. `UPDATE` zůstává povolený a je auditovaný. Zákaz `DELETE` ho neruší.
+
+- `meter_installations`. `sjv_api` smí `INSERT` a auditovaný `UPDATE`. `DELETE` nemá u žádného řádku, ať na něj výměna odkazuje, nebo ne. `ON DELETE RESTRICT` z `meter_replacement_events` navíc brání smazat instalaci, na kterou nějaká výměna odkazuje. Instalaci bez takové vazby tento cizí klíč nechrání. Její `DELETE` pro `sjv_api` odmítá oprávnění role.
+- `meter_replacement_events`. `sjv_api` smí `INSERT` a auditovaný `UPDATE`. `DELETE` nemá. Oprávnění role je vynucení tohoto zákazu. `ON DELETE RESTRICT` na `old_installation_id` a `new_installation_id` brání smazat odkazovanou instalaci. Řádek výměny tím nechrání.
+- `meter_verifications`. `sjv_api` smí `INSERT` a auditovaný `UPDATE`. `DELETE` nemá. Oprávnění role je vynucení tohoto zákazu, trigger ne. `meter_id` po vložení zůstává neměnný. Oprava ostatních sloupců zůstává auditovaný `UPDATE`. Cizí klíč `meter_id → meters` s `ON DELETE RESTRICT` brání smazat měřidlo, dokud na něj ověření odkazuje. Řádek ověření tím nechrání.
+
+### `meter_verifications`
+
+Historie ověření, kalibrací a kontrol jednoho fyzického měřidla.
+
+`id`, `meter_id → meters`, `verification_type` (`verification`, `calibration`, `inspection`), `performed_at date`, `valid_from date NULL`, `valid_until date NULL`, `result` (`passed`, `failed`, `not_assessed`), `provider`, `note NULL`, `created_by → users`, `created_at`
+
+- `verification` je ověření, `calibration` je kalibrace a `inspection` je kontrola. Jsou to tři různé typy úkonů. Záznam jednoho typu neukončuje ani nenahrazuje záznam jiného typu.
+- `CHECK (valid_until IS NULL OR valid_from IS NOT NULL)`
+- `CHECK (valid_until IS NULL OR valid_until >= valid_from)`. `valid_until` je poslední kalendářní den, který se ještě počítá jako platný. Den se vykládá v `Europe/Prague`.
+- `result` je provozní označení záznamu: `passed` kladný, `failed` nekladný, `not_assessed` když podklad kladný ani nekladný výsledek neuvádí. Není to právní klasifikace. Systém z `failed` neoznačí měřidlo jako právně nezpůsobilé, neukončí ani nezruší jiné metrologické záznamy, nezakáže používání měřidla, nepočítá náhradní spotřebu a nevyvozuje sankce ani jiné právní důsledky. Platí pro `verification`, `calibration` i `inspection`. O důsledcích rozhoduje SJV.
+- `provider` je organizace nebo osoba, která úkon provedla. `created_by` je administrátor, který záznam uložil.
+- Cizí klíč na `meters` je `ON DELETE RESTRICT`. Účinek je v odstavci Zákaz DELETE. Měřidlo se vyřazuje stavem `retired`.
+- `meter_id` po vložení měnit nejde, aby se historie nedala přenést na jiné měřidlo. Oprava ostatních sloupců je auditovaný `UPDATE`. Skončená platnost řádek nemaže.
+- Pro čtení historie stačí index `(meter_id, verification_type, performed_at)` a částečný index na `valid_until` tam, kde je vyplněné. Index termíny nehlídá.
+
+Každý řádek patří konkrétnímu `meter_id`. Výměna historii starého měřidla na nové nekopíruje. Nové měřidlo má vlastní řádky, i kdyby zatím žádné nemělo.
+
+Druhy měřidel už rozlišuje `meters.medium`. Historie ani platnost se mezi nimi nesdílí:
+
+| `medium` | Význam |
+| --- | --- |
+| `cold_water`, `hot_water` | vodoměry. Každé fyzické měřidlo má vlastní historii |
+| `heat` | měřič tepla |
+| `heat_cost_allocator` | indikátor topných nákladů |
+
+Měřič tepla a indikátor topných nákladů jsou různá měřidla. Společnou platnost nemají.
+
+Systém `valid_until` sám nedopočítá a lhůtu neodvozuje podle druhu ani konstrukce měřidla. Metrologické lhůty sleduje SJV mimo systém. Administrátor může `performed_at`, `valid_from` a `valid_until` zapsat ručně, když údaje zná. Prázdné `valid_until` znamená, že konec platnosti v systému není určený. Systém uložené údaje zobrazuje a povinnost dalšího úkonu z nich nedělá. Upozornění na blížící se nebo prošlý metrologický termín nevytváří a odpovědnost za sledování těchto termínů nepřebírá.
+
+Administrátor vidí u každého záznamu dvě samostatné informace. Systém je neskládá do jednoho stavu, ve kterém by `result = failed` vypadal jako úspěšné platné ověření jen proto, že dnešek leží mezi `valid_from` a `valid_until`.
+
+- **Výsledek úkonu** je uložený `result`: `passed`, `failed` nebo `not_assessed`.
+- **Časové pokrytí** se počítá jen z dat a jen když jsou obě vyplněná. Den je v `Europe/Prague` a `valid_until` se do intervalu počítá. `in_force` znamená `valid_from` ≤ dnešek ≤ `valid_until`, `not_yet_valid` znamená `valid_from` až po dnešku, `expired` znamená `valid_until` před dneškem. Chybí-li `valid_from` nebo `valid_until`, pokrytí je `undated` a o platnosti se nic netvrdí.
+
+Souhrn pro jedno fyzické měřidlo a jeden `verification_type` se bere jen z řádků s oběma daty. Řádky `undated` souhrn nepřepíší a zůstávají v historii vidět:
+
+- aspoň jeden řádek je `in_force`: souhrn času je `in_force`. U každého takového řádku zůstává jeho vlastní `result`. Liší-li se výsledky, zobrazí se všechny. Žádný se nezahodí a žádný `failed` se nepřejmenuje na úspěch,
+- žádný řádek není `in_force` a aspoň jeden je `not_yet_valid`: souhrn času je `not_yet_valid`. Starší `expired` zůstane v historii a neříká, že nová platnost už běží,
+- žádný řádek není `in_force` ani `not_yet_valid` a aspoň jeden je `expired`: souhrn času je `expired`,
+- žádný řádek nemá obě data: souhrn času je `unknown`.
+
+Pořadí úkonů určuje `performed_at`. `created_at` je čas vložení záznamu do systému a pořadí úkonů nemění. Pozdější zápis historického úkonu proto souhrn ani jeho doplnění nepřesune. Oprava `performed_at` pořadí přepočítá.
+
+`undated` záznam souhrn času nemění. K souhrnu se přidá jako pozdější úkon bez určené platnosti jen tehdy, když je jeho `performed_at` pozdější než `performed_at` každého datovaného řádku téhož měřidla a téhož typu. Stejné `performed_at` pozdější úkon není. Souhrn času se dál řídí jen `valid_from`, `valid_until` a dneškem.
+
+`result = failed` zůstává označením výsledku konkrétního úkonu. Uvnitř vyplněného datového intervalu se nezobrazuje jako úspěšné ověření. Nezakládá právní nezpůsobilost, zákaz používání, náhradní spotřebu, sankci ani ukončení jiných záznamů. Časové pokrytí a výsledek zůstávají oddělené. O důsledcích rozhoduje SJV podle konkrétního úkonu a jeho podkladů. Metrologický termín notifikaci nezaloží. Obecné notifikace ostatních provozních událostí tím nemizí.
+
+### Dokumenty a fotografie
+
+Fotografie měřidel se do systému nenahrávají. Servisní a předávací protokoly se do systému nenahrávají. Systém neukládá odkazy na tyto dokumenty ani jejich metadata. Tabulka příloh, dokumentů ani úložiště nevzniká. Dokumenty fyzicky uchovává předseda SJV mimo systém. Z výměny a z metrologické historie se ukládá jen text ve sloupcích popsaných výše.
 
 ## Zdroje odečtů
 
@@ -143,6 +281,7 @@ Pravidlo vynucuje repozitářová vrstva backendu jedním společným predikáte
 
 - Efektivní řada měřidla E(t) se skládá jen z odečtů streamu, který je v čase t přiřazený, a jen z `reading_kind = cumulative`, plus z hraničních hodnot instalací (`initial_value`, `final_value`).
 - Spotřeba v intervalu ⟨a, b⟩ uvnitř jedné instalace je `E(b) − E(a)`, tedy rozdíl dvou absolutních hodnot téhož počítadla. Intervalové hodnoty a události se do rozdílu nezapočítávají.
+- Spotřeba se počítá samostatně v jedné instalaci a na jednom fyzickém měřidle. Rozdíl `final_value` starého měřidla a `initial_value` nového měřidla se jako spotřeba nepoužije. Výměna historické řádky `meter_readings` nemění. Sloupec `installation_id` v `meter_readings` zůstává nepřítomný (R8). R15 se nemění.
 - **Nikdy se nesčítají přírůstky ze dvou streamů za stejné období.** Odečty nepřiřazeného streamu se do spotřeby nepromítnou. Slouží jen ke korelaci a kontrole.
 - Mezera v přiřazeném streamu se nedoplňuje z jiného streamu. Spotřeba přes mezeru se spočítá z nejbližších odečtů přiřazeného streamu, protože počítadlo je kumulativní. Hranice měsíce se pak označí jako nepřesná, s uvedením skutečného času použitých odečtů.
 - Pokles E(t) bez výměny měřidla je anomálie. Do spotřeby se nezapočte a čeká na rozhodnutí administrátora.
@@ -511,7 +650,7 @@ Postup v jedné transakci:
 
 - `PRIMARY KEY (meter_id, day)`
 - Počítá se z efektivní řady, tedy jen z kumulativních hodnot přiřazených streamů. V den přechodu zdroje obsahuje hraniční hodnoty obou streamů téhož počítadla a příznak `source_handover`.
-- Přepočet spouští opravy, přechody zdroje a změny instalací (`maintenance.sh` a worker).
+- Přepočet spouští opravy, přechody zdroje a změny instalací (`maintenance.sh` a worker). Po výměně se denní hodnoty počítají znovu uvnitř každého měřidla. Hranice mezi starým `final_value` a novým `initial_value` do rozdílu nevstupuje.
 
 ## Provoz a audit
 
@@ -550,6 +689,7 @@ Postup v jedné transakci:
 | Data | Retence | Způsob |
 | --- | --- | --- |
 | `meter_readings`, `meter_daily_values`, `reading_provenance`, `ingest_sources` | trvale | nemažou se |
+| `meter_replacement_events`, `meter_verifications` | trvale | retence je neodstraňuje |
 | `audit_logs` | dlouhodobě | nemažou se |
 | `ingest_payloads`, `ingest_receipts`, `ingest_dedup_candidates`, `ingest_rejections`, `decoded_observations` | 24 měsíců stáří měsíce přijetí (`received_at` nebo `server_received_at`) | odpojení a smazání partition |
 | `raw_telegrams` | 24 měsíců stáří měsíce kotvy | odpojení a smazání partition. Pozdější příjem tuto dobu neprodlužuje |
@@ -593,7 +733,7 @@ Před fází 4 se dosadí skutečné hodnoty. Kdyby trvalé uchování všech od
 | --- | --- |
 | `sjv_bootstrap` | superuser z image. Používá jen `deploy.sh` |
 | `sjv_owner` | vlastník schématu. Používá jen Alembic |
-| `sjv_api` | čtení. Zápis kmenových dat, členství, instalací, přiřazení zdrojů, externích identifikátorů, schopností, umístění, firmwaru z administrace, koncových bodů, `ingest_sources` pro import, ručních odečtů a oprav. INSERT do auditu a notifikací. `endpoint_credentials` smí vkládat a odvolávat. `secret_enc` nečte |
+| `sjv_api` | čtení. Zápis kmenových dat, členství, instalací, výměn, metrologické historie, přiřazení zdrojů, externích identifikátorů, schopností, umístění, firmwaru z administrace, koncových bodů, `ingest_sources` pro import, ručních odečtů a oprav. INSERT do auditu a notifikací. U `meter_installations`, `meter_replacement_events` a `meter_verifications` smí `INSERT` a `UPDATE` a `DELETE` nemá. Podrobnosti jsou v odstavci Zákaz DELETE. `endpoint_credentials` smí vkládat a odvolávat. `secret_enc` nečte |
 | `sjv_collector` | zápis do ingest tabulek včetně payloadů, fragmentů, kandidátů deduplikace a odmítnutí, `ingest_sources` pro nově ověřené zařízení, `device_boots`, `unknown_meter_sightings`, `device_events`, pozorované schopnosti a firmware z heartbeatu, aktualizace `devices.last_seen_at`. Zařízení nezakládá a `secret_enc` nečte |
 | `sjv_worker` | `decode_queue`, timeout fragmentů, INSERT `meter_readings`, `notifications`, agregace. Odchozí token platformy dešifruje jen v paměti, stejně jako klíč AES |
 | `sjv_maintenance` | partitions, retence, přepočty, INSERT auditu |

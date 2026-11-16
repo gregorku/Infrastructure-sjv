@@ -196,14 +196,20 @@ Data jsou vždy omezená na období členství ([security.md](security.md), [dat
 
 ### Administrátor (`admin`)
 
+Servisní výměny a metrologická ověření, kalibrace a kontroly v této tabulce má jen role `admin`. Role `member` k nim přístup nemá. Role `technician` zůstává nepřiřaditelná a tyto operace nezíská. Předpona `/admin/` sama toto oprávnění nepopisuje.
+
 | Metoda | Cesta | Popis |
 | --- | --- | --- |
 | CRUD | `/admin/buildings`, `/admin/apartments`, `/admin/users` | kmenová data. Mazání je soft delete, uživatel se nemaže (viz `anonymize`) |
-| GET | `/admin/apartments/{id}/history` | časová osa bytu: členství, instalace, výměny, zdroje |
+| GET | `/admin/apartments/{id}/history` | časová osa bytu: členství, instalace, servisní výměny, zdroje |
 | GET, POST, PATCH | `/admin/apartments/{id}/members` | přiřazení a ukončení členství (`valid_from`, `valid_to`) |
 | POST | `/admin/users/{id}/invite`, `/admin/users/{id}/disable`, `/admin/users/{id}/mfa-reset`, `/admin/users/{id}/anonymize` | správa účtu |
 | CRUD | `/admin/meters` | měřidla. Založení vyžaduje počáteční zdroj odečtů |
-| GET, POST | `/admin/meters/{id}/installations` | instalace, výměna, odebrání |
+| GET, POST | `/admin/meters/{id}/installations` | první instalace a odebrání bez náhrady. Výměnu tento endpoint sám neuzavírá |
+| POST | `/admin/meter-replacements` | jen `admin`. Jediná cesta založení výměny. Jedna transakce uzavře původní instalaci s `final_value`, založí novou s `initial_value`, vloží `meter_replacement_events` a audit. Nula je platná hodnota, NULL není |
+| PATCH | `/admin/meter-replacements/{id}` | jen `admin`. Auditovaný `UPDATE` existujícího `meter_replacement_events`. Povinný důvod opravy je důvod auditního záznamu. `UPDATE` a `INSERT` auditu s `before`, `after` a tímto důvodem jsou jedna transakce. Integrita výměny se ověří znovu. `created_by` a `created_at` se nemění. `DELETE` není. Měnit lze `performed_at`, `performed_by`, `reason`, `old_installation_id`, `new_installation_id` a `note`. Význam polí je v [database-design.md](database-design.md) |
+| GET | `/admin/meters/{id}/replacements` | jen `admin`. Servisní výměny, ve kterých měřidlo vystupuje |
+| GET, POST, PATCH | `/admin/meters/{id}/verifications` | jen `admin`. Ověření, kalibrace a kontroly tohoto fyzického měřidla. Odpověď drží `result` a časové pokrytí odděleně. Mazání není. `meter_id` po vložení nelze změnit. Endpoint pro hlídání metrologických termínů není |
 | GET, POST | `/admin/meters/{id}/source-assignments` | historie a změna preferovaného zdroje |
 | PUT | `/admin/meters/{id}/key` | zápis klíče AES. Hodnota se nikdy nevrací |
 | CRUD | `/admin/devices` | zařízení. Údaje se zobrazí jen při založení. `id` se nemění. Výměna SIM není nové zařízení |
@@ -227,6 +233,8 @@ Data jsou vždy omezená na období členství ([security.md](security.md), [dat
 | GET | `/admin/audit-logs` | audit s filtry |
 | GET | `/admin/system/backup-status` | stav záloh ze souborů `state/` (mount jen pro čtení) |
 | GET | `/admin/exports/*` | exporty CSV a PDF |
+
+Endpointy výměn a ověření přijímají jen pole popsaná v [database-design.md](database-design.md). Fotografii, servisní protokol, předávací protokol, odkaz ani metadata dokumentu nepřijímají. Dokumenty uchovává předseda SJV mimo systém.
 
 ### Ingest a systém
 

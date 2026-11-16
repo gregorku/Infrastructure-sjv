@@ -1,6 +1,6 @@
 # Příjem dat
 
-PostgreSQL je jediný dlouhodobý zdroj pravdy pro data SJV (rozhodnutí 15–30 v [decisions.md](decisions.md)). Každý vstup skončí v modelu z [database-design.md](database-design.md). Adaptér výrobce data jen převede na interní kontrakt. Tabulka odečtů pro ACRIOS ani pro jiný transport nevzniká.
+PostgreSQL je jediný dlouhodobý zdroj pravdy pro data SJV (rozhodnutí 15–30 a R31 v [decisions.md](decisions.md)). Každý vstup skončí v modelu z [database-design.md](database-design.md). Adaptér výrobce data jen převede na interní kontrakt. Tabulka odečtů pro ACRIOS ani pro jiný transport nevzniká.
 
 ACRIOS je podporovaný integrační partner. Konkrétní model, revize hardwaru a transport nejsou vybrané. Návrh nepředpokládá, že všechny modely ACRIOS umí stejné formáty nebo protokoly. Dokud to neověří PoC ([implementation-plan.md](implementation-plan.md)), platí pro ACRIOS jen pravidla společná všem zdrojům.
 
@@ -58,7 +58,8 @@ Historie přežije výměnu SIM, firmware i koncentrátoru, protože visí na ne
 
 - externí identifikátory a firmware (`device_external_ids`, `device_firmware_history`),
 - umístění zařízení (`device_placements`),
-- instalace měřidla (`meter_installations`),
+- instalace měřidla (`meter_installations`) a servisní výměna, která dvě instalace spojí (`meter_replacement_events`),
+- ověření, kalibrace a kontroly fyzického měřidla (`meter_verifications`). Na nové měřidlo se při výměně nekopírují,
 - přiřazení streamu k měřidlu (`meter_source_assignments`),
 - opravy odečtů (nový řádek a `audit_logs`),
 - zpracování a odmítnutí po dobu retence (`ingest_receipts`, `ingest_rejections`).

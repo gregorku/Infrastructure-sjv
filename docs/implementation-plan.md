@@ -60,6 +60,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 - Alembic podle [database-design.md](database-design.md):
   - kmenová data se soft delete, uživatelé s anonymizací, RBAC (`board` a `technician` nepřiřaditelné),
   - členství, instalace a přiřazení zdrojů s exclusion constrainty,
+  - `meter_replacement_events` a `meter_verifications` podle R31. Fáze 4 a 7 nejsou uzavřené a už obsahují instalace a administraci, proto samostatná fáze nevzniká. Tabulka příloh nevzniká. Metrologické termíny systém nehlídá,
   - `source_streams` včetně `import` a `vendor:acrios` jako řádku katalogu, ne jako vlastní tabulky,
   - `devices` s neměnným `id`, `device_external_ids`, `device_firmware_history`, `device_placements`, `device_capabilities`,
   - `device_boots`, `ingest_endpoints`, `endpoint_credentials`,
@@ -75,6 +76,9 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 - Hotovo, když:
   - `alembic upgrade head` na prázdné DB a `alembic check` projdou,
   - testy constraintů projdou (překryv členství, instalací a přiřazení, změna odečtu, zápis do auditu),
+  - výměna v jedné transakci spojí dvě instalace téhož bytu a dvou různých měřidel a při chybě nezůstane částečný zápis. Trigger odmítne jiný byt, stejné měřidlo, neshodný čas, NULL v `final_value` původní instalace i NULL v `initial_value` nové instalace. Číselná nula v obou sloupcích projde. Neshoda `location` projde a místo se nekopíruje. Stejná kontrola selže i při pozdějším `UPDATE` události nebo některé z obou instalací, který vazbu poruší. Historie ověření zůstane na původním `meter_id`,
+  - změna `old_installation_id` nebo `new_installation_id` se kontroluje na obou odkazech po změně, i když se druhý odkaz nezměnil a i když se nově odkazovaná instalace v té transakci sama neupravuje. Neplatná nová dvojice se nepotvrdí. Platná oprava odkazu se potvrdí a dřívější instalace už podmínkám této události nepodléhá,
+  - zobrazení metrologického záznamu drží `result` a časové pokrytí odděleně. `failed` uvnitř datového intervalu není úspěšné ověření a nezaloží právní nezpůsobilost, ukončení jiných záznamů, zákaz používání, náhradní spotřebu ani sankci. Starší prošlý záznam a novější záznam s platností v budoucnu dají souhrn `not_yet_valid`. `performed_at` je povinné datum provedení úkonu. Záznam s chybějícím `valid_from` nebo `valid_until` je `undated` a souhrn času neurčí. `undated` neznamená chybějící `performed_at`. Pořadí úkonů určuje `performed_at`: `undated` záznam s pozdějším `performed_at` souhrn nemění a jen ho doplní, záznam s dřívějším `performed_at` a pozdějším `created_at` doplnění o pozdější úkon nepřidá. Oprava `performed_at` pořadí přepočítá. Z uložených dat nevznikne upozornění na metrologický termín,
   - výměna IMSI ponechá `device_id` a uzavře starý externí identifikátor,
   - v katalogu tabulek není evidence odečtů pojmenovaná podle transportu nebo výrobce,
   - stejný `msg_key` dvou `ingest_source_id` jsou dva klíče,
@@ -106,11 +110,15 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 
 - Přihlášení, sezení, CSRF, argon2id, TOTP pro admin, limity pokusů, `create-admin.sh`, anonymizace účtu.
 - CRUD kmenových dat, členství, instalace a výměny měřidel, zařízení (založení, odvolání, rotace přes dynsec), klíče AES, config zařízení.
+- Výměny měřidel zapisuje a opravuje jen `admin`. Metrologickou historii zapisuje a opravuje jen `admin`. `member` k těmto operacím přístup nemá. `technician` zůstává nepřiřaditelná. Nová role nevzniká.
+- Založení výměny jen přes `POST /admin/meter-replacements` v jedné transakci. Oprava existující události jen přes `PATCH /admin/meter-replacements/{id}`: auditovaný `UPDATE` `meter_replacement_events`. Povinný důvod opravy je důvod auditního záznamu, ne nový sloupec. Audit nese `before`, `after` a důvod. `UPDATE` a `INSERT` auditu jsou jedna transakce. Integrita výměny se ověří znovu. `created_by` a `created_at` se nemění. `DELETE` není. Měnit lze jen `performed_at`, `performed_by`, `reason`, `old_installation_id`, `new_installation_id` a `note`. Metrologická historie přes `/admin/meters/{id}/verifications`, bez mazání. Navazuje na R31 ve fázi 4.
 - Preferovaný zdroj: přiřazení, přechod s kontrolami, zablokování, potvrzení administrátorem, audit, přepočet `meter_daily_values`.
-- Historie bytu pro administrátora (instalace, členství, přiřazení zdrojů).
+- Historie bytu pro administrátora (instalace, servisní výměny, členství, přiřazení zdrojů). Metrologická historie zůstává na měřidle.
 - Opravy s auditem, exporty CSV a PDF.
 - Hotovo, když:
-  - projdou testy oprávnění pro každý endpoint,
+  - projdou testy oprávnění pro každý endpoint, včetně toho, že výměnu a metrologickou historii zapíše a opraví jen `admin`, `member` k nim přístup nemá a `technician` zůstává nepřiřaditelná,
+  - projdou testy `PATCH /admin/meter-replacements/{id}`: úspěšná auditovaná oprava, audit obsahuje původní a nové hodnoty a důvod, selhání vrátí celou transakci, neplatná dvojice instalací je odmítnuta, platná dvojice je přijata, `created_by` a `created_at` se nemění a `DELETE` je odmítnut,
+  - projdou testy výměny a ověření: audit ve stejné transakci s hodnotou před změnou, po změně a důvodem, odmítnuté mazání, neměnný `meter_id` ověření, odmítnuté NULL u `initial_value` a `final_value` při zachované nule, odmítnutá pozdější oprava instalace, která rozbije uloženou výměnu, odmítnutá změna `old_installation_id` nebo `new_installation_id` na neplatnou dvojici, přijatá oprava na platnou dvojici, pořadí metrologických úkonů podle `performed_at` bez vlivu `created_at`, a odmítnutá fotografie, protokol, odkaz i metadata dokumentu,
   - projdou testy pravidla členství, včetně dvou oddělených období a změny vlastníka,
   - projdou testy přechodu zdroje: úspěšný, zablokovaný, do minulosti a souběh dvou streamů bez zdvojení spotřeby,
   - API testy pokryjí všechny endpointy z [architecture.md](architecture.md).
@@ -118,12 +126,13 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 ### 8. Frontend
 
 - Člen: byty, aktuální kumulativní stav měřidla podle schváleného R15 (celkový stav počítadla, ne osobní spotřeba), historie a spotřeba jen za členství, grafy po měsících a letech (ECharts), exporty.
-- Administrátor: správa, přehled zařízení, telegramů, neznámých měřidel a anomálií, přechody zdroje, opravy, audit, historie bytu.
+- Administrátor: správa, přehled zařízení, telegramů, neznámých měřidel a anomálií, přechody zdroje, opravy, audit, historie bytu, výměny a u ověření odděleně výsledek úkonu a časové pokrytí tam, kde jsou obě data vyplněná.
 - Hotovo, když projdou e2e testy hlavních scénářů (Playwright) a ověření, že UI nikdy nedostane data mimo členství.
 
 ### 9. Monitoring a notifikace
 
 - Offline detekce zařízení, alarmy `queue_overflow`, `boot_regression` a `clock_skew`, mlčení přiřazeného streamu, věrohodnost odečtů, přehled stavu záloh v administraci.
+- Metrologické termíny notifikace nezakládají. `valid_until` se nepočítá, lhůta se neodvozuje a prošlý ani blížící se termín upozornění nevytvoří. Sledování těchto termínů zůstává u SJV mimo systém. Ostatní provozní notifikace této fáze zůstávají.
 - Worker odesílá frontu `notifications`, až bude SMTP. Do té doby přehled v administraci a nenulový kód `backup-status.sh`.
 
 ### 10. Produkční TLS pro MQTT
