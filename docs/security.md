@@ -117,7 +117,17 @@ Platí pro ACRIOS a pro každý další koncentrátor. Metoda autentizace se vyb
 - PostgreSQL je jen na `sjv-internal` (`internal: true`), bez portu.
 - Traefik nemá `docker.sock`.
 - PROXY protocol jen od adresy HAProxy jako `/32`. V šabloně je očekávaná adresa `10.10.10.1/32`. Před spolehnutím se na ni se potvrdí skutečným provozem. `insecure` je zakázané a forwarded hlavičky se nedůvěřují. Převzato z reference včetně testů.
-- Dashboard Traefiku jen na entrypointu `admin` s allowlistem a BasicAuth.
+
+- **Administrace Traefiku:**
+  - Dashboard je dostupný pouze přes samostatný HTTPS entrypoint `admin` na portu `8443`.
+  - Docker publikuje port výhradně na adrese kontejneru Incus `10.10.10.20:8443`, nikoli na všech rozhraních.
+  - VPS přijímá administrační provoz přes WireGuard `wg1` ze zdrojové sítě `10.100.101.0/24` a přesměrovává jej na `10.10.10.20:8443`.
+  - Firewall VPS nepovoluje přístup k administračnímu portu z veřejného rozhraní.
+  - Traefik používá `ipAllowList` s rozsahem `10.100.101.0/24`.
+  - Další ochranu tvoří BasicAuth s bcrypt hashovaným heslem v souboru mimo Git (`dashboard.htpasswd`, práva `600`) a middleware CrowdSec.
+  - Dashboard používá vlastní router a entrypoint, nikoli veřejný webový router.
+  - Přístupová adresa z WireGuardu je `https://10.100.101.1:8443/dashboard/`.
+
 
 ## CrowdSec
 
