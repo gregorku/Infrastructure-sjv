@@ -2,7 +2,7 @@
 
 Informační systém SJV: sběr odečtů měřidel (wM-Bus), aplikace pro členy a správu, zálohy. Běží jako Docker stack v Incus kontejneru `sjv-monitoring`. Veřejné jméno je hodnota `SJV_DOMAIN` v runtime `.env`.
 
-Stav: etapa B1b (instalační základ, Traefik a CrowdSec). Aplikace, databáze, MQTT ani zálohy zatím nejsou implementované.
+Stav: etapa B1b (instalační základ, Traefik, CrowdSec a trvalá služba `sjv-backup`). Aplikace, databáze, MQTT, pgBackRest a `pg_dump` zatím nejsou implementované.
 
 ## Dokumentace
 

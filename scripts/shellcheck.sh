@@ -10,7 +10,7 @@ if ! command -v shellcheck >/dev/null 2>&1; then
     exit 3
 fi
 
-mapfile -t files < <(find "${REPO_ROOT}/scripts" -type f -name '*.sh' -print | sort)
+mapfile -t files < <(find "${REPO_ROOT}/scripts" "${REPO_ROOT}/backup" -type f -name '*.sh' -print | sort)
 cd "${REPO_ROOT}"
 if shellcheck --shell=bash --severity=style --external-sources --source-path=SCRIPTDIR "${files[@]}"; then
     printf '%s\n' "shellcheck: ${#files[@]} files, no findings."

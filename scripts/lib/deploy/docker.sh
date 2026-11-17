@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The only file allowed to invoke docker. Every call is a fixed subcommand
-# against this project's networks and the two containers sjv-traefik and
-# sjv-crowdsec. Nothing here removes a network, a volume or another project.
+# against this project's networks and the containers sjv-traefik,
+# sjv-crowdsec and sjv-backup. Nothing here removes a network, a volume
+# or another project.
 
 docker_require_managed_name() {
     case "$1" in
@@ -12,7 +13,7 @@ docker_require_managed_name() {
 
 docker_require_service() {
     case "$1" in
-        sjv-traefik|sjv-crowdsec) ;;
+        sjv-traefik|sjv-crowdsec|sjv-backup) ;;
         *) fail "Refusing to touch container ${1}." ;;
     esac
 }

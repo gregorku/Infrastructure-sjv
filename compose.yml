@@ -14,3 +14,4 @@ include:
   - compose/10-traefik.yml
   - compose/15-traefik-admin-port.yml
   - compose/20-crowdsec.yml
+  - compose/30-backup.yml

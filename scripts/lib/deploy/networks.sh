@@ -76,7 +76,7 @@ deploy_ensure_networks() {
 
 deploy_assert_own_containers() {
     local name project
-    for name in "${TRAEFIK_CONTAINER}" "${CROWDSEC_CONTAINER}"; do
+    for name in "${TRAEFIK_CONTAINER}" "${CROWDSEC_CONTAINER}" "${BACKUP_CONTAINER}"; do
         if ! project="$(docker_container_project "${name}" 2>/dev/null)"; then
             continue
         fi

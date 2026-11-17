@@ -35,6 +35,8 @@ source "${SCRIPT_DIR}/lib/deploy/render.sh"
 source "${SCRIPT_DIR}/lib/deploy/logs.sh"
 # shellcheck source=scripts/lib/tests/test-infra.sh
 source "${SCRIPT_DIR}/lib/tests/test-infra.sh"
+# shellcheck source=scripts/lib/tests/test-backup.sh
+source "${SCRIPT_DIR}/lib/tests/test-backup.sh"
 
 T_RUN_DIR=""
 
@@ -71,6 +73,7 @@ main() {
     run_env_lib_tests
     run_script_tests
     run_infra_tests
+    run_backup_tests
     run_shellcheck_step
 
     print_footer "No container, network, ZFS or host configuration was touched."

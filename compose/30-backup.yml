@@ -1,0 +1,56 @@
+###############################################################################
+#
+# Permanent Restic client. The published restic image cannot run a scheduler,
+# so this service builds backup/Dockerfile (Restic 0.19.1 plus sjv-backup).
+# It joins only sjv-egress and publishes no port.
+# The process stays root because the backup trees are mode 700 and the
+# repository key file is mode 600, both owned by the host root. Capabilities
+# are dropped. Sources and the TLS certificate are read-only.
+#
+###############################################################################
+
+services:
+  sjv-backup:
+    build:
+      context: ../backup
+      dockerfile: Dockerfile
+    image: infrastructure-sjv/sjv-backup:0.19.1
+    container_name: sjv-backup
+    hostname: sjv-backup
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+    environment:
+      TZ: ${TZ:?TZ}
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-}
+      RESTIC_REST_PASSWORD: ${RESTIC_REST_PASSWORD:-}
+      RESTIC_PASSWORD_FILE: /run/secrets/restic-key-password
+      RESTIC_CACHE_DIR: /tmp/restic-cache
+    volumes:
+      - ${BACKUP_LOCAL_DIR}/pgbackrest:/backup/pgbackrest:ro
+      - ${BACKUP_LOCAL_DIR}/dumps:/backup/dumps:ro
+      - ${BACKUP_LOCAL_DIR}/files:/backup/files:ro
+      - ${DATA_DIR}/secrets/restic-rest-server.crt:/certs/rest-server.crt:ro
+      - ${DATA_DIR}/secrets/restic-key-password:/run/secrets/restic-key-password:ro
+      - ${DATA_DIR}/state:/state
+      - ${DATA_DIR}/backup-locks:/locks
+    networks:
+      - sjv-egress
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/sjv-backup", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:?LOG_MAX_SIZE}
+        max-file: ${LOG_MAX_FILES:?LOG_MAX_FILES}

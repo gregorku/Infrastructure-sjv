@@ -157,7 +157,7 @@ static_test_repository() {
     print_section "Repository hygiene"
     t_check "no runtime .env in the checkout" test ! -e "${REPO_ROOT}/.env"
     local pattern missing=()
-    for pattern in '.env' '.env.bak-*' '.env.tmp.*' '.env.lock' '.test-tmp/' '*.pem' '*.key' 'acme.json' 'app-kek'; do
+    for pattern in '.env' '.env.bak-*' '.env.tmp.*' '.env.lock' '.test-tmp/' '*.pem' '*.key' 'acme.json' 'app-kek' 'restic-key-password' 'restic-rest-server.crt'; do
         grep -qxF -- "${pattern}" "${REPO_ROOT}/.gitignore" || missing+=("${pattern}")
     done
     t_check ".gitignore covers runtime secrets and test output" test "${#missing[@]}" -eq 0

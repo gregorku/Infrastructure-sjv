@@ -8,6 +8,8 @@
 *.htpasswd
 acme.json
 app-kek
+restic-key-password
+restic-rest-server.crt
 BOUNCER_KEY_*
 dynamic-security.json
 

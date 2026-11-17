@@ -120,6 +120,7 @@ readonly ACCESS_LOG_ROTATE_MIN_BYTES=$((20 * 1024 * 1024))
 readonly ACCESS_LOG_ROTATE_MAX_AGE=86400
 readonly TRAEFIK_CONTAINER="sjv-traefik"
 readonly CROWDSEC_CONTAINER="sjv-crowdsec"
+readonly BACKUP_CONTAINER="sjv-backup"
 readonly CROWDSEC_BOUNCER_NAME="sjv-traefik"
 readonly BOUNCER_KEY_FILE="${TRAEFIK_DIR}/crowdsec/BOUNCER_KEY_${CROWDSEC_BOUNCER_NAME}"
 readonly APP_BACKEND_URL="http://sjv-backend:8000"

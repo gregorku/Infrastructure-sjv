@@ -47,7 +47,7 @@ import CSV ──► administrace ───────────────�
                                                                                      ▼
 sjv-worker: dekódování, timeout fragmentů, agregace, offline detekce, odesílání e-mailů
 sjv-postgresql ── archive-push ──► repozitář pgBackRest (lokální disk)
-systemd timer ──► restic ──► wg1 ──► MikroTik doma (DNAT) ──► rest-server --append-only (domaPcServer)
+sjv-backup (restic 0.19.1, trvale) ──► wg1 ──► MikroTik doma (DNAT) ──► rest-server --append-only (domaPcServer)
 ```
 
 Adaptér jen převede bajty na interní kontrakt z [data-ingestion.md](data-ingestion.md). Cesty ACRIOS na obrázku nejsou služby v Compose. UDP listener a klient Platform API se přidají až po PoC a po samostatném schválení portu. Do té doby nemají kontejner, port ani tajemství. Všechny cesty zapisují stejné tabulky.
@@ -64,8 +64,9 @@ Adaptér jen převede bajty na interní kontrakt z [data-ingestion.md](data-inge
 | `sjv-collector` | lokální build `app/collector` | `sjv-internal` | žádný | soubor heartbeat procesu |
 | `sjv-worker` | stejný image jako collector, jiný entrypoint | `sjv-internal`, `sjv-egress` | žádný | soubor heartbeat procesu |
 | `sjv-web` | lokální build `app/frontend` na `nginx-unprivileged` | `sjv-proxy` | žádný | HTTP na interní port |
+| `sjv-backup` | lokální build, Restic `0.19.1` | `sjv-egress` | žádný | soubor heartbeat plánovače |
 
-Restic se nespouští jako trvalá služba. Skripty ho volají jako jednorázový kontejner (`docker run --rm`) se zafixovaným image, na síti `sjv-egress`.
+`sjv-backup` je trvalá služba. Restic i plánovač běží ve stejném kontejneru. Jednorázový `docker run` se nepoužívá.
 
 Konvence převzaté z `Infrastructure-Nextcloud-Lu`:
 
@@ -83,7 +84,7 @@ Rozdíly proti referenci:
 
 ### Implementace B1b
 
-V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefik.yml`, `compose/15-traefik-admin-port.yml`, `compose/20-crowdsec.yml`, `configs/traefik/dynamic/` a `configs/crowdsec/`. Služby aplikace, PostgreSQL a Mosquitto v Compose ještě nejsou.
+V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefik.yml`, `compose/15-traefik-admin-port.yml`, `compose/20-crowdsec.yml`, `compose/30-backup.yml`, `backup/`, `configs/traefik/dynamic/` a `configs/crowdsec/`. Služby aplikace, PostgreSQL a Mosquitto v Compose ještě nejsou. `sjv-backup` vzdálenou kopii plánuje, lokální pgBackRest a `pg_dump` ještě ne.
 
 - Sítě jsou `external`. Zakládá je `deploy.sh` a označí je `com.infrastructure-sjv.managed=true`. Cizí síť se stejným jménem skript nemění ani nemaže. `sjv-internal` vzniká s `--internal`.
 - Pevná adresa Traefiku na `sjv-proxy` je první adresa za branou této sítě. Počítá ji `deploy.sh` a předá ji Compose jako `TRAEFIK_PROXY_ADDRESS`. V `.env` tato hodnota není.
@@ -102,11 +103,11 @@ V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefi
 | `sjv-proxy` | ne | traefik, backend, web | HTTP mezi Traefikem a aplikací. Odchozí provoz Traefiku kvůli ACME a stažení pluginu |
 | `sjv-internal` | ano | postgresql, mosquitto, collector, worker, backend, crowdsec, traefik | databáze, interní MQTT, CrowdSec LAPI |
 | `sjv-mqtt` | ne | mosquitto | jen kvůli publikování portu 8883 |
-| `sjv-egress` | ne | crowdsec, worker, jednorázový restic | odchozí provoz: CrowdSec hub, SMTP, rest-server |
+| `sjv-egress` | ne | crowdsec, worker, sjv-backup | odchozí provoz: CrowdSec hub, SMTP, rest-server |
 
 Proč čtyři sítě:
 
-- Kontejner, který je jen na síti `internal: true`, nemůže publikovat port ani navázat odchozí spojení. Proto Mosquitto potřebuje `sjv-mqtt` a CrowdSec, worker a restic potřebují `sjv-egress`.
+- Kontejner, který je jen na síti `internal: true`, nemůže publikovat port ani navázat odchozí spojení. Proto Mosquitto potřebuje `sjv-mqtt` a CrowdSec, worker a `sjv-backup` potřebují `sjv-egress`.
 - PostgreSQL a collector jsou jen na `sjv-internal` a ven se nedostanou.
 
 Projektové sítě v `.env` jsou `172.20.0.0/24`, `172.21.0.0/24`, `172.22.0.0/24` a `172.23.0.0/24`, každá s branou `.1`. Jsou uživatelské, takže `update-env.sh` existující hodnoty ponechá. `check-env.sh` odmítne překryv mezi nimi a s `10.10.10.0/24`, `10.100.101.0/24`, `10.110.110.0/24`, `10.120.120.0/24` a `172.17.0.0/16`.
@@ -269,7 +270,7 @@ Cesty výše jsou kontrakt vlastního ESP a ručního importu přes administraci
 - Žádný tag `latest`. Externí image mají v `.env.example` přesný tag a digest a `check-env.sh` odmítne neúplný tag.
 - Lokální image se staví při `deploy.sh`. Base image je zafixovaná přes tag a digest, závislosti přes `uv.lock` a `package-lock.json`. Tag lokálního image je `infrastructure-sjv/<služba>:<git-commit>`. Commit se zapíše do `state/deployed-commit`.
 - Výchozí verze podle existujících stacků: PostgreSQL `18.6`, Mosquitto `2.1.2`, wmbusmeters `release-3.0.0`. Traefik, CrowdSec a bouncer plugin jsou zafixované v `.env.example`: Traefik `v3.7.17`, CrowdSec `v1.8.2`, plugin `v1.8.1`. Řada 3.6 už nemá bezpečnostní podporu. Tag `v3.7.18` k 9. 11. 2026 nebyl vydaný.
-- Verze Pythonu, Node, pgBackRest, restic a rest-server se ověří a zafixují ve fázi 1. Podmínka: pgBackRest s podporou PostgreSQL 18.
+- Verze Pythonu, Node, pgBackRest a rest-server se ověří a zafixují ve fázi 1. Podmínka: pgBackRest s podporou PostgreSQL 18. Restic je zafixovaný na `0.19.1`.
 
 ## Skripty
 

@@ -51,6 +51,11 @@ layout_prepare() {
     ensure_dir "${SECRETS_DIR}" 700
     ensure_dir "${BASE_DIR}/backups" 755
     ensure_dir "${BACKUP_LOCAL_DIR}" 700
+    ensure_dir "${BACKUP_LOCAL_DIR}/pgbackrest" 700
+    ensure_dir "${BACKUP_LOCAL_DIR}/pgbackrest/archive" 700
+    ensure_dir "${BACKUP_LOCAL_DIR}/dumps" 700
+    ensure_dir "${BACKUP_LOCAL_DIR}/files" 700
+    ensure_dir "${DATA_DIR}/backup-locks" 700
     ensure_dir "${TRAEFIK_DIR}" 755
     ensure_dir "${TRAEFIK_DIR}/acme" 700
     ensure_dir "${TRAEFIK_DIR}/logs" 755

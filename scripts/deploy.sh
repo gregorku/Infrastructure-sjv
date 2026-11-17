@@ -29,7 +29,7 @@ case "${1:-}" in
     --render-only) RENDER_ONLY=1 ;;
     --help)
         printf '%s\n' "Usage: ./scripts/deploy.sh [--render-only]" \
-            "Validates .env, renders Traefik and starts sjv-traefik and sjv-crowdsec." \
+            "Validates .env, renders Traefik and starts sjv-traefik, sjv-crowdsec and sjv-backup." \
             "--render-only writes the runtime files and does not call Docker."
         exit 0
         ;;
@@ -66,7 +66,7 @@ if [[ "${RUNTIME_ENV[TRAEFIK_TLS_MODE]}" == letsencrypt ]]; then
         info "Let's Encrypt will request a separate certificate for ${RUNTIME_ENV[MQTT_HOSTNAME]}. It stays in acme.json for a later Mosquitto handoff."
     fi
 fi
-docker_compose up -d traefik crowdsec
-ok "Traefik and CrowdSec were reconciled. Other projects were not changed."
+docker_compose up -d --build traefik crowdsec sjv-backup
+ok "Traefik, CrowdSec and the backup client were reconciled. Other projects were not changed."
 deploy_crowdsec_install_collections
 print_footer "Deploy completed. Next: ./scripts/post-deploy.sh"
