@@ -1,6 +1,6 @@
 # Rozhodnutí
 
-Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Dne 16. 11. 2026 přibylo rozhodnutí R31 o výměnách a metrologické historii. Téhož dne se uzavřely jeho tři otevřené body: metrologické lhůty a upozornění, význam `failed` a shoda `location`. R1–R30 zůstávají schválené a beze změny. Schválení dokumentace neznamená souhlas s nasazením.
+Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Dne 16. 11. 2026 přibylo rozhodnutí R31 o výměnách a metrologické historii. Téhož dne se uzavřely jeho tři otevřené body: metrologické lhůty a upozornění, význam `failed` a shoda `location`. R1–R30 zůstávají schválené a beze změny. Dne 17. 11. 2026 přibylo rozhodnutí R32 o doručení s prokázaným `message_ref` po `timed_out`. R1–R31 se nemění. Schválení dokumentace neznamená souhlas s nasazením.
 
 ## Potvrzená rozhodnutí
 
@@ -37,6 +37,7 @@ Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11
 | 29 | MQTT a HTTPS nesdílejí `msg_key`, dokud to kontrakt neprokáže | Výchozí `msg_key_scope = transport`. Stejný text na druhém transportu je `id_collision` |
 | 30 | `meter_readings_vendor_time_guard` chrání jen projekci | Konfliktní pozorování se vloží dřív než odečet a index je nesmaže |
 | 31 | Výměna je servisní událost mezi původní a novou instalací. Metrologická historie patří fyzickému měřidlu | Stavy a plomby zůstávají v `meter_installations`. Fotografie a protokoly se neukládají. Znění je v R31 |
+| 32 | Doručení s prokázaným `message_ref` po `timed_out` se neskládá | Původní sada zůstane. Nové doručení se nepřipojí, nevznikne `isolated` ani nová `collecting` a payload zůstane. Znění je v R32 |
 
 ## Retence
 
@@ -150,6 +151,14 @@ Uzavření tří otevřených bodů R31, 16. 11. 2026. Věta R31 ani rozhodnutí
 - `result` zůstává provozním označením výsledku konkrétního úkonu: `passed`, `failed`, `not_assessed`. Není to právní klasifikace. Systém z `failed` neoznačí měřidlo jako právně nezpůsobilé, neukončí ani nezruší jiné metrologické záznamy, nezakáže používání měřidla, nepočítá náhradní spotřebu a nevyvozuje sankce ani jiné právní důsledky. Výsledek a časové pokrytí zůstávají oddělené. Platí pro `verification`, `calibration` i `inspection`. O právních a provozních důsledcích rozhoduje SJV podle konkrétního úkonu a jeho podkladů.
 - Výměna dál vyžaduje stejný byt, rozdílné fyzické měřidlo, časovou návaznost instalací a vyplněné konečné a počáteční stavy. Shoda `location` se nevyžaduje. Umístění je samostatný údaj každé instalace, při výměně se nekopíruje a jeho změna je přípustná.
 
+## Doplnění 17. 11. 2026: doručení po `timed_out`
+
+**R32 – Doručení s prokázaným `message_ref` po `timed_out`**
+
+Když nové doručení nese prokázaný `message_ref` a odpovídající sada je už `timed_out`, původní sada zůstane beze změny. Doručení se k ní nepřipojí. Nevznikne `isolated`, protože `message_ref` je prokázaný, a nevznikne nová `collecting` se stejným `message_ref`. Payload doručení zůstane. Doručení se neskládá ani nedekóduje a eviduje se jako nepřiřazené, které vyžaduje samostatné vyhodnocení. Platí, dokud samostatný PoC neprokáže bezpečné zacházení s takovým doručením a nebude přijato nové rozhodnutí.
+
+R32 nemění znění R1–R31. Doručení bez prokázaného `message_ref` dál zakládá vlastní `isolated`.
+
 ## Otevřené body
 
 Hodnoty, které nejsou známé, se nedoplňují odhadem.
@@ -171,4 +180,5 @@ Hodnoty, které nejsou známé, se nedoplňují odhadem.
 | Zda Platform API vrací stabilní identifikátor koncentrátoru přes výměnu SIM, jaký čas payload nese a zda dekódovaná data obsahují ACC nebo čas měřidla | mapování adaptéru ve fázi 12, ne tvar tabulek |
 | UDP/DTLS port a případný DNAT, pokud PoC přímý UDP potvrdí | samostatná změna mimo repozitář, až po PoC. Teď se port nepublikuje |
 | Počet měřidel a intervaly vysílání | odhad objemu, fáze 4 |
+| Další doručení s prokázaným `message_ref`, když odpovídající sada je `complete` nebo `conflict` | Samostatné rozhodnutí. R32 se na tyto stavy nevztahuje. Fragment se k sadě nepřipojí. Jak se doručení dál eviduje, schválená pravidla neurčují |
 | Verze software a ověření bodů „k ověření“ | fáze 1–3 |

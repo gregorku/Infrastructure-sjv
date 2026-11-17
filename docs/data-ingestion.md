@@ -563,18 +563,31 @@ BEGIN
        Zámek drží do COMMIT, takže dva procesy nezaloží dvě otevřené sady.
        najdi collecting sadu se stejným rozsahem a message_ref před deadline_at.
        našla se: připoj fragment k ní.
-       nenašla se a existuje ukončená sada s tímto message_ref:
-          izoluj. K jiné sadě se stejným group_key se nepřipojuj.
-       nenašla se žádná: SAVEPOINT set_insert,
+       collecting se nenašla. Nejdřív sada timed_out se stejným prokázaným message_ref:
+          tato větev je před větví complete a conflict.
+          k sadě se nepřipojuj. Její stav ani obsah se nemění.
+          Nová isolated nevznikne, protože message_ref je prokázaný.
+          Nová collecting se stejným message_ref nevznikne.
+          Payload tohoto doručení zůstane.
+          Doručení se neskládá a dekodér se nevolá.
+          Eviduje se jako nepřiřazené a vyžadující samostatné vyhodnocení.
+          Platí, dokud samostatný PoC neprokáže bezpečné zacházení
+          a nebude přijato nové rozhodnutí. COMMIT.
+       timed_out se nenašla a existuje complete nebo conflict se stejným message_ref:
+          k sadě se nepřipojuj. R32 se nepoužije.
+          Jak se doručení eviduje, jestli vznikne nová sada a jestli se dekóduje,
+          schválená pravidla neurčují. Je to otevřená otázka, ne nové rozhodnutí.
+          Payload z kroku 1 zůstane.
+       nenašla se žádná sada s tímto message_ref: SAVEPOINT set_insert,
           INSERT collecting s tímto message_ref a group_key.
        Jedinečný index collecting sady je pojistka zámku v prokázaném rozsahu.
        unique_violation: ROLLBACK TO SAVEPOINT set_insert, znovu SELECT vítězné sady.
           Vítěz je stejná identita a pořád collecting před deadline_at: připoj k němu.
-          Jinak izoluj. Fragment ani jeho payload se nezahodí.
-          K jiné sadě se nepřipojí.
- 5. Izolace prokázaného fragmentu, který ke collecting sadě nepatří:
-       nová sada status = isolated, jeden řádek delivery_role = first,
-       payload zůstane. Sada se neskládá a dekodér se nevolá. COMMIT.
+          Vítěz je timed_out: větev timed_out výše, dřív než complete a conflict.
+          Vítěz je complete nebo conflict: otevřená otázka výše. R32 se nepoužije.
+             K sadě se nepřipojí. Payload z kroku 1 zůstane.
+ 5. Isolated zakládá jen krok 3, pro doručení bez prokázaného message_ref.
+       Ukončenou sadu rozhoduje krok 4.
  6. Připojení k collecting sadě s prokázaným message_ref:
        index v sadě ještě nemá řádek first:
           INSERT ingest_fragments delivery_role = first, vlastní payload_id.
@@ -631,7 +644,7 @@ Ochrana proti záměně:
 - v `collecting` sadě s prokázaným `message_ref` je stejný index a `content_hash` řádek `repeat` a počet odečtů se nemění; jiný hash je `conflict` a sada se uzavře bez dekódování,
 - doručení bez prokázaného `message_ref` se neskládá. Shoda `group_key`, `source_message_ref`, indexu, hashe, času ani identity transportního přenosu ho k existující sadě `isolated` nepřiřadí a `repeat` z ní neudělá,
 - jiný `content_hash` u `isolated` není `repeat` ani `conflict`. Sada změněný obsah nepřijme, nové doručení je další `isolated` a oba payloady zůstanou,
-- po `timed_out` sady s prokázaným `message_ref` se další fragment k této sadě nepřipojí.
+- po `timed_out` sady s prokázaným `message_ref` platí větev kroku 4, vyhodnocená před `complete` a `conflict`: původní sada zůstane, doručení se nepřipojí, nevznikne `isolated` ani nová `collecting`, payload zůstane, neskládá se, dekodér ho nedostane a eviduje se jako nepřiřazené. U `complete` a `conflict` se fragment k sadě nepřipojí. R32 se na ně nevztahuje a další zacházení je otevřená otázka,
 
 `INGEST_FRAGMENT_TIMEOUT` se číselně doplní, až PoC ukáže, jestli vybraný model vůbec fragmentuje, jestli posílá identifikátor celé zprávy, jaký má rozsah `group_key` a jak rychle zbytek posílá. Číslo se použije jen u skládané sady s prokázaným `message_ref`. Do výsledku PoC se `message_ref` ke skládání nepoužije a `group_key` ho nenahradí. ESP dávkuje celé rámce. Dávka není fragmentace a touto cestou nejde.
 
@@ -754,7 +767,7 @@ Každé měřidlo má v každém okamžiku právě jeden přiřazený stream (`m
   - regrese `boot_counter`,
   - nové `instance_id` po vymazání flash.
 - **Idempotence:** opakované doručení prokázaného `msg_key` a `item_index` po ztraceném ACK. Druhé doručení má příjem `duplicate_delivery` a stejný počet odečtů. Dvě položky jednoho `msg_key` se při prvním doručení obě zpracují. Logické selhání první neukončí druhou. Stejné tělo bez identifikátoru má druhé pozorování.
-- **Fragmenty:** každé nové doručení fragmentu bez prokázaného `message_ref` dostane vlastní sadu `isolated`, nikdy `collecting`, jeden řádek `first`, vlastní `payload_id` a dekodér ho nedostane. Není to `repeat`. Stejný `group_key`, `source_message_ref`, index, hash, čas ani identita jednoho transportního přenosu ho k existující sadě nepřiřadí. Test, který by z toho udělal `repeat`, selže. Shoda indexu a hashe sama `repeat` nevytvoří. Odlišný hash u `isolated` `conflict` nevytvoří: vznikne další `isolated`, původní sada změněný obsah nepřijme a oba payloady zůstanou. `repeat` a `conflict` vzniknou jen v `collecting` sadě s prokázaným `message_ref`: stejný index a `content_hash` je další řádek `repeat` s vlastním payloadem a časem, jiný hash je `conflict` jen v této sadě. Neúplná prokázaná sada a timeout jen u ní. Fragment cizího `ingest_source_id` se nepřipojí. Samotný rozdíl `group_key` při shodném prokázaném `message_ref` existující sady `collecting` fragment neodmítne a jinou sadu nezaloží. Bez prokázaného `message_ref` vlastní `isolated` vznikne i při rozdílném `group_key`. Po `timed_out` se další fragment k této sadě nepřipojí. Dva souběžné vklady prokázaného `message_ref` nezaloží dvě otevřené `collecting` sady a fragment nezahodí. `message_ref` bez zapsaného rozsahu sadu nespojí. `source_message_ref` samo sadu nespojí. Retence smaže fragment dřív než sadu, na kterou ještě ukazuje.
+- **Fragmenty:** každé nové doručení fragmentu bez prokázaného `message_ref` dostane vlastní sadu `isolated`, nikdy `collecting`, jeden řádek `first`, vlastní `payload_id` a dekodér ho nedostane. Není to `repeat`. Stejný `group_key`, `source_message_ref`, index, hash, čas ani identita jednoho transportního přenosu ho k existující sadě nepřiřadí. Test, který by z toho udělal `repeat`, selže. Shoda indexu a hashe sama `repeat` nevytvoří. Odlišný hash u `isolated` `conflict` nevytvoří: vznikne další `isolated`, původní sada změněný obsah nepřijme a oba payloady zůstanou. `repeat` a `conflict` vzniknou jen v `collecting` sadě s prokázaným `message_ref`: stejný index a `content_hash` je další řádek `repeat` s vlastním payloadem a časem, jiný hash je `conflict` jen v této sadě. Neúplná prokázaná sada a timeout jen u ní. Fragment cizího `ingest_source_id` se nepřipojí. Samotný rozdíl `group_key` při shodném prokázaném `message_ref` existující sady `collecting` fragment neodmítne a jinou sadu nezaloží. Bez prokázaného `message_ref` vlastní `isolated` vznikne i při rozdílném `group_key`. Po `timed_out` se další fragment k této sadě nepřipojí, původní sada se nezmění, nové doručení s prokázaným `message_ref` nevytvoří `isolated` ani novou `collecting`, jeho payload zůstane, dekodér ho nedostane a eviduje se jako nepřiřazené. Dva souběžné vklady prokázaného `message_ref` nezaloží dvě otevřené `collecting` sady a fragment nezahodí. `message_ref` bez zapsaného rozsahu sadu nespojí. `source_message_ref` samo sadu nespojí. Retence smaže fragment dřív než sadu, na kterou ještě ukazuje.
 - **Dekódovaná data:** opakované poslání prokázaného identifikátoru, stejný hash bez identifikátoru jako `uncertain` se dvěma pozorováními, stejný čas a stejná hodnota jako `unresolved`, stejný čas a jiná hodnota jako `conflict`. V obou konfliktech zůstanou obě pozorování a druhý odečet nevznikne. Stejná hodnota v jiném čase jsou dva odečty. Korelace s rádiem bez sloučení, JSON bez vyrobeného rámce.
 - **Pět případů:** opakované doručení prokázaného identifikátoru, dva koncentrátory se stejným rámcem, nový telegram se stejnou hodnotou a jiným `access_number`, fragmenty s prokázaným `message_ref` jako jedna sada `collecting` a každé doručení bez něj jako nová sada `isolated`, ne jako `repeat`, opětovné dekódování se stejnou i jinou hodnotou. Deduplikace podle samotné hodnoty, samotného času nebo samotného hashe musí v testu selhat, pokud by sloučila různá měření.
 - **Identita zařízení:** výměna IMSI ponechá `device_id` a historii. Stejné IMSI u jiného zařízení je konflikt a zařízení se nezaloží z těla zprávy.
