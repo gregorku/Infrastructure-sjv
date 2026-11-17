@@ -541,8 +541,8 @@ CREATE INDEX ON telegram_dedup_keys (meter_key, access_number, frame_hash);
 - `CREATE UNIQUE INDEX ON ingest_fragments (fragment_set_id, fragment_index) WHERE delivery_role = 'first'`. První přijatý kus indexu je jeden. Stejný index v jiné sadě je jiný fragment.
 - `FOREIGN KEY (payload_id, payload_partition_month) REFERENCES ingest_payloads (id, partition_month)`. Payload zůstává v měsíční partition podle `received_at` tohoto doručení.
 - Každý řádek je jedno doručení. Eviduje `payload_id`, `received_at` a `delivery_role` (`first`, `repeat`, `conflict`), spolu se sadou a indexem. Agregovaný počet se neukládá a evidenci nenahrazuje.
+- `repeat` je další doručení již evidovaného řádku `first` téhož logického fragmentu. Vyžaduje shodu všech tří hodnot `fragment_set_id`, `fragment_index` a `content_hash`. Má vlastní řádek s vlastním `payload_id` a `received_at`. Nový logický fragment nezaloží a různé sady nespojí. Stejná pozice v jiné sadě je samostatný fragment a vůči fragmentu z jiné sady není automaticky `repeat`. Sada `isolated` smí takto evidovat další doručení svého jediného logického fragmentu a jiný logický fragment nepřijme.
 - Jiný `content_hash` na stejném indexu sady `collecting` s prokázaným `message_ref` uloží řádek `conflict`, přepne sadu na `conflict` a původní řádek `first` nemění. Dekodér se nevolá a chybějící kus se nulami nedoplní.
-- Řádek `repeat` nebo `conflict` je další doručení téhož fragmentu a má vlastní `payload_id` a `received_at`. Spojení s jiným fragmentem ani s jinou sadou nevytvoří.
 - Fragment není odečet. Dekodér dostane až složený payload sady `complete`. Skládá se z řádků `first`.
 
 ### `ingest_rejections` (měsíční partitions, 24 měsíců)
