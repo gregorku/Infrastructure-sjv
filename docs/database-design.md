@@ -525,14 +525,11 @@ CREATE INDEX ON telegram_dedup_keys (meter_key, access_number, frame_hash);
 `id`, `ingest_source_id NOT NULL → ingest_sources`, `endpoint_id`, `group_key`, `message_ref NULL`, `expected_count NULL`, `received_count`, `status` (`collecting`, `complete`, `timed_out`, `conflict`, `rejected`, `isolated`), `first_received_at`, `deadline_at`, `assembled_payload_id NULL`, `assembled_payload_partition_month NULL`
 
 - `PRIMARY KEY (id)`. `id` je identita jednoho pokusu o složení. `group_key` jí není.
-- `group_key` posílá zdroj. Jak dlouho ho neopakuje, PoC neví. Návrh ho proto nepovažuje za globálně jedinečný, ani za jedinečný v měsíci nebo po dobu života zařízení. Adaptér k němu nepřidává vymyšlenou předponu.
-- `message_ref` na sadě je vyplněné jen tehdy, když je prokázaný rozsah identifikátoru: neopakuje se mezi endpointy, transporty, restarty ani v čase po dobu skládání. Do výsledku PoC zůstane NULL. Text, který zdroj poslal, je na fragmentu ve `source_message_ref` a sám o sobě sadu nepřipojí.
-- `CREATE UNIQUE INDEX ON ingest_fragment_sets (ingest_source_id, message_ref) WHERE status = 'collecting' AND message_ref IS NOT NULL`
-- Když je prokázaný rozsah jen v rámci transportu, je v indexu i transport. Samotné `(ingest_source_id, message_ref)` nestačí, dokud PoC ten rozsah nezapíše.
-- `CREATE UNIQUE INDEX ON ingest_fragment_sets (ingest_source_id, group_key) WHERE status = 'collecting' AND message_ref IS NULL`
-- Otevřená sada bez `message_ref` je nejvýš jedna. Druhá se nezaloží, jakmile pro stejný `(ingest_source_id, group_key)` existuje sada `complete`, `timed_out`, `conflict` nebo `rejected`. Nový fragment je `isolated`.
-- Fragment se připojí jen ke `collecting` před `deadline_at` a jen když nese stejné prokázané `message_ref`, nebo když sada `message_ref` nemá a žádná starší sada tohoto `group_key` ještě neskončila. K `complete`, `timed_out`, `conflict`, `rejected` a `isolated` se nepřipojí.
-- `isolated` je vlastní sada jednoho fragmentu. Neskládá se, nepřijme další fragment a dekodér ji nedostane. Payload fragmentu zůstane.
+- `group_key` posílá zdroj. Jak dlouho ho neopakuje, PoC neví. Návrh ho proto nepovažuje za globálně jedinečný, ani za jedinečný v měsíci nebo po dobu života zařízení. Adaptér k němu nepřidává vymyšlenou předponu. `group_key`, hash payloadu, časová blízkost příjmu ani `source_message_ref` nejsou důkazem identity zprávy.
+- `message_ref` na sadě se vyplní jen po PoC, který prokáže rozsah jeho jedinečnosti: neopakuje se mezi endpointy, transporty, restarty ani v čase po dobu skládání. Do výsledku PoC zůstane NULL. Text, který zdroj poslal, zůstane ve `source_message_ref` na fragmentu a `message_ref` sady nevyplní.
+- Skládání do `collecting` je možné až po tomto PoC. Fragment se připojí jen ke `collecting` před `deadline_at` a jen se stejným prokázaným `message_ref`. K `complete`, `timed_out`, `conflict`, `rejected` a `isolated` se nepřipojí.
+- `CREATE UNIQUE INDEX ON ingest_fragment_sets (ingest_source_id, message_ref) WHERE status = 'collecting' AND message_ref IS NOT NULL`. Když je prokázaný rozsah jen v rámci transportu, je v indexu i transport. Samotné `(ingest_source_id, message_ref)` nestačí, dokud PoC ten rozsah nezapíše.
+- Fragment bez prokázaného `message_ref` dostane vlastní sadu `isolated`. Ta není `collecting`, obsahuje právě jeden fragment a další nepřijme. Neskládá se a dekodér ji nedostane. Payload fragmentu zůstane.
 - `deadline_at` je `first_received_at + INGEST_FRAGMENT_TIMEOUT`. Číslo doplní PoC.
 - `FOREIGN KEY (assembled_payload_id, assembled_payload_partition_month) REFERENCES ingest_payloads (id, partition_month)` jen při `complete`. Měsíc složeného payloadu je měsíc složení.
 
@@ -541,11 +538,11 @@ CREATE INDEX ON telegram_dedup_keys (meter_key, access_number, frame_hash);
 `id`, `fragment_set_id → ingest_fragment_sets`, `fragment_index int NOT NULL`, `payload_id`, `payload_partition_month`, `content_hash bytea NOT NULL`, `source_message_ref NULL`, `received_at`, `delivery_role` (`first`, `repeat`, `conflict`)
 
 - `PRIMARY KEY (id)`
-- `CREATE UNIQUE INDEX ON ingest_fragments (fragment_set_id, fragment_index) WHERE delivery_role = 'first'`. První přijatý kus indexu je jeden. Opakované doručení je další řádek `repeat` s vlastním `payload_id` a `received_at`. Stejný index v jiné sadě je jiný fragment.
+- `CREATE UNIQUE INDEX ON ingest_fragments (fragment_set_id, fragment_index) WHERE delivery_role = 'first'`. První přijatý kus indexu je jeden. Stejný index v jiné sadě je jiný fragment.
 - `FOREIGN KEY (payload_id, payload_partition_month) REFERENCES ingest_payloads (id, partition_month)`. Payload zůstává v měsíční partition podle `received_at` tohoto doručení.
-- Každý řádek je jedno doručení. Z něj je vidět payload, sada, index, čas a jestli šlo o první příjem, opakování stejného hashe, nebo jiný hash. Agregovaný počet se neukládá a evidenci nenahrazuje.
-- Jiný `content_hash` na stejném indexu otevřené sady uloží řádek `conflict`, přepne sadu na `conflict` a původní řádek `first` nemění. Dekodér se nevolá a chybějící kus se nulami nedoplní.
-- Fragment, který k otevřené sadě nepatří, se do ní nevloží. Dostane vlastní sadu `isolated` a řádek `first`. Shoda `group_key` nebo `content_hash` ho k cizí sadě nepřipojí.
+- Každý řádek je jedno doručení. Eviduje `payload_id`, `received_at` a `delivery_role` (`first`, `repeat`, `conflict`), spolu se sadou a indexem. Agregovaný počet se neukládá a evidenci nenahrazuje.
+- Jiný `content_hash` na stejném indexu sady `collecting` s prokázaným `message_ref` uloží řádek `conflict`, přepne sadu na `conflict` a původní řádek `first` nemění. Dekodér se nevolá a chybějící kus se nulami nedoplní.
+- Řádek `repeat` nebo `conflict` je další doručení téhož fragmentu a má vlastní `payload_id` a `received_at`. Spojení s jiným fragmentem ani s jinou sadou nevytvoří.
 - Fragment není odečet. Dekodér dostane až složený payload sady `complete`. Skládá se z řádků `first`.
 
 ### `ingest_rejections` (měsíční partitions, 24 měsíců)
