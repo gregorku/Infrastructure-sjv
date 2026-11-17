@@ -8,7 +8,7 @@ Zálohování je kritická část projektu. Projekt nelze označit za dokončen�
 | --- | --- | --- |
 | RPO | ≤ 15 minut | `backup-status.sh` hlídá stáří posledního archivovaného WAL a posledního vzdáleného snapshotu |
 | RTO | ≤ 4 hodiny | Měřený DR test: úplná obnova na novém VPS bez přístupu k původnímu |
-| Ochrana proti mazání | Kompromitovaný VPS nesmaže existující vzdálené zálohy | Append-only `rest-server` a ZFS snapshoty, ověřené testem ve fázi 3 |
+| Ochrana proti mazání | Kompromitovaný VPS nesmaže existující vzdálenou restic kopii | Append-only `rest-server`, ověřené testem ve fázi 3 |
 | Obnova bez VPS | Ano | Obnovovací sada a domácí server stačí k obnově do nového prostředí |
 
 ## Architektura 3-2-1
@@ -24,15 +24,15 @@ Zálohování je kritická část projektu. Projekt nelze označit za dokončen�
                               │ WireGuard wg1 → MikroTik doma (DNAT) → LAN
                               ▼
   domaPcServer: rest-server --append-only --private-repos (TLS, htpasswd)
-       ZFS dataset <pool>/backups/infrastructure-sjv       kopie 3: jiné místo, jiné médium
-       ├── ZFS snapshoty (spravuje jen domaPcServer)
-       └── restic forget/prune (spouští jen domaPcServer)
+       vzdálená restic kopie na jiném místě
+       └── restic forget/prune spouští jen domácí server, mimo skripty VPS
 ```
 
-- **Tři kopie:** živá DB, lokální zálohy na VPS, vzdálené zálohy doma.
-- **Dvě média:** disk VPS a ZFS pool doma. Lokální zálohy jsou na stejném disku jako DB. Chrání před logickou chybou a urychlí běžnou obnovu, ale ne před ztrátou VPS.
-- **Jedna kopie mimo lokalitu:** domácí server.
-- **Neměnnost:** append-only `rest-server` a ZFS snapshoty, ke kterým VPS nemá přístup.
+- **Tři kopie v rozsahu projektu:** živá DB, lokální zálohy na disku VPS, vzdálená restic kopie předaná na `rest-server`.
+- **Dvě média:** disk VPS a úložiště `rest-server` na domácím serveru. Lokální zálohy jsou na stejném disku jako DB. Chrání před logickou chybou a urychlí běžnou obnovu, ale ne před ztrátou VPS.
+- **Jedna kopie mimo lokalitu:** vzdálená restic kopie na domácím serveru.
+- **Neměnnost vzdálené kopie:** append-only `rest-server`. VPS do něj zapisuje a čte, mazat ani přepisovat ho nemůže.
+- **Mimo rozsah projektu:** domácí server může držet další záložní kopii. Instalace Infrastructure-sjv na VPS ji nespravuje, skripty a služby projektu ji neobsluhují a není součástí implementace ani provozní odpovědnosti. Způsob jejího vytváření, ukládání, šifrování, snapshotování, retence a obnovy tato dokumentace neurčuje a negarantuje.
 
 ## Komponenty
 
@@ -136,8 +136,7 @@ Výsledky se zapíšou do `docs/operations.md`.
 | Zápis | VPS | uživatel `rest-server` `infrastructure-sjv`, klíč restic `vps` |
 | Čtení | VPS a domácí server | Append-only čtení nebrání. VPS své zálohy přečíst může, data zná i tak |
 | Obnova | obnovovací prostředí | klíč restic `recovery` jen v obnovovací sadě. Přístup přes obnovovací instanci `rest-server`, nebo přímo na disku domácího serveru |
-| Mazání a prune | jen domácí server | lokální přístup k datasetu a klíč restic `maintenance` |
-| Mazání ZFS snapshotů | jen správce domácího serveru | VPS nemá na domácí server SSH ani jiný přístup |
+| Mazání a prune | jen domácí server | lokální přístup k úložišti `rest-server` a klíč restic `maintenance`. VPS na domácí server SSH nemá |
 
 **Obnovovací instance `rest-server`.** S volbou `--private-repos` vidí uživatel jen cestu se svým jménem. Druhý uživatel ve stejné instanci by se k repozitáři `infrastructure-sjv/` nedostal. Proto:
 
@@ -150,8 +149,7 @@ Tím obnova nezávisí na heslu uživatele `infrastructure-sjv`, které je po ko
 ### Kompromitovaný VPS
 
 - Může dál přidávat nové snapshoty, i nesmyslné, ale nesmaže ani nepřepíše existující data.
-- Kontrola na domácím serveru hlásí neobvyklý nárůst objemu a chybějící snapshoty.
-- ZFS snapshoty chrání i proti chybě nebo kompromitaci samotného `rest-server`.
+- Kontrola na domácím serveru hlásí neobvyklý nárůst objemu vzdálené restic kopie a chybějící snapshoty `wal` a `daily`.
 - Po incidentu se na domácím serveru odebere klíč restic `vps` (`restic key remove`) a zneplatní heslo `infrastructure-sjv`.
 - Útočník s klíčem `vps` mohl získat hlavní klíč repozitáře, a tím schopnost dešifrovat data. Po incidentu se proto založí nový repozitář. Starý zůstane jen pro čtení do vypršení retence.
 
@@ -180,7 +178,7 @@ Uložení:
 
 Obsah:
 
-1. heslo klíče restic `recovery`, URL repozitáře přes obnovovací instanci a cesta k datasetu na domácím serveru,
+1. heslo klíče restic `recovery`, URL repozitáře přes obnovovací instanci a cesta k úložišti `rest-server` na domácím serveru,
 2. heslo `sjv-recovery` a otisk TLS certifikátu obnovovací instance,
 3. přístup k domácímu serveru, nebo postup pro jeho správce,
 4. KEK aplikace (kopie, je i v záloze),
@@ -285,25 +283,6 @@ Odhady časů jsou předběžné. Ilustrační výpočet přenosu, ne údaj o sk
 - výsledek se zapíše do `docs/operations.md` s naměřenými časy.
 
 Měsíční `restore-test.sh` ověřuje obnovitelnost dat a měří dobu obnovy DB. Celé RTO neověřuje.
-
-## Ověření cílového ZFS datasetu
-
-Cesta `/zfs-RAID-6TB/backups/infrastructure-sjv/` není potvrzená. V NixOS konfiguraci `domaPcServer` jsou jen pooly `datapool`, `zfs-NVME-4TB` a `zfs-image`. Navíc je tam `services.zfs.autoScrub.enable = false` a `services.zfs.autoSnapshot.enable = false`.
-
-**Tento projekt dataset nevytváří a NixOS nemění.** Ověření před rozhodnutím (spouští Gregor na `domaPcServer`, jen čtení):
-
-1. `zpool list` a `zpool status`: existuje pool pro `/zfs-RAID-6TB`? Jaký má typ redundance (raidz, mirror) a stav?
-2. `zfs list -o name,mountpoint,used,avail,compression,encryption` a `findmnt /zfs-RAID-6TB`: který dataset tam je připojený.
-3. Zda se pool importuje při bootu. Pokud chybí v `boot.zfs.extraPools`, po restartu nemusí být dostupný a zálohy by tiše selhávaly nebo se zapisovaly na kořenový souborový systém.
-4. Volné místo proti odhadu: velikost repozitáře pgBackRest × počet ponechaných snapshotů `daily` po deduplikaci resticem + dumpy. Doporučuji kvótu datasetu.
-5. Šifrování v klidu (`encryption`) a kdo zná klíč. Restic data šifruje sám, šifrování ZFS je druhá vrstva.
-6. Scrub. `autoScrub` je vypnutý a bez scrubu se tichá chyba disku neodhalí. Doporučuji pravidelný scrub.
-7. Existující nástroje snapshotů (sanoid, syncoid, vlastní skripty), aby se nekřížily.
-8. Zda je pool zálohovaný dál. Kopie 3 je jen tak bezpečná jako tento pool.
-
-Navrhované vlastnosti nového datasetu (provede se jen po schválení, viz [external-changes.md](external-changes.md)): `<pool>/backups/infrastructure-sjv`, `compression=zstd`, `atime=off`, `recordsize=1M`, kvóta, vlastník je uživatel služby `rest-server`.
-
-Návrh retence ZFS snapshotů (k rozhodnutí): hodinové 48, denní 30, měsíční 6. Snapshoty drží i data, která `prune` už smazal, takže zvyšují potřebné místo.
 
 ## Pravidelné úlohy a kontroly
 
