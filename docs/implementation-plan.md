@@ -12,7 +12,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 | Počet měřidel a intervaly vysílání | odhad objemu ve fázi 4 |
 | Vzorky telegramů, typy měřidel tepla, AES klíče | fáze 6 |
 | Hardware ESP | firmware (mimo tento plán, jen návrh) |
-| Výsledek ACRIOS PoC (fáze 11) | fáze 12 pro adaptér ACRIOS. Návrh tabulek neblokuje |
+| Výsledek ACRIOS PoC (fáze 11) | fáze 12 pro adaptér ACRIOS a, pro daný zdroj, implementaci skládání fragmentů a unikátního omezení rozsahu `message_ref`. Návrh a vytvoření ostatních částí schématu neblokuje |
 | E2, E3, E4 | ostrý provoz (fáze 13) |
 | SMTP (E7) | odesílání notifikací (fáze 9). Do té doby zůstávají ve frontě a v administraci |
 
@@ -73,6 +73,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 - `maintenance.sh`: zakládání partitions, retence v daném pořadí s kontrolami, mazání klíčů po 60 dnech.
 - Odhad objemu podle skutečného počtu měřidel a intervalů. Objem payloadů ACRIOS se neodhaduje, dokud není vzorek z PoC.
 - Schéma se nasazuje bez výsledku PoC. Tabulky ani sloupce nenesou jméno modelu ACRIOS.
+- Před implementací unikátního indexu a skládání fragmentů musí být rozhodnuto a technicky ověřeno, jak bude rozsah jedinečnosti `message_ref` reprezentován přímo v databázovém modelu tak, aby jej šlo vynutit databázovým omezením. `ingest_message_keys` má klíč `(ingest_source_id, msg_key_namespace, msg_key, item_index)` a rozsah `msg_key` je podle R29 standardně transportní. U `ingest_fragment_sets` dosavadní návrh přímo použitelný údaj pro vynucení jedinečnosti `message_ref` v rámci transportu nemá. Transport nelze získat JOINem z `ingest_endpoints` uvnitř běžného unikátního indexu. Konkrétní řešení se teď nevybírá. Sloupec `transport`, `msg_key_namespace` ani jiný sloupec se kvůli tomu nepřidává a schéma se nemění. Rozsah se neodvozuje z `endpoint_id`, protože identita endpointu není totožná s transportním namespace. Výsledek musí vyjít z ACRIOS PoC a prokázaného rozsahu identifikátoru. Dokud rozsah není prokázán, `message_ref` sadu nespojí. Tato otázka neblokuje návrh a vytvoření ostatních částí schématu. Blokuje jen implementaci skládání a příslušného unikátního omezení pro daný zdroj.
 - Hotovo, když:
   - `alembic upgrade head` na prázdné DB a `alembic check` projdou,
   - testy constraintů projdou (překryv členství, instalací a přiřazení, změna odečtu, zápis do auditu),
@@ -83,12 +84,13 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
   - v katalogu tabulek není evidence odečtů pojmenovaná podle transportu nebo výrobce,
   - stejný `msg_key` dvou `ingest_source_id` jsou dva klíče,
   - `server_only` se shodou do 60 dní nepřipojí příjem ke staršímu telegramu a odečet nezaloží,
-  - stejný `group_key` po `timed_out` fragment izoluje a k nové sadě ho nepřipojí,
+  - každé nové doručení fragmentu bez prokázaného `message_ref` vytvoří vlastní novou sadu `isolated` s právě jedním logickým fragmentem, právě jedním řádkem `first` v `ingest_fragments` a vlastním `payload_id`. `delivery_role = repeat` ani `delivery_role = conflict` se nepoužijí. Shoda `group_key`, `source_message_ref`, `fragment_index`, `content_hash`, času ani identifikátoru jednoho transportního přenosu doručení k existující sadě nepřiřadí. Odlišný hash vytvoří další novou sadu `isolated` a původní se na `conflict` nezmění. Sada se neskládá a dekodér ji nedostane. Do `collecting`, `complete`, `conflict` ani `timed_out` nepřejde a `INGEST_FRAGMENT_TIMEOUT` se na ni nevztahuje,
+  - u sady `collecting` s prokázaným `message_ref` je shodný index a shodný hash řádek `repeat` s vlastním payloadem a rozdílný hash na stejném indexu je `conflict`,
+  - souběžné zakládání `collecting` s prokázaným `message_ref` a jeho rozsahem nevytvoří dvě otevřené sady pro stejnou identitu. Použije transakční zámek a unikátní omezení. Při konfliktu unikátního indexu se vyhledání opakuje. Fragment se nezahodí a nepřipojí k nesprávné sadě,
+  - dvě souběžná doručení bez prokázaného `message_ref` vytvoří dvě samostatné sady `isolated`. Není to chyba souběhu. Plán nevyžaduje jedinou otevřenou sadu pro `group_key` ani sloučení izolovaných fragmentů,
+  - `message_ref` bez zapsaného rozsahu sadu nespojí,
   - test retence na umělých datech: nejdřív kandidáti a příjmy měsíce přijetí, potom fragmenty `DELETE`, potom sada bez zbývajících fragmentů, potom payload a telegram. Sada se nesmaže, dokud na ni fragment ukazuje. Odečet a `reading_provenance` zůstanou a neobsahují cizí klíč na smazaný příjem. Retence se odloží při čekajícím dekódování. `needs_review` bez odečtu ji neblokuje. Příjem z prosince 2028 odkazující na telegram z ledna 2027 se nemaže s lednovou partition.
-  - dvě položky jednoho `msg_key` se při prvním doručení obě uloží a při druhém z nich nevznikne odečet,
-  - opakované doručení fragmentu má vlastní řádek a vlastní payload,
-  - souběžné založení sady nevytvoří dvě otevřené sady a fragment nezahodí,
-  - `message_ref` bez zapsaného rozsahu sadu nespojí.
+  - dvě položky jednoho `msg_key` se při prvním doručení obě uloží a při druhém z nich nevznikne odečet.
 
 ### 5. Ingest, čas a deduplikace
 
@@ -152,7 +154,8 @@ Před fází 12 musí být zapsané:
 - topics nebo tvar API, až jsou pozorované,
 - ukázky surového payloadu a ukázky dekódovaného payloadu, pokud je zařízení posílá,
 - jestli a jak fragmentuje (identifikátor celé zprávy, pořadí, počet, opakování, timeout, jestli se identifikátor po uzavření použije znovu a v jakém rozsahu je jedinečný),
-- jestli se `message_ref` opakuje mezi endpointy, transporty, restarty nebo v čase, po jaké době, a jestli patří zařízení, spojení nebo bootu. Dokud to není zapsané, `message_ref` identita zprávy není,
+- jestli se `message_ref` opakuje mezi endpointy, transporty, restarty nebo v čase, po jaké době, a jestli patří zařízení, spojení nebo bootu. Dokud to není zapsané, `message_ref` identita zprávy není a sadu nespojí,
+- jak bude prokázaný rozsah jedinečnosti `message_ref` reprezentován přímo v databázovém modelu, aby ho šlo vynutit omezením. PoC konkrétní sloupec nevybírá a schéma nemění. Identita endpointu se za transportní namespace nepovažuje. Výsledek se promítne do technického návrhu před implementací adaptéru. Do té doby se fragmenty tohoto zdroje neskládají a unikátní omezení pro tento rozsah se nezavádí,
 - jak vypadá opakované doručení a jestli zpráva nese vlastní identifikátor, který se během 60 dní neopakuje,
 - jaká je přesnost času dekódované hodnoty,
 - jaká autentizace je dostupná (heslo, certifikát, PSK, token platformy). Metoda se v PoC vybírá podle zařízení, ne dopředu,
@@ -160,7 +163,7 @@ Před fází 12 musí být zapsané:
 
 Zároveň se zapíše, co z toho plyne pro mapování, aniž by se měnily tabulky: stabilita identifikátoru přes výměnu SIM, jaký čas payload nese, jestli dekódovaná data mají ACC nebo čas měřidla, jestli jeden údaj umí i zápis konfigurace.
 
-Hotovo, když je záznam ověření uložený u projektu a je rozhodnuté, které transporty adaptér tohoto kusu bude implementovat. Neznámá hodnota zůstane neznámá. Úspěch PoC není podmínka fáze 4 ani 5.
+Hotovo, když je záznam ověření uložený u projektu, je rozhodnuté, které transporty adaptér tohoto kusu bude implementovat, a prokázaný rozsah `message_ref` je zapsaný tak, aby ho šlo před adaptérem promítnout do technického návrhu databázového omezení. Neznámá hodnota zůstane neznámá. Úspěch PoC není podmínka návrhu ani vytvoření ostatních částí schématu ve fázi 4 ani fáze 5. Blokuje implementaci skládání a příslušného unikátního omezení pro tento zdroj a fázi 12.
 
 ### 12. Adaptér koncentrátoru
 
