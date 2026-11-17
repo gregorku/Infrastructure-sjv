@@ -139,7 +139,7 @@ R31 nerozporuje dřívější rozhodnutí a jejich znění nemění:
 - R8 dál zakazuje `installation_id` v `meter_readings`. Výměna ho nepřidává.
 - R15 a rozhodnutí 7 a 14 dál určují, co člen vidí. Výměna ani metrologická historie viditelnost člena nemění.
 - Rozhodnutí 8 nechává role `board` a `technician` nepřiřaditelné. `performed_by` je jméno technika nebo firmy, ne přidělení role.
-- Rozhodnutí 13 nechává aplikaci informační. R31 nezavádí rozúčtování, cenu ani metrologickou lhůtu.
+- Rozhodnutí 13 nechává aplikaci informační. R31 nezavádí rozúčtování, cenu ani automatické určování a hlídání metrologických lhůt.
 - R3 a výpočet spotřeby zůstávají. Spotřeba se dál počítá uvnitř jedné instalace a jednoho počítadla.
 
 Podrobnosti, constraint trigger a transakce jsou v [database-design.md](database-design.md). Oprávnění jsou v [security.md](security.md). Zobrazení metrologického záznamu drží výsledek úkonu a časové pokrytí odděleně. Věta R31 se tím nemění.

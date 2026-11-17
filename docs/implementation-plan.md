@@ -126,7 +126,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 ### 8. Frontend
 
 - Člen: byty, aktuální kumulativní stav měřidla podle schváleného R15 (celkový stav počítadla, ne osobní spotřeba), historie a spotřeba jen za členství, grafy po měsících a letech (ECharts), exporty.
-- Administrátor: správa, přehled zařízení, telegramů, neznámých měřidel a anomálií, přechody zdroje, opravy, audit, historie bytu, výměny a u ověření odděleně výsledek úkonu a časové pokrytí tam, kde jsou obě data vyplněná.
+- Administrátor: správa, přehled zařízení, telegramů, neznámých měřidel a anomálií, přechody zdroje, opravy, audit, historie bytu, výměny a u metrologických záznamů oddělené zobrazení výsledku úkonu a časového pokrytí. Pokud chybí valid_from nebo valid_until, záznam se označí jako undated.
 - Hotovo, když projdou e2e testy hlavních scénářů (Playwright) a ověření, že UI nikdy nedostane data mimo členství.
 
 ### 9. Monitoring a notifikace
