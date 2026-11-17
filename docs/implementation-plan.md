@@ -7,7 +7,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 | Vstup | Blokuje |
 | --- | --- |
 | E1 Incus kontejner, kapacita VPS | nasazení na VPS od fáze 1 (vývoj a testy lze dělat lokálně) |
-| Výsledek ověření ZFS, E5, E6 | fáze 3: vzdálená záloha proti skutečnému domácímu serveru |
+| Schválení a provedení E5 a E6, dostupný domácí `rest-server`, funkční síťové propojení a přístup k repozitáři | fáze 3: vzdálená záloha proti skutečnému domácímu serveru |
 | Upload domácí linky | odhad RTO před DR testem ve fázi 13 |
 | Počet měřidel a intervaly vysílání | odhad objemu ve fázi 4 |
 | Vzorky telegramů, typy měřidel tepla, AES klíče | fáze 6 |

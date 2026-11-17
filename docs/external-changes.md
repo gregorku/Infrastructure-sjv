@@ -13,7 +13,7 @@ Stav všech položek: **navrženo, neschváleno**.
 | E3 | VPS (NixOS, HAProxy) | Routy pro `SJV_DOMAIN` na 80 a 443 | web, ACME, HTTPS ingest |
 | E4 | VPS (NixOS, nftables) | DNAT TCP 8883 do kontejneru `sjv` | MQTT |
 | E5 | MikroTik doma | DNAT z WireGuardu na `rest-server`, vypnutá pravidla pro obnovovací instanci | vzdálené zálohy, obnova |
-| E6 | domaPcServer | ZFS dataset, `rest-server`, obnovovací instance, firewall, snapshoty, prune, kontrola | vzdálené zálohy, obnova |
+| E6 | domaPcServer | domácí `rest-server`, obnovovací instance, firewall, síťové propojení, správa vzdáleného restic repozitáře, `forget` a `prune`, kontrola a monitoring vzdálené restic kopie | vzdálené zálohy, obnova |
 | E7 | SMTP | Účet pro odesílání | alarmy, pozvánky |
 
 ## E1: Incus kontejner na VPS
@@ -108,15 +108,6 @@ Domácí WireGuard je `10.100.101.0/24`. Pravidlo povolí jen adresu VPS v této
 
 ## E6: domaPcServer
 
-**Předpoklad:** výsledek ověření ZFS z [backup-strategy.md](backup-strategy.md). Dokud není potvrzený pool, nic se nezakládá.
-
-### Dataset
-
-```bash
-zfs create -o compression=zstd -o atime=off -o recordsize=1M \
-  -o quota=<Q> <pool>/backups/infrastructure-sjv
-```
-
 ### rest-server (NixOS, orientačně, názvy voleb ověřit podle verze nixpkgs)
 
 ```nix
@@ -124,12 +115,13 @@ services.restic.server = {
   enable = true;
   appendOnly = true;
   privateRepos = true;
-  dataDir = "/<mount>/backups/infrastructure-sjv";
+  dataDir = "<cesta>/infrastructure-sjv";
   listenAddress = "<LAN-IP>:8000";
   extraFlags = [ "--tls" "--tls-cert" "<cert>" "--tls-key" "<key>" "--htpasswd-file" "<htpasswd>" ];
 };
 ```
 
+- `dataDir` je konfigurační cesta repozitáře na domácím serveru. Souborový systém se nepředepisuje.
 - Port 8000 je výchozí port `rest-server`. Jiný port lze zvolit podle obsazenosti na `domaPcServer`.
 - Uživatel `infrastructure-sjv` má přístup jen k repozitáři `infrastructure-sjv/`. S `--private-repos` musí jméno uživatele odpovídat první části cesty.
 - Vlastní certifikát pro TLS. Jeho otisk se pinuje na VPS přes `--cacert`. Na LAN úseku za MikroTikem by jinak heslo `rest-server` šlo nešifrovaně.
@@ -144,10 +136,6 @@ services.restic.server = {
 - Firewall: port `<P2>` jen ze zdroje po DNAT, stejně jako u hlavní instance.
 - Uživatel `sjv-recovery` a jeho heslo se založí předem a heslo se uloží jen do obnovovací sady. Funkčnost se ověří při prvním DR testu.
 
-### ZFS snapshoty
-
-Návrh: sanoid jen pro tento dataset, hodinové 48, denní 30, měsíční 6 (k rozhodnutí). VPS k nim nemá přístup.
-
 ### Prune a kontrola
 
 - Timer `sjv-restic-prune` (týdně) s klíčem `maintenance` přímo na lokální cestě, zvlášť pro každý tag:
@@ -160,9 +148,8 @@ Návrh: sanoid jen pro tento dataset, hodinové 48, denní 30, měsíční 6 (k 
 
 - Timer `sjv-restic-watch` (15 min): alarm, když nejnovější snapshot `wal` je starší než 20 minut, `daily` starší než 26 hodin, nebo objem neobvykle naroste.
 - Klíče restic: `vps` (zapisuje VPS), `recovery` (jen obnovovací sada), `maintenance` (jen domácí server).
-- Doporučení mimo projekt: zapnout pravidelný scrub poolu.
 
-Rollback: vypnout služby. Data datasetu se nemažou bez samostatného rozhodnutí.
+Rollback: vypnout služby. Data restic repozitáře se nemažou bez samostatného rozhodnutí.
 
 ## E7: SMTP
 
@@ -173,6 +160,5 @@ Rollback: vypnout služby. Data datasetu se nemažou bez samostatného rozhodnut
 - Kapacita VPS (`<CPU>`, `<RAM>`, disk). Adresa kontejneru je `10.10.10.20`.
 - Možnost založit druhé veřejné jméno v DNS účtu.
 - Název WireGuard rozhraní na MikroTiku doma, LAN IP `domaPcServer` a porty `<P>` a `<P2>`.
-- Výsledek ověření ZFS a kvóta `<Q>`.
 - Verze nixpkgs na `domaPcServer` (názvy voleb `services.restic.server`).
 - SMTP poskytovatel.

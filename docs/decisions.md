@@ -9,7 +9,7 @@ Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11
 | 1 | PostgreSQL 18.x + pgBackRest pro WAL a PITR | Vlastní image `postgres:18.x` + pgBackRest, sestavovaný lokálně |
 | 2 | Restic pro šifrované vzdálené zálohy | Snapshoty `daily` (celý repozitář pgBackRest, dumpy, soubory stacku) a `wal` (jen archiv WAL), viz [backup-strategy.md](backup-strategy.md) |
 | 3 | Push na append-only `rest-server` přes WireGuard | VPS zálohy zapisuje a čte, ale nemůže je mazat ani přepsat |
-| 4 | ZFS snapshoty na domácím serveru | Jen jako návrh. Existující ZFS konfigurace se nemění |
+| 4 | Další záložní kopie na domácím serveru je mimo rozsah projektu | Infrastructure-sjv ji nespravuje a její mechanismus není součástí projektové dokumentace |
 | 5 | MQTT TLS ukončené přímo v Mosquittu | Certifikát se exportuje z ACME Traefiku, viz [architecture.md](architecture.md) |
 | 6 | Vlastní firmware ESP s frontou a aplikačním ACK | Zatím jen návrh v [firmware-design.md](firmware-design.md) |
 | 7 | Člen vidí historii jen za období svého členství v bytě | Přístup je oddělený od spotřeby, viz [database-design.md](database-design.md#historie-bytu-přístup-oddělený-od-spotřeby) |
@@ -167,11 +167,10 @@ Hodnoty, které nejsou známé, se nedoplňují odhadem.
 | --- | --- |
 | Kapacita VPS (`<CPU>`, `<RAM>`, disk). Kontejner `sjv-monitoring` má adresu `10.10.10.20` | E1, měření zátěže |
 | Zda DNS účet dovolí druhé veřejné jméno (`MQTT_HOSTNAME` jiné než `SJV_DOMAIN`) a jak se to jméno udržuje | E2, MQTT hostname |
-| Skutečný ZFS pool a výsledek ověření. `zfs-RAID-6TB` v NixOS konfiguraci `domaPcServer` není | E6, fáze 3 |
 | Upload domácí linky | odhad RTO před DR testem ve fázi 13 |
 | WireGuard rozhraní MikroTiku, LAN IP `domaPcServer`, porty `<P>` a `<P2>` | E5 |
 | SMTP účet | E7, notifikace |
-| Retence ZFS snapshotů, pokusů o přihlášení a notifikací | E6, fáze 4 |
+| Retence pokusů o přihlášení a notifikací | fáze 4 |
 | Maximální stáří zprávy (návrh 30 dní) | fáze 5 |
 | Hardware ESP (čip, rádio, flash, konektivita, napájení) | firmware |
 | Vzorky telegramů, typy měřidel tepla, AES klíče | fáze 6 |
