@@ -24,7 +24,7 @@
 | Zdvojená spotřeba při změně zdroje | Jediný přiřazený stream, kontrolovaný a auditovaný přechod |
 | Únik databáze | DB jen na interní síti, AES a TOTP šifrované hlavním klíčem mimo DB |
 | Kompromitace VPS | Zálohy append-only, mazání jen z domácího serveru, obnovovací sada mimo VPS |
-| Neoprávněná změna dat | Běžné opravy historických a provozních dat jdou podle pravidel příslušné tabulky. Výjimka R31 dovoluje auditovaný `UPDATE` jen u `meter_replacement_events` a `meter_verifications`. Každý takový `UPDATE` je ve stejné transakci s novým řádkem `audit_logs`, který nese `before`, `after` a povinný `reason`. `audit_logs` zůstává append-only, jen INSERT, a jeho pravidla se nemění. Výjimka nezakládá `UPDATE` jiných historických záznamů |
+| Neoprávněná změna dat | Opravy odečtů jsou nový záznam s povinným důvodem a auditem. Opravy `meter_replacement_events` a `meter_verifications` jsou auditovaný `UPDATE` s povinným důvodem a hodnotami `before` a `after`. `UPDATE` a odpovídající `INSERT` do `audit_logs` jsou jedna transakce. `created_by` a `created_at` výměn a metrologických záznamů se nemění. `DELETE` výměn a metrologických záznamů není. `audit_logs` zůstává append-only a aplikační role má jen INSERT. Toto nezakládá `UPDATE` odečtů ani jiných historických záznamů |
 | Člen změní instalaci, výměnu nebo metrologickou historii | Tyto zápisy mají jen oprávnění administrátora. Role `member` k nim endpoint nemá |
 
 ## Uživatelé
@@ -142,10 +142,10 @@ Platí pro ACRIOS a pro každý další koncentrátor. Metoda autentizace se vyb
 - **Logy aplikace** jsou strukturované (JSON) s `request_id`. Bez hesel, tokenů, klíčů a obsahu telegramů. E-mail jen tam, kde je nutný.
 - **Audit** zaznamenává:
   - přihlášení a odhlášení, selhání, změny MFA,
-  - všechny administrátorské změny s hodnotou před a po,
+  - všechny administrátorské změny s hodnotou před a po. Oprava odečtu je nový záznam s povinným důvodem a auditem. Původní řádek odečtu se nepřepisuje,
   - výměnu měřidla: kdo ji zapsal, kdo ji provedl, kdy proběhla, která instalace a které měřidlo skončilo a které začalo. Počáteční a konečná hodnota a číslo plomby jsou v auditu instalací téže transakce, se stejným `request_id`,
-  - metrologickou událost: fyzické měřidlo, typ úkonu (`verification`, `calibration`, `inspection`) a kdo záznam vytvořil. Oprava nese hodnoty před a po, povinný důvod a změnu evidovaných údajů, zejména `result`, `performed_at`, poskytovatele a časové pokrytí (`valid_from`, `valid_until`),
-  - opravu výměny s hodnotou před a po a s povinným důvodem,
+  - metrologickou událost: fyzické měřidlo, typ úkonu (`verification`, `calibration`, `inspection`) a kdo záznam vytvořil. Oprava je auditovaný `UPDATE` ve stejné transakci jako `INSERT` do `audit_logs`. Nese `before`, `after` a povinný důvod a změnu evidovaných údajů, zejména `result`, `performed_at`, poskytovatele a časové pokrytí (`valid_from`, `valid_until`). `created_by` a `created_at` se nemění. `DELETE` není,
+  - opravu výměny jako auditovaný `UPDATE` ve stejné transakci jako `INSERT` do `audit_logs`, s `before`, `after` a povinným důvodem. `created_by` a `created_at` se nemění. `DELETE` není,
   - opravy s důvodem,
   - změny zařízení a klíčů (bez hodnot), exporty,
   - retenční mazání,
