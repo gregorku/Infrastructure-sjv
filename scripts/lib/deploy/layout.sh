@@ -39,8 +39,31 @@ layout_prepare_acme() {
     [[ "$(file_mode "${ACME_FILE}")" == 600 ]] || fail "${ACME_FILE} has mode $(file_mode "${ACME_FILE}"). It must be 600."
 }
 
-# Directories created by init.sh. PostgreSQL and Mosquitto stay out until
-# their stages. Traefik and CrowdSec directories hold no bouncer key yet.
+# Root keeps ownership so a later init still accepts the directory. Group 999
+# is the postgres group inside the official image. ensure_dir never loosens a
+# mode, so the group write bit is applied here on purpose.
+layout_prepare_postgres_mount() {
+    local path="$1" group
+    ensure_dir "${path}" 2770
+    if [[ "$(file_mode "${path}")" != "2770" ]]; then
+        chmod 2770 "${path}"
+        info "Mode of ${path} set to 2770."
+    fi
+    if [[ "${EUID}" -eq 0 ]]; then
+        group="$(stat -c %g "${path}")"
+        if [[ "${group}" != "999" ]]; then
+            chgrp 999 "${path}"
+            info "Group of ${path} set to 999."
+        fi
+    fi
+}
+
+# Directories created by init.sh. The PostgreSQL mount stays owned by root.
+# Mode 2770 and, when init runs as root, group 999 let the official image
+# user (uid/gid 999) create its data directory inside the mount. The parent
+# backup directory stays mode 700, so a host process cannot walk in from
+# outside. Mosquitto stays out until its stage. Traefik and CrowdSec
+# directories hold no bouncer key yet.
 layout_prepare() {
     print_section "Directory layout"
     assert_layout_paths
@@ -51,11 +74,12 @@ layout_prepare() {
     ensure_dir "${SECRETS_DIR}" 700
     ensure_dir "${BASE_DIR}/backups" 755
     ensure_dir "${BACKUP_LOCAL_DIR}" 700
-    ensure_dir "${BACKUP_LOCAL_DIR}/pgbackrest" 700
-    ensure_dir "${BACKUP_LOCAL_DIR}/pgbackrest/archive" 700
+    layout_prepare_postgres_mount "${BACKUP_LOCAL_DIR}/pgbackrest"
+    layout_prepare_postgres_mount "${BACKUP_LOCAL_DIR}/pgbackrest/archive"
     ensure_dir "${BACKUP_LOCAL_DIR}/dumps" 700
     ensure_dir "${BACKUP_LOCAL_DIR}/files" 700
     ensure_dir "${DATA_DIR}/backup-locks" 700
+    layout_prepare_postgres_mount "${POSTGRES_DIR}"
     ensure_dir "${TRAEFIK_DIR}" 755
     ensure_dir "${TRAEFIK_DIR}/acme" 700
     ensure_dir "${TRAEFIK_DIR}/logs" 755

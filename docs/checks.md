@@ -26,7 +26,7 @@ Stav: etapa B1b. Sada běží offline. `docker compose config` se spustí jen kd
 
 - Parser: duplicitní klíč, `export`, malá písmena v klíči, řádek bez `=`, CRLF, nebezpečné znaky a symlink jsou odmítnuté. Hodnota `$(…)` se nespustí.
 - Sítě: platné a neplatné CIDR, překryvy, privátní a veřejné adresy.
-- Validace: chybějící a neznámé proměnné, placeholdery, dokumentační hostname, obecné DNS jméno, pevné hodnoty, čtyři projektové sítě a brány, překryv s `10.10.10.0/24`, `10.100.101.0/24`, `10.110.110.0/24`, `10.120.120.0/24` a `172.17.0.0/16`, allowlist, režimy TLS a PROXY protokolu, publikace administrace Traefiku, účty PostgreSQL a MQTT, hesla, retence ingestu, restic, SMTP, logy, odkazy na image s digestem. Chybové zprávy neobsahují tajné hodnoty.
+- Validace: chybějící a neznámé proměnné, placeholdery, dokumentační hostname, obecné DNS jméno, pevné hodnoty, čtyři projektové sítě a brány, překryv s `10.10.10.0/24`, `10.100.101.0/24`, `10.110.110.0/24`, `10.120.120.0/24` a `172.17.0.0/16`, allowlist, režimy TLS a PROXY protokolu, publikace administrace Traefiku, účty PostgreSQL a MQTT, hesla, retence ingestu, restic, SMTP, logy, odkazy na image s digestem, `POSTGRES_IMAGE` jen jako `postgres:19.0` s digestem a `PGBACKREST_VERSION` jen `2.60.1`. Chybové zprávy neobsahují tajné hodnoty.
 - Synchronizace: vytvoření s právy 600, generování různých tajemství bez výpisu, opakovaný běh bez přepisu a bez zálohy, zachování uživatelských hodnot a tajemství, obnovení hodnot `framework` po záloze, zúžení práv `.env` a záloh, odmítnutí nečitelného `.env`, symlinku, zapisovatelného adresáře a vadného `.env.example`.
 
 ### Skripty v testovacím režimu
@@ -36,7 +36,7 @@ Stav: etapa B1b. Sada běží offline. `docker compose config` se spustí jen kd
 - `update-env.sh`: vytvoření `.env`, výpis placeholderů a dokumentačních jmen, opakovaný běh beze změny souborů i adresářů, zachování doplněných hodnot včetně `SJV_DOMAIN` a `MQTT_HOSTNAME`, záloha před obnovou hodnoty `framework`, zámek proti souběhu, odmítnutí zastaralé kopie `.env.example`.
 - `update-env.sh` a `check-env.sh` volají `require_mountpoint` dřív, než sáhnou na `.env`. Bez mountpointu nic nezapíšou a nezaloží adresář.
 - `check-env.sh`: odmítne `example.com` a `mqtt.example.com` jako produkční domény a spolu s nimi ostatní chyby, práva 644 u `.env` i záloh, osiřelý `.env.tmp.*`, visící symlink `.env` v checkoutu a nebezpečný allowlist; přijme kompletní konfiguraci; nikdy nic nezmění a nevypíše tajemství.
-- Compose a konfigurace: v repozitáři není `docker.sock`, bouncer klíč není proměnná `.env`, gitová šablona admin portu nic nepublikuje. Image mají tag i digest podporované řady, plugin má verzi a sha256 katalogového zipu.
+- Compose a konfigurace: v repozitáři není `docker.sock`, bouncer klíč není proměnná `.env`, gitová šablona admin portu nic nepublikuje. Image mají tag i digest podporované řady, plugin má verzi a sha256 katalogového zipu. `sjv-postgresql` je jen na `sjv-internal`, bez publikovaného portu, s `pg_isready`, checksums a rolemi bez superuser oprávnění. Členství `pgbackrest` v `pg_checkpoint`, `pg_read_all_settings` a `pg_read_all_stats` má `INHERIT TRUE`. Grant bez této volby test odmítne. Samostatně musí být `EXECUTE` na `pg_backup_start(text, boolean)`, `pg_backup_stop(boolean)`, `pg_create_restore_point(text)` a `pg_switch_wal()`. Jiná signatura nebo chybějící grant testem neprojde. Členství v `pg_checkpoint` toto `EXECUTE` nenahrazuje. `docker compose config` se spustí jen když je nainstalované Docker CLI.
 - Plán sítí bez Docker démona: `sjv-internal` je jediná interní, cizí síť se nemění, překryv zastaví vytvoření, shodná označená síť se nezakládá znovu. Traefik není na `sjv-egress`, CrowdSec není na `sjv-proxy`.
 - `deploy.sh --render-only` v testovacím režimu vykreslí Traefik bez Docker provideru, s file providerem, allowlistem, limity rotace `traefik.log` a budoucími routami API a webu. Middleware bounceru chybí, dokud nevznikne soubor klíče s právy 600. Druhé vykreslení soubor nemění. Plný `deploy.sh` v testovacím režimu skončí před Dockerem.
 - Healthcheck CrowdSec v Compose je `cscli lapi status`. Traefik na něj dál čeká přes `service_healthy`.
@@ -51,6 +51,7 @@ Stav: etapa B1b. Sada běží offline. `docker compose config` se spustí jen kd
 | `.env` jiného vlastníka | `test.sh` ho spustí, jen když běží jako root | jinak je poctivě přeskočený |
 | ShellCheck | nemusí být nainstalovaný | `./scripts/shellcheck.sh` (kód 3 = nespuštěno) |
 | `require_mountpoint` v testovacím režimu | testovací režim ho přeskakuje | bez `SJV_TEST_BASE_DIR` a bez `/docker-data` musí `init.sh`, `update-env.sh` i `check-env.sh` skončit chybou a nic nevytvořit |
+| Izolovaná záloha a obnova pgBackRest | `test.sh` nespouští databázový kontejner | ruční běh jen v dočasném adresáři, mimo `/docker-data`. Poslední úspěch je 20. 11. 2026 a postup je v [operations.md](operations.md#záloha-a-obnova-postgresql) |
 
 ## Kontrola na serveru po instalaci
 

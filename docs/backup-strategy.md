@@ -45,6 +45,7 @@ Zálohování je kritická část projektu. Projekt nelze označit za dokončen�
 - **Automatické expire je vypnuté** (`expire-auto = n`) a `pgbackrest expire` spouští `backup.sh` samostatně, až po denním vzdáleném snapshotu ([Konzistence](#konzistence-vzdálené-kopie)). Název a chování volby se ověří pro zafixovanou verzi pgBackRest ve fázi 1.
 - Lokální repozitář není šifrovaný pgBackRestem. Leží na stejném disku jako DB a mimo VPS ho šifruje restic. Obnova pak nepotřebuje další heslo.
 - PostgreSQL běží s `--data-checksums` (převzato z reference).
+- Verze je pgBackRest 2.60.1 nad PostgreSQL 19.0 (R33). `PG_CONTROL_VERSION` 1905 a `XLOG_PAGE_MAGIC` 0xD122 se shodují s vydáním 19.0. Poznámky k 2.60.1 jmenují 19rc2. Konstanta katalogu v nástroji je 202605131 a vydání 19.0 má 202610061. Běh čte číslo katalogu z `pg_control`. Izolovaný test 20. 11. 2026 dokončil `stanza-create`, `check`, plnou zálohu 30,3 MB (1 273 souborů), archivaci WAL a obnovu do samostatného clusteru s `archive_mode=off` a repozitářem jen pro čtení. `pgbackrest expire`, PITR na zvolený čas, `pg_dump`, `backup.sh`, `restore.sh` a vzdálená obnova ověřené nejsou. Postup je v [operations.md](operations.md#záloha-a-obnova-postgresql).
 
 ### Denní logický dump
 

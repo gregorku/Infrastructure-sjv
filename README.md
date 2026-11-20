@@ -2,13 +2,13 @@
 
 Informační systém SJV: sběr odečtů měřidel (wM-Bus), aplikace pro členy a správu, zálohy. Běží jako Docker stack v Incus kontejneru `sjv-monitoring`. Veřejné jméno je hodnota `SJV_DOMAIN` v runtime `.env`.
 
-Stav: etapa B1b (instalační základ, Traefik, CrowdSec a trvalá služba `sjv-backup`). Aplikace, databáze, MQTT, pgBackRest a `pg_dump` zatím nejsou implementované.
+Stav: etapa B1b (instalační základ, Traefik, CrowdSec, trvalá služba `sjv-backup` a služba `sjv-postgresql`). Aplikace, MQTT a `pg_dump` zatím nejsou implementované. Izolovaný test dokončil `stanza-create`, plnou zálohu pgBackRest a obnovu do samostatného clusteru. Produkční `backup.sh` a `restore.sh` nejsou. Cílová databáze je PostgreSQL 19.0. Zahájení ostrého sběru skutečných dat je 1. 1. 2027.
 
 ## Dokumentace
 
 | Dokument | Obsah |
 | --- | --- |
-| [docs/decisions.md](docs/decisions.md) | rozhodnutí 1–31, revize R1–R16 a otevřené body |
+| [docs/decisions.md](docs/decisions.md) | rozhodnutí 1–32, revize R1–R32, R33 a otevřené body |
 | [docs/architecture.md](docs/architecture.md) | služby, sítě, adresáře, tok dat |
 | [docs/database-design.md](docs/database-design.md) | schéma PostgreSQL a role |
 | [docs/data-ingestion.md](docs/data-ingestion.md) | jednotný příjem: ESP, ACRIOS, další koncentrátory a importy |

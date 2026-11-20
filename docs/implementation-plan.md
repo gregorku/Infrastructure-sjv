@@ -1,6 +1,6 @@
 # Implementační plán
 
-Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implementací. Každá fáze končí ověřitelnými kritérii. Změny mimo repozitář (E1–E7 z [external-changes.md](external-changes.md)) se provádějí jen po samostatném schválení.
+Stav: čeká na schválení. Cílový termín zahájení ostrého sběru skutečných dat je 1. 1. 2027. Schválení dokumentace neznamená souhlas s implementací. Zápis milníku neznamená, že je splněný. Každá fáze končí ověřitelnými kritérii. Změny mimo repozitář (E1–E7 z [external-changes.md](external-changes.md)) se provádějí jen po samostatném schválení.
 
 ## Vstupy, které blokují konkrétní fáze
 
@@ -24,7 +24,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 - `scripts/config.sh`, `lib/logging.sh`, `lib/common.sh`, `lib/env/` (`ENV_POLICY`, sync, validace) převzaté z reference a upravené. Parser `.env` bez `eval`.
 - `init.sh`, `update-env.sh`, `check-env.sh`, `test.sh --static`, `shellcheck.sh`.
 - Compose: čtyři sítě podle [architecture.md](architecture.md), Traefik (bez `docker.sock`), CrowdSec, správa bouncer klíče převzatá z reference, včetně testů. Soubory a offline testy jsou v repozitáři od B1b. Spuštění na testovacím kontejneru tato etapa neprovádí.
-- Zafixování verzí: Python, Node, pgBackRest (s podporou PostgreSQL 18), restic, rest-server. Ověření voleb `expire-auto` v pgBackRest a `manual_ack` v paho-mqtt.
+- Zafixování verzí: Python, Node a rest-server. PostgreSQL 19.0 a pgBackRest 2.60.1 jsou připnuté rozhodnutím R33. Restic zůstává 0.19.1. Ověření voleb `expire-auto` v pgBackRest 2.60.1 a `manual_ack` v paho-mqtt.
 - Hotovo, když:
   - `test.sh --static` a shellcheck projdou,
   - deploy v režimu `local` na testovacím kontejneru spustí Traefik a CrowdSec,
@@ -32,7 +32,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 
 ### 2. PostgreSQL a lokální zálohy
 
-- Vlastní image `postgres:18.x` + pgBackRest, `--data-checksums`, archivace WAL, `expire-auto = n`.
+- Vlastní image z připnutého `postgres:19.0` a pgBackRest 2.60.1, `--data-checksums`, archivace WAL, `expire-auto = n`. Soubory image a `compose/40-postgresql.yml` jsou v repozitáři. Izolovaný test dokončil `stanza-create`, `check`, plnou zálohu a obnovu aktuálního clusteru. PITR na zvolený čas, `backup.sh` a `restore.sh` se nespustily, takže kritéria hotovo této fáze splněná nejsou.
 - Role DB přes `\getenv`, pořadí deploye „nejdřív DB“.
 - `backup.sh` (bez restic kroku), `backup-verify.sh`, `backup-status.sh`, `restore.sh` (lokální zdroj), systemd timery se zámky.
 - Hotovo, když:
@@ -41,7 +41,9 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 
 ### 3. Vzdálená záloha a test obnovy
 
-- Restic krok v `backup.sh` (`daily`) a `backup-remote.sh --wal` se zámky `backup.lock`, `repo.lock` a `remote.lock`.
+- Trvale běžící kontejner `sjv-backup` (`compose/30-backup.yml`), jen na `sjv-egress` a bez publikovaného portu. Plánovač běží uvnitř kontejneru. `daily` v 03:15 posílá celé `pgbackrest/`, `dumps/` a `files/`. `wal` posílá jen `pgbackrest/archive/`, běžně po `SJV_BACKUP_WAL_SECONDS` (výchozí 300 s). VPS do vzdáleného repozitáře zapisuje a čte. `rest-server` běží na domácím serveru. Služba `forget` ani `prune` nevolá.
+- Zámky: obě úlohy berou exkluzivní `restic-job.lock` bez čekání, takže dva procesy Resticu neběží zároveň. `daily` bere sdílený `backup.lock` a `repo.lock` bez čekání. `wal` `backup.lock` nebere, aby šel dál i během lokální zálohy, a bere sdílený `repo.lock` bez čekání, aby neběžel zároveň s `pgbackrest expire`.
+- Při obsazeném `restic-job.lock` nebo `repo.lock` se `wal` hned přeskočí, získané zámky uvolní a další pokus je až po `SJV_BACKUP_WAL_RETRY_SECONDS` (výchozí 60 s). Po úspěchu, prázdném archivu a chybě Resticu zůstává interval 300 s. Plánovač na zámku nečeká.
 - `restore-test.sh` ze vzdáleného zdroje (`daily` a přes něj `wal`), s měřením času.
 - Do schválení E5 a E6 se testuje proti `rest-server --append-only --private-repos` v lokálním testovacím kontejneru.
 - Testy:
@@ -52,7 +54,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 - Hotovo, když:
   - všechny testy projdou,
   - `restore-test.sh` ze vzdáleného zdroje projde,
-  - vzdálené RPO je v běžném provozu naměřené do 15 minut. Dlouhá denní úloha Resticu může interval `wal` překročit: při obsazeném `restic-job.lock` se `wal` přeskočí a další pokus je až po `SJV_BACKUP_WAL_RETRY_SECONDS` (výchozí 60 s). Souběžný Restic se nespouští.
+  - vzdálené RPO je v běžném provozu naměřené do 15 minut. Při obsazeném `restic-job.lock` nebo `repo.lock` se `wal` přeskočí a další pokus je až po `SJV_BACKUP_WAL_RETRY_SECONDS` (výchozí 60 s). Dlouhá denní úloha Resticu může 15minutový interval RPO překročit. Souběžný Restic se nespouští.
 - **Bez splnění této fáze se do systému nenahrávají skutečná data.**
 
 ### 4. Schéma databáze a migrace
@@ -185,9 +187,29 @@ Hotovo, když vzorky z PoC projdou pěti případy deduplikace, neúplná zpráv
 
 Jen návrh v [firmware-design.md](firmware-design.md). Implementace vyžaduje samostatné schválení a znalost hardwaru. Fáze 5 a 6 se do té doby testují simulátorem a zaznamenanými telegramy.
 
+## Zahájení ostrého sběru 1. 1. 2027
+
+Cíl k 1. 1. 2027 je zahájení ostrého příjmu a uchovávání skutečných dat z měřidel. Dokončení informačního systému a veřejného portálu má vlastní definici níže. Žádný řádek harmonogramu není splněný tím, že je zapsaný.
+
+Před zahájením sběru musí být funkční PostgreSQL 19, collector a příjem dat, trvalé uložení původních payloadů, evidence každého příjmu a chyb, zachování nerozpoznaných a nerozluštitelných telegramů, lokální a vzdálené zálohování, ověřená obnova a monitoring příjmu a záloh.
+
+Zahájení sběru nevyžaduje kompletní dekódování všech měřidel tepla, dokončený webový portál, všechny administrační funkce ani SMTP notifikace. Schválená pravidla ukládání payloadů a R1–R32 zůstávají platná. Fáze 3 dál brání nahrání skutečných dat, dokud vzdálená záloha a obnova neprojdou.
+
+| Termín | Cíl |
+| --- | --- |
+| do 26. 11. 2026 | databázový základ PostgreSQL 19 |
+| do 6. 12. 2026 | funkční příjem a ukládání dat |
+| do 14. 12. 2026 | ověření skutečných telegramů |
+| do 21. 12. 2026 | funkční zálohování a test obnovy |
+| do 28. 12. 2026 | integrační testy |
+| 29.–31. 12. 2026 | příprava ostrého provozu |
+| 1. 1. 2027 | zahájení ostrého sběru |
+
 ## Definice dokončení projektu
+
+Dokončení projektu je splnění fází 1–10 a 13, jak je uvedené v odrážkách níže. Termín 1. 1. 2027 je zahájení ostrého sběru a tuto definici nenahrazuje.
 
 - Všechny fáze 1–10 a 13 jsou hotové. Fáze 11 je podmínka fáze 12 pro dané zařízení. Fáze 12 se opakuje pro každého dalšího výrobce a na schéma nesahá.
 - Poslední `restore-test.sh` je úspěšný a ne starší než 31 dní.
-- DR test splnil RTO ≤ 4 h. Naměřené RPO ≤ 15 min se vztahuje k běžnému provozu. Dlouhá denní úloha Resticu může interval `wal` překročit, protože souběžný Restic se nespouští.
+- DR test splnil RTO ≤ 4 h. Naměřené RPO ≤ 15 min se vztahuje k běžnému provozu. Při obsazeném `restic-job.lock` nebo `repo.lock` se `wal` přeskočí a další pokus je až po `SJV_BACKUP_WAL_RETRY_SECONDS` (výchozí 60 s). Dlouhá denní úloha Resticu může 15minutový interval RPO překročit. Souběžný Restic se nespouští.
 - Provozní dokumentace popisuje všechny postupy, které skripty provádějí.

@@ -320,7 +320,7 @@ env_check_smtp() {
 
 env_check_images() {
     local -n env_image_ref="$1"
-    local image plugin
+    local image plugin version
     image="${env_image_ref[TRAEFIK_IMAGE]}"
     if ! env_image_ref_ok "${image}" || [[ "${image}" != docker.io/library/traefik:*@sha256:* ]]; then
         env_err "TRAEFIK_IMAGE must be docker.io/library/traefik:<tag>@sha256:<64 hex digits>."
@@ -335,6 +335,12 @@ env_check_images() {
     plugin="${env_image_ref[CROWDSEC_BOUNCER_PLUGIN_HASH]}"
     [[ "${plugin}" =~ ^[0-9a-f]{64}$ ]] \
         || env_err "CROWDSEC_BOUNCER_PLUGIN_HASH must be 64 lowercase hex digits."
+    image="${env_image_ref[POSTGRES_IMAGE]}"
+    if ! env_image_ref_ok "${image}" || [[ "${image}" != docker.io/library/postgres:19.0@sha256:* ]]; then
+        env_err "POSTGRES_IMAGE must be docker.io/library/postgres:19.0@sha256:<64 hex digits>."
+    fi
+    version="${env_image_ref[PGBACKREST_VERSION]}"
+    [[ "${version}" == "2.60.1" ]] || env_err "PGBACKREST_VERSION must be 2.60.1."
 }
 
 # Usage: env_validate ARRAY_NAME

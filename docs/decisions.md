@@ -1,6 +1,6 @@
 # Rozhodnutí
 
-Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Dne 16. 11. 2026 přibylo rozhodnutí R31 o výměnách a metrologické historii. Téhož dne se uzavřely jeho tři otevřené body: metrologické lhůty a upozornění, význam `failed` a shoda `location`. R1–R30 zůstávají schválené a beze změny. Dne 17. 11. 2026 přibylo rozhodnutí R32 o doručení s prokázaným `message_ref` po `timed_out`. R1–R31 se nemění. Schválení dokumentace neznamená souhlas s nasazením.
+Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Dne 16. 11. 2026 přibylo rozhodnutí R31 o výměnách a metrologické historii. Téhož dne se uzavřely jeho tři otevřené body: metrologické lhůty a upozornění, význam `failed` a shoda `location`. R1–R30 zůstávají schválené a beze změny. Dne 17. 11. 2026 přibylo rozhodnutí R32 o doručení s prokázaným `message_ref` po `timed_out`. R1–R31 se nemění. Dne 20. 11. 2026 přibylo rozhodnutí R33 o PostgreSQL 19 a o zahájení ostrého sběru 1. 1. 2027. Znění rozhodnutí 1–32 a revizí R1–R32 se nemění. Schválení dokumentace neznamená souhlas s nasazením.
 
 ## Potvrzená rozhodnutí
 
@@ -158,6 +158,16 @@ Uzavření tří otevřených bodů R31, 16. 11. 2026. Věta R31 ani rozhodnutí
 Když nové doručení nese prokázaný `message_ref` a odpovídající sada je už `timed_out`, původní sada zůstane beze změny. Doručení se k ní nepřipojí. Nevznikne `isolated`, protože `message_ref` je prokázaný, a nevznikne nová `collecting` se stejným `message_ref`. Payload doručení zůstane. Doručení se neskládá ani nedekóduje a eviduje se jako nepřiřazené, které vyžaduje samostatné vyhodnocení. Platí, dokud samostatný PoC neprokáže bezpečné zacházení s takovým doručením a nebude přijato nové rozhodnutí.
 
 R32 nemění znění R1–R31. Doručení bez prokázaného `message_ref` dál zakládá vlastní `isolated`.
+
+## Doplnění 20. 11. 2026: PostgreSQL 19 a termín ostrého sběru
+
+**R33 – PostgreSQL 19 jako cílová major verze**
+
+Cílová major verze databáze Infrastructure-sjv je PostgreSQL 19. Konkrétní báze lokálního image je `docker.io/library/postgres:19.0` s index digestem `sha256:bb6e70add742cd868fb62cb3b2f67d1dd2bdd2b65a521e778420748753687c60`. Tag `latest` ani pohyblivý tag `19` se nepoužije. pgBackRest je připnutý na 2.60.1 a patří do téhož lokálního image. Restic zůstává 0.19.1. Schválená koncepce zálohování se nemění. Zálohování a obnova na PostgreSQL 19 se ověří dřív, než 1. 1. 2027 začne ostrý příjem a uchovávání skutečných dat z měřidel. Tento termín je zahájení příjmu, ne dokončení informačního systému ani veřejného portálu.
+
+R33 nemění znění rozhodnutí 1–32 ani revizí R1–R32. Rozhodnutí 1 dál zaznamenává dřívější volbu PostgreSQL 18.x. Databáze verze 18 v projektu nevznikla, takže se nemigrují existující data. Schéma se kvůli změně verze nemění: PostgreSQL 19.0 nezavádí globální indexy a odložený constraint trigger zůstává.
+
+pgBackRest 2.60.1 vyšel 16. 11. 2026 a v poznámkách uvádí podporu PostgreSQL 19rc2. Proti zdrojům PostgreSQL 19.0 z 19. 11. 2026 se shoduje `PG_CONTROL_VERSION` 1905, `XLOG_PAGE_MAGIC` 0xD122 a rozložení `ControlFileData`, včetně `slru_pages_per_segment` a `data_checksum_version_init`. Konstanta katalogu vložená do pgBackRest je 202605131, vydání 19.0 má 202610061. Běžící nástroj čte `catalog_version_no` z `pg_control`. Záloha a obnova touto dvojicí se ještě nespustily.
 
 ## Otevřené body
 

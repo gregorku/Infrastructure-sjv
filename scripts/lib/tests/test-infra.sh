@@ -42,6 +42,10 @@ test_infra_repository() {
         grep -qx 'CROWDSEC_IMAGE=docker.io/crowdsecurity/crowdsec:v1.8.2@sha256:65b74942f7e7ed5c60fde4ac15fc4ba715904c398c8b16dd451f4907d90347d4' "${REPO_ROOT}/.env.example"
     t_check "the bouncer plugin version and catalog hash are pinned" \
         bash -c 'grep -qx "CROWDSEC_BOUNCER_PLUGIN=v1.8.1" "$1" && grep -qx "CROWDSEC_BOUNCER_PLUGIN_HASH=1c63fab00b5c777fc02dc657ce24557c1e7f8548af4fd13fc4bfd8f0aa91f12d" "$1"' _ "${REPO_ROOT}/.env.example"
+    t_check "PostgreSQL 19.0 is pinned by tag and index digest" \
+        grep -qx 'POSTGRES_IMAGE=docker.io/library/postgres:19.0@sha256:bb6e70add742cd868fb62cb3b2f67d1dd2bdd2b65a521e778420748753687c60' "${REPO_ROOT}/.env.example"
+    t_check "pgBackRest is pinned to 2.60.1" \
+        grep -qx 'PGBACKREST_VERSION=2.60.1' "${REPO_ROOT}/.env.example"
     t_check "CrowdSec healthcheck authenticates to LAPI" \
         grep -q 'cscli lapi status' "${REPO_ROOT}/compose/20-crowdsec.yml"
     t_check "Traefik drops capabilities and keeps only bind" \
@@ -417,6 +421,165 @@ test_infra_log_rotation() {
     mv "${logs}/access.log.real" "${live}"
 }
 
+# PostgreSQL 19 copies the member role's INHERIT attribute when GRANT omits it.
+# SET defaults to true. Prints: member_role granted_role inherit_option set_option.
+# Returns 0 only when the three backup memberships all have inherit_option true.
+pgbackrest_membership_report() {
+    local file="$1" line inherit_default="true" inherit_option set_option="true" roles role seen=0 bad=0
+    line="$(grep -E '^CREATE ROLE pgbackrest[[:space:]]' "${file}" || true)"
+    [[ -n "${line}" ]] || return 1
+    [[ "${line}" == *"NOINHERIT"* ]] && inherit_default="false"
+    line="$(grep -E '^GRANT[[:space:]].*[[:space:]]TO[[:space:]]pgbackrest' "${file}" | grep -F 'pg_checkpoint' || true)"
+    [[ -n "${line}" ]] || return 1
+    if [[ "${line}" == *"INHERIT FALSE"* ]]; then
+        inherit_option="false"
+    elif [[ "${line}" == *"INHERIT TRUE"* || "${line}" == *"INHERIT OPTION"* ]]; then
+        inherit_option="true"
+    else
+        inherit_option="${inherit_default}"
+    fi
+    [[ "${line}" == *"SET FALSE"* ]] && set_option="false"
+    roles="${line#GRANT }"
+    roles="${roles%% TO pgbackrest*}"
+    local IFS=','
+    local -a parts=()
+    read -ra parts <<< "${roles}"
+    for role in "${parts[@]}"; do
+        role="${role#"${role%%[![:space:]]*}"}"
+        role="${role%"${role##*[![:space:]]}"}"
+        [[ -n "${role}" ]] || continue
+        printf '%s %s %s %s\n' pgbackrest "${role}" "${inherit_option}" "${set_option}"
+        seen=$((seen + 1))
+        case "${role}" in
+            pg_checkpoint|pg_read_all_settings|pg_read_all_stats) ;;
+            *) bad=1 ;;
+        esac
+        [[ "${inherit_option}" == "true" ]] || bad=1
+    done
+    [[ "${seen}" -eq 3 && "${bad}" -eq 0 ]]
+}
+
+# Prints the four backup EXECUTE grants, one normalized line each.
+# Returns 0 only when the signatures match PostgreSQL 19.0 exactly.
+pgbackrest_execute_grants() {
+    local file="$1"
+    awk '
+        /^GRANT EXECUTE ON FUNCTION / {
+            buffer = $0
+            if ($0 ~ /;[[:space:]]*$/) {
+                print buffer
+                buffer = ""
+                next
+            }
+            collecting = 1
+            next
+        }
+        collecting {
+            sub(/^[[:space:]]+/, "")
+            buffer = buffer " " $0
+            if ($0 ~ /;[[:space:]]*$/) {
+                print buffer
+                buffer = ""
+                collecting = 0
+            }
+        }
+    ' "${file}"
+}
+
+test_postgresql_service() {
+    print_section "PostgreSQL service"
+    local compose="${REPO_ROOT}/compose/40-postgresql.yml"
+    local dockerfile="${REPO_ROOT}/postgresql/Dockerfile"
+    local roles="${REPO_ROOT}/postgresql/docker-entrypoint-initdb.d/20-roles.sql"
+    local conf="${REPO_ROOT}/postgresql/pgbackrest.conf"
+    t_check "compose includes the postgresql service" \
+        grep -q 'compose/40-postgresql.yml' "${REPO_ROOT}/compose.yml"
+    t_check "the service is sjv-postgresql" grep -q '^  sjv-postgresql:' "${compose}"
+    t_check "the build receives the pinned PostgreSQL image" \
+        grep -q 'POSTGRES_IMAGE: ${POSTGRES_IMAGE:?POSTGRES_IMAGE}' "${compose}"
+    t_check "the build receives the pgBackRest version" \
+        grep -q 'PGBACKREST_VERSION: ${PGBACKREST_VERSION:?PGBACKREST_VERSION}' "${compose}"
+    t_check "the Dockerfile has no floating PostgreSQL tag" \
+        bash -c '! grep -Eq "postgres:(19|latest)([^0-9.]|$)" "$1"' _ "${dockerfile}"
+    t_check "the Dockerfile requires the pgBackRest 2.60.1 tarball checksum" \
+        grep -q 'PGBACKREST_SHA256=c6d8190fee982f0febdd2ca5ca112f83b4b0905ef9949e9cf64a46a6cc138026' "${dockerfile}"
+    t_check "the Dockerfile keeps the official entrypoint" \
+        grep -qxF 'ENTRYPOINT ["docker-entrypoint.sh"]' "${dockerfile}"
+    t_check "pgBackRest 2.60.1 disables automatic expire" \
+        grep -qx 'expire-auto=n' "${conf}"
+    t_check "pgBackRest reads the PostgreSQL 19 data directory" \
+        grep -qx 'pg1-path=/var/lib/postgresql/19/docker' "${conf}"
+    t_check "the healthcheck is pg_isready" grep -q 'pg_isready' "${compose}"
+    t_check "the database port is not published" \
+        bash -c '! grep -Eq "^[[:space:]]*ports:" "$1"' _ "${compose}"
+    t_check "PostgreSQL joins only the internal network" \
+        bash -c 'grep -qx "      - sjv-internal" "$1" && ! grep -Eq "sjv-proxy|sjv-mqtt|sjv-egress" "$1"' _ "${compose}"
+    t_check "PostgreSQL data uses the project data directory" \
+        grep -q '${DATA_DIR}/postgresql:/var/lib/postgresql$' "${compose}"
+    t_check "pgBackRest repository uses the local backup directory" \
+        grep -q '${BACKUP_LOCAL_DIR}/pgbackrest:/backup/pgbackrest$' "${compose}"
+    t_check "initdb enables data checksums" \
+        grep -q 'POSTGRES_INITDB_ARGS: "--data-checksums"' "${compose}"
+    t_check "archive mode and timeout are set on the server command" \
+        bash -c 'grep -q "archive_mode=on" "$1" && grep -q "archive_timeout=60" "$1" && grep -q "archive_command=pgbackrest --stanza=sjv archive-push %p" "$1"' _ "${compose}"
+    t_check "role passwords are variables and are not written into the image" \
+        bash -c '! grep -E "PASSWORD[=:].*set_|PASSWORD[=:].{8,}" "$1" "$2" | grep -v "PG_.*PASSWORD" | grep -v "POSTGRES_SJV_" >/dev/null' _ "${compose}" "${roles}"
+    t_check "role creation reads passwords with getenv" grep -q '\\getenv' "${roles}"
+    t_check "application roles are not superusers" \
+        bash -c 'grep -q "sjv_owner LOGIN PASSWORD %L NOSUPERUSER" "$1" && grep -q "sjv_api LOGIN PASSWORD %L NOSUPERUSER" "$1" && grep -q "sjv_collector LOGIN PASSWORD %L NOSUPERUSER" "$1" && grep -q "sjv_worker LOGIN PASSWORD %L NOSUPERUSER" "$1" && grep -q "sjv_maintenance LOGIN PASSWORD %L NOSUPERUSER" "$1" && grep -q "sjv_readonly LOGIN PASSWORD %L NOSUPERUSER" "$1" && ! grep -Eq "LOGIN SUPERUSER|ALTER ROLE .* SUPERUSER" "$1"' _ "${roles}"
+    t_check "the backup role has no password and is not a superuser" \
+        grep -qx 'CREATE ROLE pgbackrest LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;' "${roles}"
+    t_check "backup memberships set INHERIT TRUE and keep the role NOINHERIT" \
+        grep -qx 'GRANT pg_checkpoint, pg_read_all_settings, pg_read_all_stats TO pgbackrest WITH INHERIT TRUE;' "${roles}"
+    local membership membership_sql="${REPO_ROOT}/postgresql/checks/pgbackrest-membership.sql"
+    membership="$(pgbackrest_membership_report "${roles}")"
+    t_check "catalog rows show inherited backup memberships" \
+        bash -c '[[ "$1" == "pgbackrest pg_checkpoint true true
+pgbackrest pg_read_all_settings true true
+pgbackrest pg_read_all_stats true true" ]]' _ "${membership}"
+    t_check "the catalog check is not executed during database init" \
+        bash -c '[[ ! -e "$1/docker-entrypoint-initdb.d/pgbackrest-membership.sql" ]]' _ "${REPO_ROOT}/postgresql"
+    t_check "the catalog check reads member, granted role, inherit_option and set_option" \
+        bash -c 'grep -q "member_role.rolname AS member_role" "$1" && grep -q "granted_role.rolname AS granted_role" "$1" && grep -q "m.inherit_option" "$1" && grep -q "m.set_option" "$1" && grep -q "member_role.oid = m.member" "$1" && grep -q "granted_role.oid = m.roleid" "$1" && grep -q "AND m.inherit_option" "$1"' _ "${membership_sql}"
+    local old_grant="${T_RUN_DIR}/pgbackrest-grant-without-inherit.sql"
+    cat > "${old_grant}" <<'EOF'
+CREATE ROLE pgbackrest LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+GRANT pg_checkpoint, pg_read_all_settings, pg_read_all_stats TO pgbackrest;
+EOF
+    if pgbackrest_membership_report "${old_grant}" >/dev/null; then
+        t_fail "a grant without INHERIT TRUE is rejected for the NOINHERIT backup role"
+    else
+        t_pass "a grant without INHERIT TRUE is rejected for the NOINHERIT backup role"
+    fi
+    rm -f "${old_grant}"
+    local execute_sql="${REPO_ROOT}/postgresql/checks/pgbackrest-execute.sql"
+    local execute_grants expected_grants
+    expected_grants=$'GRANT EXECUTE ON FUNCTION pg_catalog.pg_backup_start(text, boolean) TO pgbackrest;\nGRANT EXECUTE ON FUNCTION pg_catalog.pg_backup_stop(boolean) TO pgbackrest;\nGRANT EXECUTE ON FUNCTION pg_catalog.pg_create_restore_point(text) TO pgbackrest;\nGRANT EXECUTE ON FUNCTION pg_catalog.pg_switch_wal() TO pgbackrest;'
+    execute_grants="$(pgbackrest_execute_grants "${roles}")"
+    t_check "backup functions have the PostgreSQL 19 EXECUTE signatures" \
+        bash -c '[[ "$1" == "$2" ]]' _ "${execute_grants}" "${expected_grants}"
+    t_check "EXECUTE is not granted on every catalog function" \
+        bash -c '! grep -Eq "GRANT EXECUTE ON ALL FUNCTIONS" "$1"' _ "${roles}"
+    t_check "the function privilege check is not an init script" \
+        bash -c '[[ ! -e "$1/docker-entrypoint-initdb.d/pgbackrest-execute.sql" ]]' _ "${REPO_ROOT}/postgresql"
+    t_check "the function privilege check names all four backup functions" \
+        bash -c 'grep -Fq "pg_catalog.pg_backup_start(text,boolean)" "$1" && grep -Fq "pg_catalog.pg_backup_stop(boolean)" "$1" && grep -Fq "pg_catalog.pg_create_restore_point(text)" "$1" && grep -Fq "pg_catalog.pg_switch_wal()" "$1"' _ "${execute_sql}"
+    local wrong_grant="${T_RUN_DIR}/pgbackrest-wrong-execute.sql"
+    cat > "${wrong_grant}" <<'EOF'
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_backup_start(text) TO pgbackrest;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_backup_stop(boolean) TO pgbackrest;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_create_restore_point(text) TO pgbackrest;
+EOF
+    if [[ "$(pgbackrest_execute_grants "${wrong_grant}")" == "${expected_grants}" ]]; then
+        t_fail "a changed or missing backup function signature is rejected"
+    else
+        t_pass "a changed or missing backup function signature is rejected"
+    fi
+    rm -f "${wrong_grant}"
+    t_check "the bootstrap superuser is the image user, not a second superuser" \
+        bash -c 'grep -q "POSTGRES_USER: \${PG_BOOTSTRAP_USER:?PG_BOOTSTRAP_USER}" "$1" && ! grep -q "CREATE ROLE sjv_bootstrap" "$2"' _ "${compose}" "${roles}"
+}
+
 run_infra_tests() {
     print_header "Traefik and CrowdSec"
     test_infra_repository
@@ -425,4 +588,5 @@ run_infra_tests() {
     test_infra_render
     test_infra_key_and_compose
     test_infra_log_rotation
+    test_postgresql_service
 }

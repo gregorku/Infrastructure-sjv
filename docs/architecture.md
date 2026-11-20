@@ -58,7 +58,7 @@ Adaptér jen převede bajty na interní kontrakt z [data-ingestion.md](data-inge
 | --- | --- | --- | --- | --- |
 | `sjv-traefik` | `traefik` `v3.7.17` (tag i digest) | `sjv-proxy` (pevná IP), `sjv-internal` | `80`, `443`, `8443` (jen `10.10.10.20`) | `traefik healthcheck --ping` |
 | `sjv-crowdsec` | `crowdsecurity/crowdsec` `v1.8.2` (tag i digest) | `sjv-internal`, `sjv-egress` | žádný | `cscli lapi status` na portu 8080 |
-| `sjv-postgresql` | lokální build `postgres:18.x` + pgBackRest | `sjv-internal` | žádný | `pg_isready` |
+| `sjv-postgresql` | lokální build z `postgres:19.0` a pgBackRest 2.60.1 | `sjv-internal` | žádný | `pg_isready` |
 | `sjv-mosquitto` | `eclipse-mosquitto` 2.x, přesný tag | `sjv-internal`, `sjv-mqtt` | `8883` | odběr `$SYS` přes interní listener s účtem healthcheck |
 | `sjv-backend` | lokální build `app/backend` | `sjv-proxy`, `sjv-internal` | žádný | `GET /readyz` |
 | `sjv-collector` | lokální build `app/collector` | `sjv-internal` | žádný | soubor heartbeat procesu |
@@ -84,7 +84,7 @@ Rozdíly proti referenci:
 
 ### Implementace B1b
 
-V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefik.yml`, `compose/15-traefik-admin-port.yml`, `compose/20-crowdsec.yml`, `compose/30-backup.yml`, `backup/`, `configs/traefik/dynamic/` a `configs/crowdsec/`. Služby aplikace, PostgreSQL a Mosquitto v Compose ještě nejsou. `sjv-backup` vzdálenou kopii plánuje, lokální pgBackRest a `pg_dump` ještě ne.
+V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefik.yml`, `compose/15-traefik-admin-port.yml`, `compose/20-crowdsec.yml`, `compose/30-backup.yml`, `compose/40-postgresql.yml`, `backup/`, `postgresql/`, `configs/traefik/dynamic/` a `configs/crowdsec/`. Služby aplikace a Mosquitto v Compose ještě nejsou. `sjv-postgresql` je v Compose a tyto testy ho nespouštějí. `deploy.sh` ho také nespouští. `sjv-backup` vzdálenou kopii plánuje. Izolovaný test spustil `stanza-create`, `pgbackrest check`, plnou zálohu a obnovu do samostatného clusteru. `pg_dump`, `backup.sh` a `restore.sh` v repozitáři nejsou.
 
 - Sítě jsou `external`. Zakládá je `deploy.sh` a označí je `com.infrastructure-sjv.managed=true`. Cizí síť se stejným jménem skript nemění ani nemaže. `sjv-internal` vzniká s `--internal`.
 - Pevná adresa Traefiku na `sjv-proxy` je první adresa za branou této sítě. Počítá ji `deploy.sh` a předá ji Compose jako `TRAEFIK_PROXY_ADDRESS`. V `.env` tato hodnota není.
@@ -269,8 +269,8 @@ Cesty výše jsou kontrakt vlastního ESP a ručního importu přes administraci
 
 - Žádný tag `latest`. Externí image mají v `.env.example` přesný tag a digest a `check-env.sh` odmítne neúplný tag.
 - Lokální image se staví při `deploy.sh`. Base image je zafixovaná přes tag a digest, závislosti přes `uv.lock` a `package-lock.json`. Tag lokálního image je `infrastructure-sjv/<služba>:<git-commit>`. Commit se zapíše do `state/deployed-commit`.
-- Výchozí verze podle existujících stacků: PostgreSQL `18.6`, Mosquitto `2.1.2`, wmbusmeters `release-3.0.0`. Traefik, CrowdSec a bouncer plugin jsou zafixované v `.env.example`: Traefik `v3.7.17`, CrowdSec `v1.8.2`, plugin `v1.8.1`. Řada 3.6 už nemá bezpečnostní podporu. Tag `v3.7.18` k 9. 11. 2026 nebyl vydaný.
-- Verze Pythonu, Node, pgBackRest a rest-server se ověří a zafixují ve fázi 1. Podmínka: pgBackRest s podporou PostgreSQL 18. Restic je zafixovaný na `0.19.1`.
+- PostgreSQL je `19.0`. Base image `docker.io/library/postgres:19.0` má v `.env.example` tag i index digest (`POSTGRES_IMAGE`). pgBackRest je `2.60.1` (`PGBACKREST_VERSION`). Restic je zafixovaný na `0.19.1`. Mosquitto `2.1.2` a wmbusmeters `release-3.0.0` zůstávají výchozí verze podle existujících stacků a stejným způsobem připnuté nejsou. Traefik, CrowdSec a bouncer plugin jsou zafixované v `.env.example`: Traefik `v3.7.17`, CrowdSec `v1.8.2`, plugin `v1.8.1`. Řada 3.6 už nemá bezpečnostní podporu. Tag `v3.7.18` k 9. 11. 2026 nebyl vydaný.
+- Verze Pythonu, Node a rest-server se ověří a zafixují ve fázi 1. pgBackRest 2.60.1 má shodný formát `pg_control` a WAL s PostgreSQL 19.0. Izolovaný test touto dvojicí dokončil plnou zálohu a obnovu aktuálního clusteru. PITR na zvolený čas, vzdálená Restic kopie a produkční `restore.sh` ověřené nejsou. Postup je v [operations.md](operations.md#záloha-a-obnova-postgresql).
 
 ## Skripty
 

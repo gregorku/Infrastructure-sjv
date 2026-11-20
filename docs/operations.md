@@ -1,6 +1,6 @@
 # Provoz: instalace a konfigurace
 
-Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Traefiku, postup pro CrowdSec, rotaci souborových logů Traefiku a přípravu vzdálené zálohy. Databáze, MQTT, aplikace, pgBackRest a `pg_dump` zatím nejsou. Návrh systemd timeru pro logy je v repozitáři a není nainstalovaný.
+Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Traefiku, postup pro CrowdSec, rotaci souborových logů Traefiku, přípravu vzdálené zálohy, službu PostgreSQL 19.0 a postup obnovy ověřený izolovaným testem. MQTT, aplikace, `pg_dump`, `backup.sh` a `restore.sh` zatím nejsou. `deploy.sh` PostgreSQL nespouští. Návrh systemd timeru pro logy je v repozitáři a není nainstalovaný.
 
 ## Předpoklady
 
@@ -23,12 +23,14 @@ Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Tr
 | `/docker-data/infrastructure-sjv/traefik/users` | 700 | `dashboard.htpasswd`, práva 600 |
 | `/docker-data/infrastructure-sjv/traefik/crowdsec` | 700 | `BOUNCER_KEY_sjv-traefik`, práva 600, mimo Git i `.env` |
 | `/docker-data/infrastructure-sjv/crowdsec/data` | 700 | data CrowdSec |
+| `/docker-data/infrastructure-sjv/postgresql` | 2770, vlastník root, skupina 999 při instalaci rootem | mount `/var/lib/postgresql`. Data jsou v `19/docker` podle oficiálního image |
 | `/docker-data/backups/infrastructure-sjv` | 700 | lokální zálohy: `pgbackrest/`, `dumps/`, `files/` |
+| `/docker-data/backups/infrastructure-sjv/pgbackrest` | 2770, vlastník root, skupina 999 při instalaci rootem | repozitář pgBackRest. Rodičovský adresář záloh zůstává 700 |
 | `/docker-data/infrastructure-sjv/backup-locks` | 700 | zámky `sjv-backup` a budoucí lokální zálohy |
 | `/docker-data/infrastructure-sjv/secrets/restic-key-password` | 600 | heslo klíče restic, až ho správce vytvoří |
 | `/docker-data/infrastructure-sjv/secrets/restic-rest-server.crt` | 644 | TLS certifikát domácího `rest-server`, až ho správce uloží |
 
-`init.sh`, `update-env.sh` i `check-env.sh` nejdřív ověří, že `/docker-data` je mountpoint. Když není, skončí chybou a nezaloží adresář ani `.env`. `init.sh` adresáře vytvoří, příliš otevřená práva zúží a odmítne symlinky nebo adresáře jiného vlastníka. Adresář zapisovatelný pro skupinu nebo ostatní `update-env.sh` odmítne a práva mu nemění. Nic nemaže.
+`init.sh`, `update-env.sh` i `check-env.sh` nejdřív ověří, že `/docker-data` je mountpoint. Když není, skončí chybou a nezaloží adresář ani `.env`. `init.sh` adresáře vytvoří, příliš otevřená práva zúží a odmítne symlinky nebo adresáře jiného vlastníka. Adresář, ve kterém leží `.env`, `update-env.sh` odmítne, když je zapisovatelný pro skupinu nebo ostatní, a práva mu nemění. Datové adresáře PostgreSQL a pgBackRest mají záměrně mód 2770. Nic nemaže.
 
 ## Postup první instalace
 
@@ -52,6 +54,8 @@ Opakované spuštění je bezpečné. Pokud se nic nezměnilo, soubory se nepře
 | `ADMIN_IP_ALLOWLIST` | před nasazením | privátní CIDR oddělené mezerou, nikdy `0.0.0.0/0` |
 | `TRAEFIK_ACME_EMAIL` | před `TRAEFIK_TLS_MODE=letsencrypt` | v režimu `local` může zůstat placeholder |
 | `TRAEFIK_IMAGE`, `CROWDSEC_IMAGE` | v šabloně | tag a index digest, kategorie `framework` |
+| `POSTGRES_IMAGE` | v šabloně | `postgres:19.0` a index digest, kategorie `framework`. Tag `19` ani `latest` validace nepřijme |
+| `PGBACKREST_VERSION` | v šabloně | přesně `2.60.1`, kategorie `framework`. Samostatný image pgBackRest nevzniká |
 | `CROWDSEC_BOUNCER_PLUGIN` | v šabloně | verze pluginu `v1.8.1`, ne API klíč |
 | `CROWDSEC_BOUNCER_PLUGIN_HASH` | v šabloně | sha256 zipu z `plugins.traefik.io`, ne API klíč |
 | `PROXY_PROTOCOL_TRUSTED_IPS` | před `PROXY_PROTOCOL_MODE=haproxy` | `10.10.10.1/32` je očekávaná zdrojová adresa HAProxy. Před spolehnutím se na ni se potvrdí skutečným provozem z kontejneru |
@@ -103,7 +107,7 @@ Limit `json-file` v Compose omezuje jen stdout kontejneru. Soubory `traefik.log`
 
 Služba `sjv-backup` je v Compose. Repozitář se z tohoto repozitáře nezakládá (`restic init` se nespouští) a nasazení na VPS je samostatný krok.
 
-1. `sudo ./scripts/init.sh` založí `pgbackrest/`, `pgbackrest/archive/`, `dumps/`, `files/` a `backup-locks/`.
+1. `sudo ./scripts/init.sh` založí `postgresql/`, `pgbackrest/`, `pgbackrest/archive/`, `dumps/`, `files/` a `backup-locks/`. Adresáře, do kterých zapisuje uživatel image PostgreSQL, mají mód 2770 a při běhu `init.sh` jako root skupinu 999.
 2. Do runtime `.env` zapiš obě proměnné. Heslo v URL být nesmí.
 
 ```bash
@@ -127,9 +131,36 @@ install -m 644 /cesta/k/rest-server.crt /docker-data/infrastructure-sjv/secrets/
 6. Stav: `docker logs sjv-backup` a soubory `state/sjv-backup-daily.json` a `state/sjv-backup-wal.json`. Healthcheck je jen živost plánovače.
 7. Při `failed` se záloha za úspěšnou nepovažuje. Plánovač pokračuje. Další `wal` je až po 300 s. Přeskočení kvůli obsazenému `restic-job.lock` nebo `repo.lock` má vlastní stav a další pokus po 60 s (`SJV_BACKUP_WAL_RETRY_SECONDS`). Čas posledního pokusu je `state/sjv-backup-wal.epoch`, čas dalšího pokusu `state/sjv-backup-wal.next`. Restart se řídí tím druhým a nespouští sérii pokusů. `wal` na zámky nečeká. Dlouhá denní úloha může interval `wal` překročit; druhý Restic se nespouští. `forget` a `prune` se na VPS nespouštějí.
 
+## Záloha a obnova PostgreSQL
+
+Běžná záloha a obnova do samostatného clusteru jsou různé operace. První start obnoveného clusteru je další krok po příkazu `pgbackrest restore`. Návrat do provozu se rozhoduje až po něm.
+
+### Běžná záloha
+
+Izolovaný test 20. 11. 2026 na PostgreSQL 19.0 a pgBackRest 2.60.1 provedl v pořadí `pgbackrest --stanza=sjv stanza-create`, `pgbackrest --stanza=sjv check` a `pgbackrest --stanza=sjv --type=full backup`. Repozitář byl zapisovatelný mount `/backup/pgbackrest`, `archive_mode=on` a `archive_command` posílal WAL přes `pgbackrest --stanza=sjv archive-push %p`. Plná záloha `20261120-212608F` měla 30,3 MB a 1 273 souborů. Archiv obsahoval WAL `000000010000000000000001` až `000000010000000000000005`. `expire-auto` zůstalo vypnuté a `pgbackrest expire` se nespustil.
+
+Tento test neběžel na `/docker-data`, nespustil `backup.sh` a nevytvořil rozdílovou zálohu ani vzdálenou Restic kopii. Produkční adresáře pro stejné cesty v kontejneru jsou `/docker-data/infrastructure-sjv/postgresql` a `/docker-data/backups/infrastructure-sjv/pgbackrest`.
+
+### Obnova do samostatného clusteru
+
+Postup ověřený izolovaným testem. Obnova zapisovala do vlastního prázdného datového adresáře. Původní cluster a původní stanza zůstaly nedotčené.
+
+1. Původní databázová služba se před návratem obnoveného clusteru do jejího datového adresáře zastaví. Izolovaný test ji nezastavoval, protože obnovoval do jiného adresáře a jiného kontejneru. Příkaz produkčního zastavení ani přepnutí adresářů ověřený není.
+2. Připraví se samostatný prázdný datový adresář. V testu to bylo `/tmp/sjv-pg-itest/restore`, v kontejneru mount `/var/lib/postgresql`. Původní PGDATA se znovu nepoužije.
+3. Původní repozitář pgBackRest musí být dostupný na `/backup/pgbackrest`. V testu to byl `/tmp/sjv-pg-itest/repo`.
+4. Při `pgbackrest restore` i při prvním startu obnoveného clusteru se repozitář připojí jen pro čtení. Zkoušený postup jiný režim nevyžadoval.
+5. Obnovu provede `pgbackrest --stanza=sjv --pg1-path=/var/lib/postgresql/19/docker restore`. V testu příkaz skončil `restore command end: completed successfully`, obnovil sadu `20261120-212608F` a zapsal `postgresql.auto.conf`.
+6. Dokončení příkazu `pgbackrest restore` ještě neznamená, že obnovený PostgreSQL cluster nastartuje. První pokus spustil cluster bez repozitáře. Recovery potřebovalo WAL, `archive-get` nenašel `/backup/pgbackrest/archive/sjv/archive.info` a server skončil na `could not locate required checkpoint record`. Repozitář proto zůstane dostupný i během recovery a prvního startu.
+7. Obnovený cluster nesmí zapisovat WAL do původní stanza. V testu tomu bránil mount repozitáře `ro`. Seznam souborů archivu se během obnovy a startu nezměnil.
+8. Obnovený cluster se spouští s `postgres -c archive_mode=off`. V testu `current_setting('archive_mode')` vrátilo `off`.
+9. Po startu se ověří, že recovery doběhlo, `pg_isready` databázi `sjv` přijímá, verze je PostgreSQL 19.0 a data sedí se zdrojem. V testu byly obnovené řádky `1|alpha`, `2|beta`, `3|gamma` a jejich `md5` `998376a4d170c152ed7f47c9168b3281` stejný jako ve zdroji.
+10. Teprve po těchto kontrolách se rozhoduje, zda obnovený cluster přejde do provozu. Přepnutí na původní datový adresář, zapnutí `archive_mode=on` a další archivace do původní stanza ověřené nejsou.
+
+PITR na zvolený čas, `pgbackrest verify`, obnova ze vzdáleného Restic snapshotu a skript `restore.sh` součástí tohoto testu nebyly.
+
 ## Mimo rozsah B1b
 
-- PostgreSQL, pgBackRest, `pg_dump`, Mosquitto, FastAPI, React, wmbusmeters a firmware.
+- Produkční spuštění `sjv-postgresql` přes `deploy.sh`, `backup.sh`, `restore.sh`, `pg_dump`, Mosquitto, FastAPI, React, wmbusmeters a firmware. `deploy.sh` dál startuje jen Traefik, CrowdSec a `sjv-backup`.
 - `restic init`, založení produkčního repozitáře a samotné nasazení na VPS.
 - Instalace systemd jednotek. Návrh timeru pro access log v repozitáři není nasazení.
 - Jakékoli změny NixOS, Incus, HAProxy, MikroTik, DNS nebo WireGuard (viz [external-changes.md](external-changes.md)).

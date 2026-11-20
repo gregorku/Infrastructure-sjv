@@ -295,6 +295,12 @@ test_env_validate() {
         TRAEFIK_IMAGE=docker.io/library/traefik:v3.7.17
     expect_invalid "a CrowdSec image without a digest" "CROWDSEC_IMAGE must be docker.io/crowdsecurity/crowdsec" \
         CROWDSEC_IMAGE=docker.io/crowdsecurity/crowdsec:v1.8.2
+    expect_invalid "an unpinned PostgreSQL image" "POSTGRES_IMAGE must be docker.io/library/postgres:19.0" \
+        POSTGRES_IMAGE=docker.io/library/postgres:19.0
+    expect_invalid "the moving PostgreSQL 19 tag" "POSTGRES_IMAGE must be docker.io/library/postgres:19.0" \
+        POSTGRES_IMAGE=docker.io/library/postgres:19@sha256:bb6e70add742cd868fb62cb3b2f67d1dd2bdd2b65a521e778420748753687c60
+    expect_invalid "a pgBackRest version other than 2.60.1" "PGBACKREST_VERSION must be 2.60.1" \
+        PGBACKREST_VERSION=2.60.0
     expect_invalid "a plugin hash that is not hex" "CROWDSEC_BOUNCER_PLUGIN_HASH must be 64 lowercase hex digits" \
         CROWDSEC_BOUNCER_PLUGIN_HASH=not-a-hash
     expect_invalid "a bouncer key stored in .env" "Bouncer keys are not stored" \

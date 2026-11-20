@@ -1,0 +1,71 @@
+###############################################################################
+#
+# PostgreSQL 19.0 and pgBackRest 2.60.1. The base image is POSTGRES_IMAGE
+# (tag 19.0 and its index digest). The service joins only sjv-internal and
+# publishes no port. Passwords are environment variables consumed by the
+# official entrypoint; role creation reads them with \getenv. The entrypoint
+# unsets every POSTGRES_* variable before the server process starts.
+# Official PGDATA for this image line is /var/lib/postgresql/19/docker.
+#
+###############################################################################
+
+services:
+  sjv-postgresql:
+    build:
+      context: ../postgresql
+      dockerfile: Dockerfile
+      args:
+        POSTGRES_IMAGE: ${POSTGRES_IMAGE:?POSTGRES_IMAGE}
+        PGBACKREST_VERSION: ${PGBACKREST_VERSION:?PGBACKREST_VERSION}
+    image: infrastructure-sjv/sjv-postgresql:19.0
+    entrypoint: ["docker-entrypoint.sh"]
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=pgbackrest --stanza=sjv archive-push %p
+      - -c
+      - archive_timeout=60
+    container_name: sjv-postgresql
+    hostname: sjv-postgresql
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:uid=999,gid=999,mode=1777
+      - /run:uid=999,gid=999,mode=0755
+    environment:
+      TZ: ${TZ:?TZ}
+      PG_DB: ${PG_DB:?PG_DB}
+      PG_BOOTSTRAP_USER: ${PG_BOOTSTRAP_USER:?PG_BOOTSTRAP_USER}
+      POSTGRES_USER: ${PG_BOOTSTRAP_USER:?PG_BOOTSTRAP_USER}
+      POSTGRES_PASSWORD: ${PG_BOOTSTRAP_PASSWORD:?PG_BOOTSTRAP_PASSWORD}
+      POSTGRES_DB: ${PG_DB:?PG_DB}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      POSTGRES_SJV_OWNER_PASSWORD: ${PG_OWNER_PASSWORD:?PG_OWNER_PASSWORD}
+      POSTGRES_SJV_API_PASSWORD: ${PG_API_PASSWORD:?PG_API_PASSWORD}
+      POSTGRES_SJV_COLLECTOR_PASSWORD: ${PG_COLLECTOR_PASSWORD:?PG_COLLECTOR_PASSWORD}
+      POSTGRES_SJV_WORKER_PASSWORD: ${PG_WORKER_PASSWORD:?PG_WORKER_PASSWORD}
+      POSTGRES_SJV_MAINTENANCE_PASSWORD: ${PG_MAINTENANCE_PASSWORD:?PG_MAINTENANCE_PASSWORD}
+      POSTGRES_SJV_READONLY_PASSWORD: ${PG_READONLY_PASSWORD:?PG_READONLY_PASSWORD}
+    volumes:
+      - ${DATA_DIR}/postgresql:/var/lib/postgresql
+      - ${BACKUP_LOCAL_DIR}/pgbackrest:/backup/pgbackrest
+    networks:
+      - sjv-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d \"$$PG_DB\" -U \"$$PG_BOOTSTRAP_USER\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:?LOG_MAX_SIZE}
+        max-file: ${LOG_MAX_FILES:?LOG_MAX_FILES}

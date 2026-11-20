@@ -32,6 +32,8 @@ declare -gA ENV_POLICY=(
     [CROWDSEC_IMAGE]=framework
     [CROWDSEC_BOUNCER_PLUGIN]=framework
     [CROWDSEC_BOUNCER_PLUGIN_HASH]=framework
+    [POSTGRES_IMAGE]=framework
+    [PGBACKREST_VERSION]=framework
 
     [PG_DB]=framework
     [PG_BOOTSTRAP_USER]=framework

@@ -227,6 +227,12 @@ test_scripts_init() {
     t_check "state directory is private (700)" test "$(stat -c %a "${data}/state")" = 700
     t_check "secrets directory is private (700)" test "$(stat -c %a "${data}/secrets")" = 700
     t_check "backup directory is private (700)" test "$(stat -c %a "${T_BASE}/backups/infrastructure-sjv")" = 700
+    t_check "postgresql mount is group-writable for the image user" \
+        test "$(stat -c %a "${data}/postgresql")" = 2770
+    t_check "pgbackrest repository mount is group-writable for the image user" \
+        test "$(stat -c %a "${T_BASE}/backups/infrastructure-sjv/pgbackrest")" = 2770
+    t_check "postgresql mount stays owned by the init user" \
+        test "$(stat -c %u "${data}/postgresql")" = "${EUID}"
     t_check ".env.example is copied unchanged" cmp -s "${ENV_EXAMPLE_FILE}" "${stack}/.env.example"
     t_check "init.sh does not create .env" test ! -e "${stack}/.env"
 

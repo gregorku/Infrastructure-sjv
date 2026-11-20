@@ -7,7 +7,7 @@
 # Shell files checked by these tests. This file is excluded from the
 # pattern scan because it necessarily contains the forbidden patterns.
 static_shell_files() {
-    find "${REPO_ROOT}/scripts" -type f -name '*.sh' -print | sort
+    find "${REPO_ROOT}/scripts" "${REPO_ROOT}/postgresql" -type f -name '*.sh' -print | sort
 }
 
 # Prints non-comment lines matching an extended regex as file:line: text.

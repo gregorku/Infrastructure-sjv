@@ -1,6 +1,6 @@
 # Databázový návrh
 
-PostgreSQL 18.x, databáze `sjv`, schéma `public`, je centrální a jediný dlouhodobý zdroj pravdy pro data SJV (rozhodnutí 15–30 a R31 v [decisions.md](decisions.md)). Konkrétní model ACRIOS, jeho firmware ani protokol tvar tabulek nemění. ACRIOS je kód partnera a adaptéru, ne předpona tabulek.
+PostgreSQL 19.0, databáze `sjv`, schéma `public`, je centrální a jediný dlouhodobý zdroj pravdy pro data SJV (rozhodnutí 15–30, R31 a R33 v [decisions.md](decisions.md)). Konkrétní model ACRIOS, jeho firmware ani protokol tvar tabulek nemění. ACRIOS je kód partnera a adaptéru, ne předpona tabulek.
 
 - ORM SQLAlchemy 2 s psycopg 3, migrace Alembic.
 - Rozšíření `btree_gist` (exclusion constrainty) a `citext` (e-maily).
@@ -10,7 +10,7 @@ PostgreSQL 18.x, databáze `sjv`, schéma `public`, je centrální a jediný dlo
 
 ### Omezení PostgreSQL
 
-1. Unikátní constraint a primární klíč na partitionované tabulce musí obsahovat všechny sloupce partition klíče. Unikátnost se vynucuje jen uvnitř jedné partition. PostgreSQL 18 nemá globální indexy.
+1. Unikátní constraint a primární klíč na partitionované tabulce musí obsahovat všechny sloupce partition klíče. Unikátnost se vynucuje jen uvnitř jedné partition. PostgreSQL 19 nemá globální indexy.
 2. Partition klíč v unikátním constraintu musí být prostý sloupec, ne výraz.
 3. Exclusion constraint na partitionované tabulce je možný od PostgreSQL 17, ale jen se sloupci partition klíče porovnávanými přes `=`. Působí tedy také jen uvnitř partition.
 4. Cizí klíč na partitionovanou tabulku je možný, ale musí odkazovat na unikátní klíč včetně partition klíče.
@@ -136,7 +136,7 @@ Důvod výměny je `meter_replacement_events.reason`. `reason` původní instala
 
 **Kontrola integrity**
 
-`CHECK` ani cizí klíč neumí porovnat byt, měřidlo a časy dvou odkazovaných řádků, pokud se `apartment_id` a `meter_id` neuloží podruhé. Druhá kopie se nezakládá. Shodu hlídá jeden odložený constraint trigger. PostgreSQL 18 ho umí a nové rozšíření kvůli němu není potřeba. Trigger je odložený na konec transakce, takže vidí všechny její zápisy.
+`CHECK` ani cizí klíč neumí porovnat byt, měřidlo a časy dvou odkazovaných řádků, pokud se `apartment_id` a `meter_id` neuloží podruhé. Druhá kopie se nezakládá. Shodu hlídá jeden odložený constraint trigger. PostgreSQL 19 ho umí a nové rozšíření kvůli němu není potřeba. Trigger je odložený na konec transakce, takže vidí všechny její zápisy.
 
 Trigger integrity je na dvou tabulkách:
 
@@ -742,7 +742,7 @@ Před fází 4 se dosadí skutečné hodnoty. Kdyby trvalé uchování všech od
 | `sjv_readonly` | jen čtení, pro `restore-test.sh` a `backup-verify.sh` |
 | `pgbackrest` | lokální přístup pro zálohy |
 
-Role se zakládají jako v referenci: heslo jde přes `\getenv` a nikdy není v argumentu procesu. Row-Level Security je případná pozdější druhá vrstva.
+Role se zakládají jako v referenci: heslo jde přes `\getenv` a nikdy není v argumentu procesu. Row-Level Security je případná pozdější druhá vrstva. Role `pgbackrest` zůstává `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`. Členství v `pg_checkpoint`, `pg_read_all_settings` a `pg_read_all_stats` má `INHERIT TRUE`, protože PostgreSQL 19 jinak tato členství nezdědí. Členství v `pg_checkpoint` není totéž co právo spouštět zálohovací funkce. V PostgreSQL 19.0 mají `pg_backup_start(text, boolean)`, `pg_backup_stop(boolean)`, `pg_create_restore_point(text)` a `pg_switch_wal()` právo `EXECUTE` jen pro bootstrap superuser, dokud se neudělí zvlášť roli `pgbackrest`. Bez toho `pgbackrest check` a plná záloha končí chybou `permission denied`, i když je `inherit_option` členství true.
 
 ## Migrace
 
