@@ -52,7 +52,7 @@ Stav: čeká na schválení. Schválení dokumentace neznamená souhlas s implem
 - Hotovo, když:
   - všechny testy projdou,
   - `restore-test.sh` ze vzdáleného zdroje projde,
-  - vzdálené RPO je naměřené do 15 minut.
+  - vzdálené RPO je v běžném provozu naměřené do 15 minut. Dlouhá denní úloha Resticu může interval `wal` překročit: při obsazeném `restic-job.lock` se `wal` přeskočí a další pokus je až po `SJV_BACKUP_WAL_RETRY_SECONDS` (výchozí 60 s). Souběžný Restic se nespouští.
 - **Bez splnění této fáze se do systému nenahrávají skutečná data.**
 
 ### 4. Schéma databáze a migrace
@@ -189,5 +189,5 @@ Jen návrh v [firmware-design.md](firmware-design.md). Implementace vyžaduje sa
 
 - Všechny fáze 1–10 a 13 jsou hotové. Fáze 11 je podmínka fáze 12 pro dané zařízení. Fáze 12 se opakuje pro každého dalšího výrobce a na schéma nesahá.
 - Poslední `restore-test.sh` je úspěšný a ne starší než 31 dní.
-- DR test splnil RTO ≤ 4 h a naměřené RPO ≤ 15 min.
+- DR test splnil RTO ≤ 4 h. Naměřené RPO ≤ 15 min se vztahuje k běžnému provozu. Dlouhá denní úloha Resticu může interval `wal` překročit, protože souběžný Restic se nespouští.
 - Provozní dokumentace popisuje všechny postupy, které skripty provádějí.

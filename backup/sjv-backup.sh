@@ -10,10 +10,14 @@ readonly HEARTBEAT="${SJV_BACKUP_HEARTBEAT:-/run/sjv-backup/heartbeat}"
 readonly PASSWORD_FILE="${RESTIC_PASSWORD_FILE:-/run/secrets/restic-key-password}"
 readonly CACERT="${SJV_BACKUP_CACERT:-/certs/rest-server.crt}"
 readonly RESTIC_BIN="${SJV_BACKUP_RESTIC:-restic}"
+# Success, an empty archive and a Restic error all wait this long.
+# SJV_BACKUP_LOCK_WAIT is not read: waiting on repo.lock used to stall
+# supervise() for the old 600 second default.
 readonly WAL_INTERVAL="${SJV_BACKUP_WAL_SECONDS:-300}"
+# Busy restic-job.lock or repo.lock retries sooner, but not in a tight loop.
+readonly WAL_RETRY="${SJV_BACKUP_WAL_RETRY_SECONDS:-60}"
 readonly TICK_SECONDS="${SJV_BACKUP_TICK_SECONDS:-15}"
 readonly DAILY_AT="${SJV_BACKUP_DAILY_AT:-03:15}"
-readonly LOCK_WAIT="${SJV_BACKUP_LOCK_WAIT:-600}"
 readonly HEALTH_MAX_AGE="${SJV_BACKUP_HEALTH_MAX_AGE:-90}"
 readonly HEARTBEAT_INTERVAL="${SJV_BACKUP_HEARTBEAT_SECONDS:-15}"
 readonly JOB_LOCK="${LOCK_DIR}/restic-job.lock"
@@ -27,11 +31,13 @@ log_msg() {
 }
 
 stop_child() {
-    if [[ "${CHILD}" -ne 0 ]]; then
-        kill -TERM "${CHILD}" 2>/dev/null || true
-        wait "${CHILD}" 2>/dev/null || true
-        CHILD=0
-    fi
+    local pid="${CHILD}"
+    [[ "${pid}" -ne 0 ]] || return 0
+    CHILD=0
+    # The job has its own process group, so this also stops a sleep it
+    # spawned and does not signal the scheduler or the heartbeat group.
+    kill -TERM -"${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
 }
 
 write_heartbeat() {
@@ -86,6 +92,14 @@ write_state() {
     mv -f "${tmp}" "${path}"
 }
 
+write_epoch() {
+    local path="$1" value="$2" tmp
+    tmp="${path}.tmp"
+    mkdir -p "$(dirname "${path}")"
+    printf '%s\n' "${value}" > "${tmp}"
+    mv -f "${tmp}" "${path}"
+}
+
 configured() {
     [[ -n "${RESTIC_REPOSITORY:-}" && -n "${RESTIC_REST_PASSWORD:-}" && -f "${PASSWORD_FILE}" && ! -L "${PASSWORD_FILE}" && -s "${PASSWORD_FILE}" && -f "${CACERT}" && ! -L "${CACERT}" ]]
 }
@@ -126,8 +140,16 @@ release_locks() {
 
 run_restic() {
     local rc=0
-    "${RESTIC_BIN}" "$@" &
+    # Own process group so SIGTERM reaches a sleep inside the command.
+    # Lock fds stay in this shell. A child that inherited them would keep
+    # restic-job.lock and repo.lock after this process had closed them.
+    set -m
+    (
+        exec 7>&- 8>&- 9>&- || true
+        exec "${RESTIC_BIN}" "$@"
+    ) &
     CHILD=$!
+    set +m
     wait "${CHILD}" || rc=$?
     CHILD=0
     return "${rc}"
@@ -169,7 +191,7 @@ backup_run() {
         return 75
     fi
     if [[ "${mode}" == daily ]]; then
-        # Shared local locks are non-blocking. Waiting here would hold the
+        # backup.lock is taken before repo.lock. Waiting would hold the
         # scheduler and delay the WAL job past the recovery-point target.
         exec 7>"${LOCK_DIR}/backup.lock"
         if ! flock -s -n 7; then
@@ -178,23 +200,17 @@ backup_run() {
             release_locks
             return 75
         fi
-        exec 8>"${REPO_LOCK}"
-        if ! flock -s -n 8; then
-            log_msg "${mode} skipped: repository lock was not free"
-            write_state "${mode}" "skipped-repo-lock" 75
-            release_locks
-            return 75
-        fi
-    else
-        # wal does not take backup.lock, so it can run during a local backup.
-        # It still waits for repo.lock so it does not snapshot during expire.
-        exec 8>"${REPO_LOCK}"
-        if ! flock -s -w "${LOCK_WAIT}" 8; then
-            log_msg "${mode} skipped: repository lock was not free"
-            write_state "${mode}" "skipped-repo-lock" 75
-            release_locks
-            return 75
-        fi
+    fi
+    # wal does not take backup.lock, so a local PostgreSQL backup can continue.
+    # repo.lock is shared and non-blocking for both jobs. A timed wait would
+    # keep restic-job.lock and stall supervise(). Expire and wal still cannot
+    # overlap: a busy lock is skipped and released immediately.
+    exec 8>"${REPO_LOCK}"
+    if ! flock -s -n 8; then
+        log_msg "${mode} skipped: repository lock was not free"
+        write_state "${mode}" "skipped-repo-lock" 75
+        release_locks
+        return 75
     fi
     prepare_repository
     # --cacert is a parent flag in Restic 0.19.1, so it precedes the subcommand.
@@ -246,16 +262,77 @@ mark_daily_attempt() {
     printf '%s\n' "$(date +%s)" > "${STATE_DIR}/sjv-backup-daily.attempt"
 }
 
+interval_or_default() {
+    local value="$1" fallback="$2"
+    if [[ "${value}" =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s\n' "${value}"
+    else
+        printf '%s\n' "${fallback}"
+    fi
+}
+
+read_epoch() {
+    local path="$1" value=""
+    [[ -f "${path}" ]] || return 1
+    IFS= read -r value < "${path}" || return 1
+    [[ "${value}" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "${value}"
+}
+
+wal_status() {
+    local path="${STATE_DIR}/sjv-backup-wal.json" line=""
+    [[ -f "${path}" ]] || return 1
+    IFS= read -r line < "${path}" || return 1
+    [[ "${line}" =~ \"status\":\"([a-z0-9-]+)\" ]] || return 1
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# Busy locks retry on the short interval. Every other result, including a
+# Restic failure, waits the normal interval. Failure stays status "failed".
+wal_delay_seconds() {
+    local status="$1" retry interval
+    retry="$(interval_or_default "${WAL_RETRY}" 60)"
+    interval="$(interval_or_default "${WAL_INTERVAL}" 300)"
+    case "${status}" in
+        skipped-locked|skipped-repo-lock)
+            printf '%s\n' "${retry}"
+            ;;
+        *)
+            printf '%s\n' "${interval}"
+            ;;
+    esac
+}
+
 wal_due() {
-    local last now
-    last="${STATE_DIR}/sjv-backup-wal.epoch"
+    local now next last interval
     now="$(date +%s)"
-    [[ -f "${last}" ]] || return 0
-    (( now - $(<"${last}") >= WAL_INTERVAL ))
+    if next="$(read_epoch "${STATE_DIR}/sjv-backup-wal.next")"; then
+        if (( now >= next )); then
+            return 0
+        fi
+        return 1
+    fi
+    # A restart that only has the last attempt must not run again immediately.
+    if last="$(read_epoch "${STATE_DIR}/sjv-backup-wal.epoch")"; then
+        interval="$(interval_or_default "${WAL_INTERVAL}" 300)"
+        if (( now - last >= interval )); then
+            return 0
+        fi
+        return 1
+    fi
+    return 0
 }
 
 mark_wal() {
-    printf '%s\n' "$(date +%s)" > "${STATE_DIR}/sjv-backup-wal.epoch"
+    local now status delay next
+    now="$(date +%s)"
+    status="$(wal_status || true)"
+    delay="$(wal_delay_seconds "${status}")"
+    next="$(( now + delay ))"
+    # The next-attempt file is written first. If the process stops before the
+    # attempt stamp, a restart still waits instead of repeating at once.
+    write_epoch "${STATE_DIR}/sjv-backup-wal.next" "${next}"
+    write_epoch "${STATE_DIR}/sjv-backup-wal.epoch" "${now}"
 }
 
 supervise() {

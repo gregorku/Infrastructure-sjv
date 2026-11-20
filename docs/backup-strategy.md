@@ -6,7 +6,7 @@ Zálohování je kritická část projektu. Projekt nelze označit za dokončen�
 
 | Parametr | Cíl | Jak se ověřuje |
 | --- | --- | --- |
-| RPO | ≤ 15 minut | `backup-status.sh` hlídá stáří posledního archivovaného WAL a posledního vzdáleného snapshotu |
+| RPO | cíl běžného provozu do 15 minut | Alarm, když je vzdálený snapshot `wal` starší než 15 minut. Během dlouhé denní úlohy Resticu to není záruka |
 | RTO | ≤ 4 hodiny | Měřený DR test: úplná obnova na novém VPS bez přístupu k původnímu |
 | Ochrana proti mazání | Kompromitovaný VPS nesmaže existující vzdálenou restic kopii | Append-only `rest-server`, ověřené testem ve fázi 3 |
 | Obnova bez VPS | Ano | Obnovovací sada a domácí server stačí k obnově do nového prostředí |
@@ -20,7 +20,7 @@ Zálohování je kritická část projektu. Projekt nelze označit za dokončen�
   │                         /docker-data/backups/infrastructure-sjv/pgbackrest
   │ pg_dump (denně) ─────────────────────────► …/dumps                 │ kopie 2: lokální zálohy
   │ soubory stacku (.env, dynsec, acme.json, KEK) ► …/files            │ (stejný disk!)
-  └── restic: tag daily (celé repo, 1× denně), tag wal (archive/, 5 min) ┘
+  └── restic: tag daily (celé repo, 1× denně), tag wal (archive/, běžně 5 min) ┘
                               │ WireGuard wg1 → MikroTik doma (DNAT) → LAN
                               ▼
   domaPcServer: rest-server --append-only --private-repos (TLS, htpasswd)
@@ -78,11 +78,15 @@ Adresář má práva `700` a šifruje se až v resticu. Git repozitář se nezá
 | Tag | Kdy | Obsah | Spouští |
 | --- | --- | --- | --- |
 | `daily` | každý den v 03:15 | celé `pgbackrest/`, `dumps/`, `files/` | `sjv-backup`, jen když hned získá sdílený `backup.lock` a `repo.lock`; jinak se přeskočí |
-| `wal` | každých 5 min | jen `pgbackrest/archive/` | `sjv-backup`, pokud zrovna neběží jiná úloha téže služby |
+| `wal` | běžně po 300 s | jen `pgbackrest/archive/` | `sjv-backup`. Po obsazeném zámku další pokus po 60 s. Dlouhá denní úloha interval protáhne |
 
-Zámky jsou v `/docker-data/infrastructure-sjv/backup-locks/`. Stav úlohy je `state/sjv-backup-daily.json` a `state/sjv-backup-wal.json` (`ok`, `failed`, `skipped-locked`, `skipped-backup-lock`, `skipped-repo-lock`, `skipped-empty`, `not-configured`). Denní úloha na `backup.lock` a `repo.lock` nečeká. Když je některý obsazený, zapíše `skipped-backup-lock` nebo `skipped-repo-lock`, získané zámky uvolní a hned se vrátí. Čekání na tyto lokální zámky neblokuje plánovač `wal`. Obě Restic úlohy dál berou exkluzivní `restic-job.lock`, takže se nepřekrývají. `wal` s `pgbackrest expire` neběží souběžně: na `repo.lock` počká nejvýš 10 minut a jinak se přeskočí. Když `pgbackrest/archive/` nemá žádný skutečný soubor, `wal` Restic nespustí, zapíše `skipped-empty` a skončí kódem 0. To není chyba zálohy. Plánovač si čas pokusu zapíše a další kontrolu udělá až po pěti minutách. Dočasné `*.pgbackrest.tmp` a symlinky se nepočítají. Běžný soubor ve vnořeném adresáři ano. Healthcheck čte soubor heartbeat. Plánovač ho obnovuje i během zálohy, takže běžící záloha sama o sobě kontejner neoznačí jako nezdravý. Při SIGTERM i při normálním konci se proces heartbeatu ukončí a nenechá po sobě `sleep`. Zastavený plánovač healthcheck pozná. Neúspěch zálohy se pozná ze stavu `failed`, ne ze healthchecku.
+Zámky jsou v `/docker-data/infrastructure-sjv/backup-locks/`. Stav úlohy je `state/sjv-backup-daily.json` a `state/sjv-backup-wal.json` (`ok`, `failed`, `skipped-locked`, `skipped-backup-lock`, `skipped-repo-lock`, `skipped-empty`, `not-configured`). Denní úloha bere `restic-job.lock` exkluzivně a `backup.lock` i `repo.lock` sdíleně, všechno bez čekání. Když je některý lokální zámek obsazený, zapíše `skipped-backup-lock` nebo `skipped-repo-lock`, získané zámky uvolní a hned se vrátí. `wal` bere `restic-job.lock` exkluzivně a `repo.lock` sdíleně, také bez čekání, a `backup.lock` nebere. Obsazený `repo.lock` nebo `restic-job.lock` úlohu hned přeskočí. Plánovač na zámku nečeká, a to ani při hodnotě 600 s, kterou dřív mělo `SJV_BACKUP_LOCK_WAIT`. Druhý proces Resticu se kvůli intervalu nespouští.
 
-Když úloha selže, JSON má `failed` a plánovač běží dál. `wal` zkusí další pětiminutový slot, `daily` nejdřív za 15 minut a po úspěchu už ten den znovu ne. Log kontejneru heslo neobsahuje. Obnova z posledního `daily` a `archive/` z posledního `wal` se nemění. `forget` a `prune` zůstávají jen na domácím serveru.
+Čas posledního pokusu `wal` je `state/sjv-backup-wal.epoch`. Čas dalšího pokusu je `state/sjv-backup-wal.next`. Oba soubory se zapisují atomicky. Po `ok`, po `skipped-empty` a po `failed` je další pokus až za `SJV_BACKUP_WAL_SECONDS` (výchozí 300 s). Po `skipped-locked` a `skipped-repo-lock` je další pokus za `SJV_BACKUP_WAL_RETRY_SECONDS` (výchozí 60 s). Prázdný archiv se proto neopakuje po 60 s a obsazený zámek nečeká celých 300 s. `failed` je chyba Resticu, ne přeskočená úloha. Po restartu se pokračuje podle uloženého `sjv-backup-wal.next`. Když ten soubor chybí a zůstane jen čas posledního pokusu, počká se standardní interval, takže restart nespustí sérii pokusů.
+
+Když `pgbackrest/archive/` nemá žádný skutečný soubor, `wal` Restic nespustí, zapíše `skipped-empty` a skončí kódem 0. To není chyba zálohy. Dočasné `*.pgbackrest.tmp` a symlinky se nepočítají. Běžný soubor ve vnořeném adresáři ano. Healthcheck čte soubor heartbeat. Plánovač ho obnovuje i během zálohy, takže běžící záloha sama o sobě kontejner neoznačí jako nezdravý. Při SIGTERM i při normálním konci se proces heartbeatu ukončí a nenechá po sobě `sleep`. Zastavený plánovač healthcheck pozná. Neúspěch zálohy se pozná ze stavu `failed`, ne ze healthchecku.
+
+Když úloha selže, JSON má `failed` a plánovač běží dál. Další `wal` je až po standardních 300 s, ne po krátkém retry. `daily` nejdřív za 15 minut a po úspěchu už ten den znovu ne. Log kontejneru heslo neobsahuje. Obnova z posledního `daily` a `archive/` z posledního `wal` se nemění. `forget` a `prune` zůstávají jen na domácím serveru.
 
 ## Konzistence vzdálené kopie
 
@@ -100,7 +104,7 @@ Restic čte soubory postupně. pgBackRest během zálohy zapisuje soubory záloh
 
    Při snapshotu `daily` neběží v repozitáři žádná záloha ani expire. Mění se jen `archive/`, kam přibývají nové WAL. PostgreSQL ani pgBackRest tato služba nespouští.
 2. **WAL soubory se nemění.** archive-push zapisuje každý segment pod konečným názvem atomicky (dočasný soubor a přejmenování). Restic tedy vidí buď celý segment, nebo žádný. Dočasné soubory (`*.pgbackrest.tmp`) se vylučují. Atomičnost zápisu se ověří ve fázi 3 pro zafixovanou verzi.
-3. **`wal` a `daily` se nepřekrývají a `wal` neběží souběžně s expire.** Obě úlohy berou exkluzivní `restic-job.lock`, takže dvě Restic úlohy neběží zároveň. `daily` bere sdílený `backup.lock` a `repo.lock` bez čekání. Když je některý obsazený, denní běh hned skončí stavem `skipped-backup-lock` nebo `skipped-repo-lock`, zámky uvolní a plánovač pokračuje. Čekání na lokální `backup.lock` nebo `repo.lock` proto neblokuje plánovač `wal`. `wal` `backup.lock` nebere, takže během dlouhé lokální zálohy PostgreSQL pokračuje. `wal` bere sdílený `repo.lock` a na exkluzivní zámek `pgbackrest expire` počká nejvýš 10 minut; když ho nezíská, běh přeskočí a zapíše stav. S expire tedy `wal` neběží souběžně. Neúspěch se zapíše jako `failed` a plánovač pokračuje dál. Po restartu kontejneru se plán obnoví.
+3. **`wal` a `daily` se nepřekrývají a `wal` neběží souběžně s expire.** Obě úlohy berou exkluzivní `restic-job.lock`, takže dvě Restic úlohy neběží zároveň. `daily` bere sdílený `backup.lock` a `repo.lock` bez čekání. Když je některý obsazený, denní běh hned skončí stavem `skipped-backup-lock` nebo `skipped-repo-lock`, zámky uvolní a plánovač pokračuje. `wal` `backup.lock` nebere, takže během dlouhé lokální zálohy PostgreSQL pokračuje. `wal` bere sdílený `repo.lock` bez čekání. Když ho drží `pgbackrest expire`, `wal` hned skončí stavem `skipped-repo-lock`, uvolní `restic-job.lock` a další pokus naplánuje po retry intervalu. S expire ani s `daily` tedy `wal` neběží souběžně. Během dlouhé denní zálohy může být interval `wal` delší než 300 s i než práh 15 minut. Systém kvůli tomu nespouští souběžný Restic. Neúspěch Resticu se zapíše jako `failed` a další pokus je až po standardním intervalu. Po restartu kontejneru se pokračuje podle `sjv-backup-wal.next`.
 4. **Obnova** = poslední `daily` + přes něj `archive/` z posledního `wal`. Segmenty WAL mají jednoznačné názvy a nemění se, takže sjednocení je bezpečné. `archive.info` se mění jen při `stanza-upgrade` a ten se dělá jen s novým `daily` ihned po něm.
 5. **Kontinuita WAL:** `daily` obsahuje zálohu i všechny WAL do svého pořízení. `wal` obsahuje všechny WAL od nejstarší ponechané zálohy do svého pořízení. Expire maže jen WAL starší než nejstarší ponechaná plná záloha, kterou zároveň obsahuje novější `daily`. Pro PITR do času T se použije první `daily` s plnou nebo rozdílovou zálohou před T a WAL ze snapshotu pořízeného po T.
 
@@ -198,7 +202,7 @@ Všechny skripty mají `set -Eeuo pipefail`, drží svůj `flock` a zapisují st
 
 | Skript | Zámky | Účel |
 | --- | --- | --- |
-| `sjv-backup` | `restic-job.lock` exkluzivně. `daily` bere `backup.lock` a `repo.lock` sdíleně bez čekání. `wal` bere `repo.lock` sdíleně a na expire počká nejvýš 10 minut | `restic backup` a ověření posledního snapshotu. Tagy `daily` a `wal`. `forget` a `prune` nevolá |
+| `sjv-backup` | `restic-job.lock` exkluzivně. `daily` bere `backup.lock` a `repo.lock` sdíleně bez čekání. `wal` bere `repo.lock` sdíleně bez čekání a při obsazeném zámku se přeskočí. `backup.lock` nebere | `restic backup` a ověření posledního snapshotu. Tagy `daily` a `wal`. `forget` a `prune` nevolá |
 | `backup.sh` (až s PostgreSQL) | `backup.lock` exkluzivně, při expire `repo.lock` exkluzivně | `pgbackrest backup` (full nebo diff), `pg_dump`, kopie souborů stacku, lokální retence dumpů, `pgbackrest expire`. Restic nespouští |
 | `backup-verify.sh` | `verify.lock` | viz [Ověření](#ověření), plus `sha256` dumpů a hash řetězec auditu v živé DB |
 | `backup-status.sh` | žádný | stáří posledního WAL v repo1, posledního full a diff, posledních snapshotů `daily` a `wal`, posledního testu obnovy, platnost certifikátu MQTT. `--alert` vrací nenulový kód a vloží notifikaci |
@@ -263,8 +267,9 @@ Bez kompromitace (například porucha hostitele) se kroky 7 a 11 zjednoduší: r
 ## RPO: výpočet
 
 - Lokální RPO: `archive_timeout = 60 s` a asynchronní push, přibližně 1–2 minuty.
-- Vzdálené RPO: lokální RPO + interval snapshotu `wal` (5 min) + doba jeho běhu, v normálním provozu přibližně 7–10 minut. Snapshot `wal` obsahuje jen nové WAL, takže je malý.
-- Při výpadku WireGuardu nebo domácí linky vzdálené RPO roste. `backup-status.sh` hlásí alarm, když vzdálený snapshot `wal` je starší než 15 minut. Nezávislou kontrolu stáří snapshotů má i domácí server (dead man's switch), aby alarm přišel i tehdy, když VPS nefunguje.
+- Vzdálené RPO za běžného provozu: lokální RPO + interval snapshotu `wal` (300 s) + doba jeho běhu, přibližně 7–10 minut. Snapshot `wal` obsahuje jen nové WAL, takže je malý. Po obsazeném `repo.lock` nebo `restic-job.lock` se další pokus plánuje po retry intervalu (výchozí 60 s). Ani tehdy se nespouští druhý Restic.
+- Patnáct minut není záruka za všech okolností. Denní Restic může trvat déle a po tu dobu drží `restic-job.lock`. `wal` se během něj nespustí, takže interval může překročit 300 s i práh alarmu. `backup-status.sh` hlásí alarm, když je vzdálený snapshot `wal` starší než 15 minut. To je signál, ne důkaz, že se interval podařilo dodržet.
+- Při výpadku WireGuardu nebo domácí linky vzdálené RPO roste stejně. Nezávislou kontrolu stáří snapshotů má i domácí server (dead man's switch), aby alarm přišel i tehdy, když VPS nefunguje.
 - Data zařízení: vlastní ESP drží potvrzené zprávy ještě po dobu `REPLAY_HOURS`. Po obnově je lze vyžádat znovu, takže skutečná ztráta telegramů může být menší než RPO databáze. Úpravy administrátora za posledních až 15 minut znovu získat nelze.
 
 ## RTO: odhad a ověření
@@ -295,7 +300,7 @@ Měsíční `restore-test.sh` ověřuje obnovitelnost dat a měří dobu obnovy 
 | Úloha | Interval | Alarm, když |
 | --- | --- | --- |
 | WAL archivace | průběžně | poslední WAL starší než 5 min |
-| `backup-remote.sh --wal` | 5 min | poslední snapshot `wal` starší než 15 min |
+| `sjv-backup` tag `wal` | běžně 300 s; po obsazeném zámku 60 s | poslední snapshot `wal` starší než 15 min. Dlouhá denní úloha práh může překročit, souběžný Restic se nespouští |
 | `backup.sh` | denně | poslední full starší než 8 dní, diff starší než 26 h, nebo snapshot `daily` starší než 26 h |
 | `backup-verify.sh` | týdně | jakákoli chyba |
 | `restore-test.sh` | měsíčně | neúspěch, nebo poslední úspěch starší než 31 dní |

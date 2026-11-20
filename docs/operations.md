@@ -125,7 +125,7 @@ install -m 644 /cesta/k/rest-server.crt /docker-data/infrastructure-sjv/secrets/
 
 5. `sudo ./scripts/check-env.sh` a teprve potom schválené `sudo ./scripts/deploy.sh`.
 6. Stav: `docker logs sjv-backup` a soubory `state/sjv-backup-daily.json` a `state/sjv-backup-wal.json`. Healthcheck je jen živost plánovače.
-7. Při `failed` se záloha za úspěšnou nepovažuje. Plánovač pokračuje. `forget` a `prune` se na VPS nespouštějí.
+7. Při `failed` se záloha za úspěšnou nepovažuje. Plánovač pokračuje. Další `wal` je až po 300 s. Přeskočení kvůli obsazenému `restic-job.lock` nebo `repo.lock` má vlastní stav a další pokus po 60 s (`SJV_BACKUP_WAL_RETRY_SECONDS`). Čas posledního pokusu je `state/sjv-backup-wal.epoch`, čas dalšího pokusu `state/sjv-backup-wal.next`. Restart se řídí tím druhým a nespouští sérii pokusů. `wal` na zámky nečeká. Dlouhá denní úloha může interval `wal` překročit; druhý Restic se nespouští. `forget` a `prune` se na VPS nespouštějí.
 
 ## Mimo rozsah B1b
 

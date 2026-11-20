@@ -104,6 +104,156 @@ backup_wait_grep() {
     return 1
 }
 
+backup_stop_pid() {
+    local pid="${1:-}" i=0
+    [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 0
+    kill -TERM "${pid}" 2>/dev/null || true
+    while kill -0 "${pid}" 2>/dev/null && [[ "${i}" -lt 40 ]]; do
+        sleep 0.05
+        i=$(( i + 1 ))
+    done
+    wait "${pid}" 2>/dev/null || true
+}
+
+backup_child_pids() {
+    local parent="$1"
+    [[ "${parent}" =~ ^[1-9][0-9]*$ ]] || return 0
+    ps -o pid= --ppid "${parent}" 2>/dev/null | awk '{print $1}' || true
+}
+
+backup_pgid() {
+    local pid="$1" pgid=""
+    [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 0
+    pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    printf '%s\n' "${pgid}"
+}
+
+backup_comm() {
+    local pid="$1" comm=""
+    [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 0
+    comm="$(ps -o comm= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    printf '%s\n' "${comm}"
+}
+
+backup_pid_seen() {
+    local needle="$1" item
+    shift
+    for item in "$@"; do
+        [[ "${item}" == "${needle}" ]] && return 0
+    done
+    return 1
+}
+
+# The heartbeat is the descendant that is a process-group leader and whose
+# child is sleep. The first child of the scheduler may be Restic instead.
+backup_heartbeat_leader() {
+    local root="$1" attempt pid="" child="" pgid="" comm="" sleep_pid="" args=""
+    local -a queue=() seen=()
+    [[ "${root}" =~ ^[1-9][0-9]*$ ]] || return 1
+    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        queue=("${root}")
+        seen=("${root}")
+        while [[ "${#queue[@]}" -gt 0 ]]; do
+            pid="${queue[0]}"
+            if [[ "${#queue[@]}" -le 1 ]]; then
+                queue=()
+            else
+                queue=("${queue[@]:1}")
+            fi
+            while IFS= read -r child; do
+                [[ "${child}" =~ ^[1-9][0-9]*$ ]] || continue
+                if backup_pid_seen "${child}" "${seen[@]}"; then
+                    continue
+                fi
+                seen+=("${child}")
+                queue+=("${child}")
+                pgid="$(backup_pgid "${child}")"
+                [[ "${pgid}" == "${child}" ]] || continue
+                # Restic is also a process-group leader so its sleep can be
+                # signalled with it. The heartbeat is the other group.
+                args="$(ps -o args= -p "${child}" 2>/dev/null || true)"
+                [[ "${args}" == *restic* ]] && continue
+                while IFS= read -r sleep_pid; do
+                    comm="$(backup_comm "${sleep_pid}")"
+                    if [[ "${comm}" == "sleep" ]]; then
+                        printf '%s\n' "${child}"
+                        return 0
+                    fi
+                done < <(backup_child_pids "${child}")
+            done < <(backup_child_pids "${pid}")
+        done
+        sleep 0.05
+    done
+    return 1
+}
+
+backup_wait_epoch() {
+    local file="$1" previous="$2" tries="${3:-80}" i=0 current=""
+    while [[ "${i}" -lt "${tries}" ]]; do
+        if [[ -f "${file}" ]]; then
+            current="$(<"${file}")"
+            if [[ -n "${current}" && "${current}" != "${previous}" ]]; then
+                printf '%s\n' "${current}"
+                return 0
+            fi
+        fi
+        sleep 0.1
+        i=$(( i + 1 ))
+    done
+    return 1
+}
+
+backup_schedule_delta() {
+    local epoch_file="$1" next_file="$2" epoch="" next=""
+    [[ -f "${epoch_file}" && -f "${next_file}" ]] || return 1
+    epoch="$(<"${epoch_file}")"
+    next="$(<"${next_file}")"
+    [[ "${epoch}" =~ ^[0-9]+$ && "${next}" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$(( next - epoch ))"
+}
+
+backup_wait_delta() {
+    local epoch_file="$1" next_file="$2" expected="$3" tries="${4:-40}" i=0 delta=""
+    while [[ "${i}" -lt "${tries}" ]]; do
+        delta="$(backup_schedule_delta "${epoch_file}" "${next_file}" || true)"
+        if [[ "${delta}" == "${expected}" ]]; then
+            return 0
+        fi
+        sleep 0.1
+        i=$(( i + 1 ))
+    done
+    return 1
+}
+
+backup_restic_count() {
+    local file="$1" count=0
+    if [[ -f "${file}" ]]; then
+        count="$(grep -c -F ' backup ' "${file}" || true)"
+    fi
+    printf '%s\n' "${count:-0}"
+}
+
+backup_lock_fds_clear() {
+    local pid="$1" fd target
+    [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ -d "/proc/${pid}/fd" ]] || return 1
+    for fd in /proc/"${pid}"/fd/*; do
+        [[ -e "${fd}" ]] || continue
+        target="$(readlink -- "${fd}" 2>/dev/null || true)"
+        case "${target}" in
+            */restic-job.lock|*/backup.lock|*/repo.lock) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+backup_locks_free() {
+    local root="$1"
+    flock -n -x "${root}/locks/restic-job.lock" true &&
+        flock -n -x "${root}/locks/backup.lock" true &&
+        flock -n -x "${root}/locks/repo.lock" true
+}
+
 backup_env() {
     local root="$1"
     BACKUP_ENV=(
@@ -151,8 +301,10 @@ test_backup_compose() {
     t_check "jobs take an exclusive lock" grep -q 'flock -n 9' "${script}"
     t_check "daily takes the local locks without waiting" \
         bash -c 'grep -F -q "flock -s -n 7" "$1" && grep -F -q "flock -s -n 8" "$1"' _ "${script}"
-    t_check "wal still waits for the repository lock" \
-        grep -F -q 'flock -s -w "${LOCK_WAIT}" 8' "${script}"
+    t_check "wal takes the repository lock without waiting" \
+        bash -c 'grep -F -q "flock -s -n 8" "$1" && ! grep -F -q "flock -w" "$1"' _ "${script}"
+    t_check "a busy lock retries after 60 seconds by default" \
+        grep -F -q 'SJV_BACKUP_WAL_RETRY_SECONDS:-60' "${script}"
 }
 
 test_backup_run() {
@@ -233,13 +385,21 @@ test_backup_run() {
     sleep 1.2
     second_epoch="$(<"${root}/state/sjv-backup-wal.epoch")"
     t_check "an empty WAL is not tried again inside the interval" test "${first_epoch}" = "${second_epoch}"
-    local -a live=()
-    mapfile -t live < <(ps -o pid= --ppid "${scheduler}" 2>/dev/null | awk '{print $1}')
+    local leader="" sleep_pid="" child="" comm=""
     local -a beats=()
-    if [[ -n "${live[0]:-}" ]]; then
-        mapfile -t beats < <(ps -o pid= --ppid "${live[0]}" 2>/dev/null | awk '{print $1}')
+    leader="$(backup_heartbeat_leader "${scheduler}" || true)"
+    if [[ -n "${leader}" ]]; then
+        mapfile -t beats < <(backup_child_pids "${leader}")
+        for child in "${beats[@]+"${beats[@]}"}"; do
+            comm="$(backup_comm "${child}")"
+            if [[ "${comm}" == "sleep" ]]; then
+                sleep_pid="${child}"
+            fi
+        done
     fi
-    t_check "the scheduler has a heartbeat process" test "${#live[@]}" -ge 1
+    t_check "the scheduler heartbeat is the sleep process group" \
+        bash -c '[[ "$1" =~ ^[1-9][0-9]*$ && "$2" =~ ^[1-9][0-9]*$ ]] && [[ "$(ps -o pgid= -p "$1" | tr -d "[:space:]")" == "$1" ]] && [[ "$(ps -o pgid= -p "$2" | tr -d "[:space:]")" == "$1" ]]' \
+        _ "${leader}" "${sleep_pid}"
     sleep 3
     second_epoch="$(<"${root}/state/sjv-backup-wal.epoch")"
     t_check "the next empty WAL check waits for the interval" test "${first_epoch}" != "${second_epoch}"
@@ -247,7 +407,7 @@ test_backup_run() {
     wait "${scheduler}" || true
     sleep 0.2
     t_check "SIGTERM stops the scheduler and its heartbeat" \
-        backup_pids_dead "${scheduler}" "${live[@]}" "${beats[@]}"
+        backup_pids_dead "${scheduler}" "${leader}" "${sleep_pid}" "${beats[@]+"${beats[@]}"}"
 
     printf 'segment\n' > "${root}/backup/pgbackrest/archive/000000010000000000000001"
     backup_env "${root}" 0 0
@@ -298,15 +458,24 @@ test_backup_run() {
     stamp="$(<"${root}/run/heartbeat")"
     age=$(( now - stamp ))
     t_check "the heartbeat stays current during a long backup" test "${age}" -lt 3
-    local -a running=() nested=() child
-    mapfile -t running < <(ps -o pid= --ppid "${long_job}" 2>/dev/null | awk '{print $1}')
-    for child in "${running[@]}"; do
-        mapfile -t -O "${#nested[@]}" nested < <(ps -o pid= --ppid "${child}" 2>/dev/null | awk '{print $1}')
+    local leader="" restic_pid="" child="" args=""
+    local -a running=() nested=()
+    leader="$(backup_heartbeat_leader "${long_job}" || true)"
+    mapfile -t running < <(backup_child_pids "${long_job}")
+    for child in "${running[@]+"${running[@]}"}"; do
+        args="$(ps -o args= -p "${child}" 2>/dev/null || true)"
+        if [[ "${args}" == *restic-stub* ]]; then
+            restic_pid="${child}"
+        fi
+        mapfile -t -O "${#nested[@]}" nested < <(backup_child_pids "${child}")
     done
+    t_check "the heartbeat group is not the restic process" \
+        bash -c '[[ "$1" =~ ^[1-9][0-9]*$ && "$2" =~ ^[1-9][0-9]*$ && "$1" != "$2" ]] && pg1="$(ps -o pgid= -p "$1" | tr -d "[:space:]")" && pg2="$(ps -o pgid= -p "$2" | tr -d "[:space:]")" && [[ "$pg1" == "$1" && "$pg2" == "$2" && "$pg1" != "$pg2" ]]' \
+        _ "${leader}" "${restic_pid}"
     wait "${long_job}" || true
     sleep 0.2
     t_check "a finished backup leaves no heartbeat process" \
-        backup_pids_dead "${long_job}" "${running[@]}" "${nested[@]}"
+        backup_pids_dead "${long_job}" "${leader}" "${restic_pid}" "${running[@]+"${running[@]}"}" "${nested[@]+"${nested[@]}"}"
     printf '%s\n' 1 > "${root}/run/heartbeat"
     t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" health
     t_check "a stale heartbeat is unhealthy" test "${T_RC}" -ne 0
@@ -329,7 +498,7 @@ test_backup_locks() {
         "SJV_BACKUP_TICK_SECONDS=1"
         "SJV_BACKUP_WAL_SECONDS=3"
         "SJV_BACKUP_DAILY_AT=00:00"
-        "SJV_BACKUP_LOCK_WAIT=30"
+        "SJV_BACKUP_LOCK_WAIT=600"
         "SJV_BACKUP_HEARTBEAT_SECONDS=30"
         "STUB_OVERLAP_DIR=${root}/stub-overlap"
     )
@@ -392,7 +561,7 @@ test_backup_locks() {
     holder="${BACKUP_HOLDER}"
     backup_env "${root}" 0 0
     started="$(date +%s)"
-    t_run env "${BACKUP_ENV[@]}" SJV_BACKUP_LOCK_WAIT=30 bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_run env "${BACKUP_ENV[@]}" SJV_BACKUP_LOCK_WAIT=600 bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
     elapsed="$(( $(date +%s) - started ))"
     t_check "a busy repo.lock skips daily without waiting" \
         bash -c '(( $1 == 75 )) && grep -F -q "\"status\":\"skipped-repo-lock\"" "$2" && (( $3 < 8 ))' \
@@ -402,7 +571,7 @@ test_backup_locks() {
         "SJV_BACKUP_TICK_SECONDS=1"
         "SJV_BACKUP_WAL_SECONDS=60"
         "SJV_BACKUP_DAILY_AT=00:00"
-        "SJV_BACKUP_LOCK_WAIT=1"
+        "SJV_BACKUP_LOCK_WAIT=600"
         "SJV_BACKUP_HEARTBEAT_SECONDS=30"
     )
     rm -f "${root}/state/sjv-backup-daily.json" "${root}/state/sjv-backup-wal.json" \
@@ -418,6 +587,7 @@ test_backup_locks() {
         flock -n -x "${root}/locks/backup.lock" true
     t_check "repo.lock stays held by the local expire lock" \
         bash -c '! flock -n -x "$1" true' _ "${root}/locks/repo.lock"
+    rm -f "${root}/state/sjv-backup-wal.next"
     printf '%s\n' 0 > "${root}/state/sjv-backup-wal.epoch"
     backup_wait_grep '"status":"skipped-repo-lock"' "${root}/state/sjv-backup-wal.json" 80 || true
     t_check "the scheduler continues and WAL skips a busy repository lock" \
@@ -425,6 +595,307 @@ test_backup_locks() {
         _ "${scheduler}" "${root}/state/sjv-backup-wal.json" "${root}/stub.log"
     backup_stop_group "${scheduler}"
     backup_stop_group "${holder}"
+}
+
+test_backup_wal_schedule() {
+    print_section "WAL scheduler retry"
+    local root holder="" scheduler=0 long_job=0 started=0 elapsed=0
+    local first="" second="" later="" count="" count_after="" leader="" sleep_pid="" now="" child=""
+    local stale="" upcoming=""
+    root="${T_RUN_DIR}/wal-schedule"
+    backup_prepare_tree "${root}"
+    mkdir -p "${root}/backup/pgbackrest/archive/sjv/18-1"
+    printf 'segment\n' > "${root}/backup/pgbackrest/archive/sjv/18-1/000000010000000000000001"
+    printf '%s\n' "$(date +%F)" > "${root}/state/sjv-backup-daily.date"
+    if ! backup_hold_exclusive "${root}/locks/repo.lock"; then
+        t_fail "the test could not hold repo.lock"
+        return 0
+    fi
+    holder="${BACKUP_HOLDER}"
+    backup_env "${root}" 0 0
+    BACKUP_ENV+=(
+        "SJV_BACKUP_TICK_SECONDS=1"
+        "SJV_BACKUP_WAL_SECONDS=300"
+        "SJV_BACKUP_WAL_RETRY_SECONDS=5"
+        "SJV_BACKUP_DAILY_AT=00:00"
+        "SJV_BACKUP_LOCK_WAIT=600"
+        "SJV_BACKUP_HEARTBEAT_SECONDS=30"
+    )
+    rm -f "${root}/stub.log" "${root}/state/sjv-backup-wal.json" \
+        "${root}/state/sjv-backup-wal.epoch" "${root}/state/sjv-backup-wal.next"
+    started="$(date +%s)"
+    env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" supervise >/dev/null 2>&1 &
+    scheduler=$!
+    first="$(backup_wait_epoch "${root}/state/sjv-backup-wal.epoch" "" 80 || true)"
+    elapsed="$(( $(date +%s) - started ))"
+    t_check "LOCK_WAIT=600 does not block a WAL skip on a busy repo.lock" \
+        bash -c '[[ -n "$1" && "$2" -lt 12 ]] && grep -F -q "\"status\":\"skipped-repo-lock\"" "$3" && [[ ! -e "$4" ]]' \
+        _ "${first}" "${elapsed}" "${root}/state/sjv-backup-wal.json" "${root}/stub.log"
+    t_check "the scheduler stays alive after the skipped WAL" kill -0 "${scheduler}"
+    t_check "a skipped WAL releases the restic job lock" \
+        flock -n -x "${root}/locks/restic-job.lock" true
+    t_check "a skipped WAL keeps no lock descriptor open" \
+        backup_lock_fds_clear "${scheduler}"
+    t_check "a busy repo.lock schedules the short retry" \
+        backup_wait_delta "${root}/state/sjv-backup-wal.epoch" "${root}/state/sjv-backup-wal.next" 5 20
+    sleep 1.5
+    second=""
+    if [[ -f "${root}/state/sjv-backup-wal.epoch" ]]; then
+        second="$(<"${root}/state/sjv-backup-wal.epoch")"
+    fi
+    t_check "a busy lock does not retry in a tight loop" \
+        bash -c '[[ -n "$1" && "$1" == "$2" ]]' _ "${first}" "${second}"
+    second="$(backup_wait_epoch "${root}/state/sjv-backup-wal.epoch" "${first}" 120 || true)"
+    t_check "the next WAL attempt follows the retry interval" \
+        bash -c '[[ -n "$1" && "$1" != "$2" ]] && grep -F -q "\"status\":\"skipped-repo-lock\"" "$3" && [[ ! -e "$4" ]]' \
+        _ "${second}" "${first}" "${root}/state/sjv-backup-wal.json" "${root}/stub.log"
+    t_check "the retry attempt still schedules the short interval" \
+        backup_wait_delta "${root}/state/sjv-backup-wal.epoch" "${root}/state/sjv-backup-wal.next" 5 20
+    backup_stop_group "${holder}"
+    holder=""
+    started="$(date +%s)"
+    if flock -n -x "${root}/locks/repo.lock" true; then
+        elapsed="$(( $(date +%s) - started ))"
+    else
+        elapsed=999
+    fi
+    t_check "a released repo.lock can be taken again without waiting" test "${elapsed}" -lt 3
+    later="$(backup_wait_epoch "${root}/state/sjv-backup-wal.epoch" "${second}" 120 || true)"
+    count="$(backup_restic_count "${root}/stub.log")"
+    t_check "WAL runs after the repository lock is released" \
+        bash -c '[[ -n "$1" ]] && grep -F -q "\"status\":\"ok\"" "$2" && grep -F -q -- "--tag wal" "$3"' \
+        _ "${later}" "${root}/state/sjv-backup-wal.json" "${root}/stub.log"
+    t_check "a successful WAL schedules the normal interval" \
+        backup_wait_delta "${root}/state/sjv-backup-wal.epoch" "${root}/state/sjv-backup-wal.next" 300 30
+    sleep 6
+    second=""
+    if [[ -f "${root}/state/sjv-backup-wal.epoch" ]]; then
+        second="$(<"${root}/state/sjv-backup-wal.epoch")"
+    fi
+    count_after="$(backup_restic_count "${root}/stub.log")"
+    t_check "a successful WAL is not retried on the short interval" \
+        bash -c '[[ -n "$1" && "$1" == "$2" && "$3" == "$4" ]]' \
+        _ "${later}" "${second}" "${count}" "${count_after}"
+    leader="$(backup_heartbeat_leader "${scheduler}" || true)"
+    sleep_pid=""
+    if [[ -n "${leader}" ]]; then
+        while IFS= read -r child; do
+            if [[ "$(backup_comm "${child}")" == "sleep" ]]; then
+                sleep_pid="${child}"
+            fi
+        done < <(backup_child_pids "${leader}")
+    fi
+    t_check "the scheduler heartbeat is its own process group" \
+        bash -c '[[ "$1" =~ ^[1-9][0-9]*$ && "$2" =~ ^[1-9][0-9]*$ ]] && [[ "$(ps -o pgid= -p "$1" | tr -d "[:space:]")" == "$1" ]] && [[ "$(ps -o pgid= -p "$2" | tr -d "[:space:]")" == "$1" ]]' \
+        _ "${leader}" "${sleep_pid}"
+    backup_stop_pid "${scheduler}"
+    scheduler=0
+    sleep 0.2
+    t_check "the scheduler heartbeat group stops with the scheduler" \
+        backup_pids_dead "${leader}" "${sleep_pid}"
+
+    find "${root}/backup/pgbackrest/archive" -mindepth 1 -delete
+    rm -f "${root}/stub.log" "${root}/state/sjv-backup-wal.json" \
+        "${root}/state/sjv-backup-wal.epoch" "${root}/state/sjv-backup-wal.next"
+    backup_env "${root}" 0 0
+    BACKUP_ENV+=(
+        "SJV_BACKUP_TICK_SECONDS=1"
+        "SJV_BACKUP_WAL_SECONDS=300"
+        "SJV_BACKUP_WAL_RETRY_SECONDS=3"
+        "SJV_BACKUP_LOCK_WAIT=600"
+        "SJV_BACKUP_HEARTBEAT_SECONDS=30"
+    )
+    env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" supervise >/dev/null 2>&1 &
+    scheduler=$!
+    first="$(backup_wait_epoch "${root}/state/sjv-backup-wal.epoch" "" 80 || true)"
+    t_check "an empty archive schedules the normal interval" \
+        bash -c '[[ -n "$1" ]] && grep -F -q "\"status\":\"skipped-empty\"" "$2" && [[ ! -e "$3" ]]' \
+        _ "${first}" "${root}/state/sjv-backup-wal.json" "${root}/stub.log"
+    t_check "an empty archive does not use the short retry" \
+        backup_wait_delta "${root}/state/sjv-backup-wal.epoch" "${root}/state/sjv-backup-wal.next" 300 20
+    sleep 5
+    second=""
+    if [[ -f "${root}/state/sjv-backup-wal.epoch" ]]; then
+        second="$(<"${root}/state/sjv-backup-wal.epoch")"
+    fi
+    t_check "an empty archive is not retried every retry interval" \
+        bash -c '[[ -n "$1" && "$1" == "$2" ]]' _ "${first}" "${second}"
+    backup_stop_pid "${scheduler}"
+    scheduler=0
+
+    mkdir -p "${root}/backup/pgbackrest/archive/sjv/18-1"
+    printf 'segment\n' > "${root}/backup/pgbackrest/archive/sjv/18-1/000000010000000000000001"
+    rm -f "${root}/stub.log" "${root}/state/sjv-backup-wal.json" \
+        "${root}/state/sjv-backup-wal.epoch" "${root}/state/sjv-backup-wal.next"
+    backup_env "${root}" 1 0
+    BACKUP_ENV+=(
+        "SJV_BACKUP_TICK_SECONDS=1"
+        "SJV_BACKUP_WAL_SECONDS=300"
+        "SJV_BACKUP_WAL_RETRY_SECONDS=3"
+        "SJV_BACKUP_LOCK_WAIT=600"
+        "SJV_BACKUP_HEARTBEAT_SECONDS=30"
+    )
+    env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" supervise >/dev/null 2>&1 &
+    scheduler=$!
+    first="$(backup_wait_epoch "${root}/state/sjv-backup-wal.epoch" "" 80 || true)"
+    count="$(backup_restic_count "${root}/stub.log")"
+    t_check "a Restic error is recorded as failed" \
+        bash -c '[[ -n "$1" ]] && grep -F -q "\"status\":\"failed\"" "$2" && ! grep -F -q "skipped-" "$2"' \
+        _ "${first}" "${root}/state/sjv-backup-wal.json"
+    t_check "a Restic error keeps the normal interval" \
+        backup_wait_delta "${root}/state/sjv-backup-wal.epoch" "${root}/state/sjv-backup-wal.next" 300 20
+    t_check "the scheduler stays alive after a Restic error" kill -0 "${scheduler}"
+    sleep 5
+    second=""
+    if [[ -f "${root}/state/sjv-backup-wal.epoch" ]]; then
+        second="$(<"${root}/state/sjv-backup-wal.epoch")"
+    fi
+    count_after="$(backup_restic_count "${root}/stub.log")"
+    t_check "a Restic error does not retry on the short interval" \
+        bash -c '[[ -n "$1" && "$1" == "$2" && "$3" == "$4" ]]' \
+        _ "${first}" "${second}" "${count}" "${count_after}"
+    backup_stop_pid "${scheduler}"
+    scheduler=0
+
+    rm -f "${root}/stub.log" "${root}/state/sjv-backup-wal.json" \
+        "${root}/state/sjv-backup-wal.epoch" "${root}/state/sjv-backup-wal.next"
+    backup_env "${root}" 0 30
+    BACKUP_ENV+=(
+        "SJV_BACKUP_TICK_SECONDS=1"
+        "SJV_BACKUP_WAL_SECONDS=300"
+        "SJV_BACKUP_WAL_RETRY_SECONDS=3"
+        "SJV_BACKUP_LOCK_WAIT=600"
+        "SJV_BACKUP_HEARTBEAT_SECONDS=30"
+        "STUB_OVERLAP_DIR=${root}/stub-overlap"
+    )
+    env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run wal >/dev/null 2>&1 &
+    long_job=$!
+    backup_wait_grep ' backup ' "${root}/stub.log" 80 || true
+    started="$(date +%s)"
+    env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" supervise >/dev/null 2>&1 &
+    scheduler=$!
+    backup_wait_grep '"status":"skipped-locked"' "${root}/state/sjv-backup-wal.json" 80 || true
+    elapsed="$(( $(date +%s) - started ))"
+    count="$(backup_restic_count "${root}/stub.log")"
+    t_check "a busy restic job lock skips WAL without a second Restic" \
+        bash -c 'kill -0 "$1" && kill -0 "$2" && [[ -f "$3" ]] && grep -F -q "\"status\":\"skipped-locked\"" "$3" && [[ "$4" == 1 ]] && [[ "$5" -lt 12 ]] && ! grep -F -q overlap "$6"' \
+        _ "${scheduler}" "${long_job}" "${root}/state/sjv-backup-wal.json" "${count}" "${elapsed}" "${root}/stub.log"
+    t_check "the waiting scheduler holds no lock of its own" \
+        backup_lock_fds_clear "${scheduler}"
+    backup_stop_pid "${scheduler}"
+    scheduler=0
+    backup_stop_pid "${long_job}"
+    long_job=0
+    sleep 0.2
+    t_check "locks are free after the Restic job exits" backup_locks_free "${root}"
+
+    rm -f "${root}/stub.log" "${root}/state/sjv-backup-daily.json" \
+        "${root}/state/sjv-backup-daily.date" "${root}/state/sjv-backup-wal.json" \
+        "${root}/state/sjv-backup-wal.epoch"
+    now="$(date +%s)"
+    printf '%s\n' "${now}" > "${root}/state/sjv-backup-wal.epoch"
+    printf '%s\n' "$(( now + 10000 ))" > "${root}/state/sjv-backup-wal.next"
+    rmdir "${root}/stub-overlap" 2>/dev/null || true
+    backup_env "${root}" 0 0
+    BACKUP_ENV+=(
+        "SJV_BACKUP_TICK_SECONDS=1"
+        "SJV_BACKUP_WAL_SECONDS=300"
+        "SJV_BACKUP_WAL_RETRY_SECONDS=3"
+        "SJV_BACKUP_DAILY_AT=00:00"
+        "SJV_BACKUP_LOCK_WAIT=600"
+        "SJV_BACKUP_HEARTBEAT_SECONDS=30"
+    )
+    env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" supervise >/dev/null 2>&1 &
+    scheduler=$!
+    backup_wait_grep '"status":"ok"' "${root}/state/sjv-backup-daily.json" 80 || true
+    local locks_ready=0 attempt=0
+    while [[ "${attempt}" -lt 30 ]]; do
+        if backup_locks_free "${root}" && backup_lock_fds_clear "${scheduler}"; then
+            locks_ready=1
+            break
+        fi
+        sleep 0.1
+        attempt=$(( attempt + 1 ))
+    done
+    t_check "a finished daily job holds no locks" \
+        bash -c '[[ "$1" == 1 && -f "$2" ]] && grep -F -q "\"status\":\"ok\"" "$2"' \
+        _ "${locks_ready}" "${root}/state/sjv-backup-daily.json"
+    backup_stop_pid "${scheduler}"
+    scheduler=0
+    t_check "locks stay free after the daily scheduler stops" backup_locks_free "${root}"
+
+    rm -f "${root}/stub.log" "${root}/state/sjv-backup-wal.json" \
+        "${root}/state/sjv-backup-daily.json"
+    now="$(date +%s)"
+    printf '%s\n' "${now}" > "${root}/state/sjv-backup-wal.epoch"
+    printf '%s\n' "$(( now + 300 ))" > "${root}/state/sjv-backup-wal.next"
+    printf '%s\n' "$(date +%F)" > "${root}/state/sjv-backup-daily.date"
+    backup_env "${root}" 0 0
+    BACKUP_ENV+=(
+        "SJV_BACKUP_TICK_SECONDS=1"
+        "SJV_BACKUP_WAL_SECONDS=300"
+        "SJV_BACKUP_WAL_RETRY_SECONDS=1"
+        "SJV_BACKUP_LOCK_WAIT=600"
+        "SJV_BACKUP_HEARTBEAT_SECONDS=30"
+    )
+    env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" supervise >/dev/null 2>&1 &
+    scheduler=$!
+    sleep 3
+    count="$(backup_restic_count "${root}/stub.log")"
+    t_check "a restart waits for the saved next attempt" \
+        bash -c 'kill -0 "$1" && [[ "$2" == 0 && "$(<"$3")" == "$4" ]]' \
+        _ "${scheduler}" "${count}" "${root}/state/sjv-backup-wal.epoch" "${now}"
+    backup_stop_pid "${scheduler}"
+    scheduler=0
+    rm -f "${root}/state/sjv-backup-wal.next"
+    env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" supervise >/dev/null 2>&1 &
+    scheduler=$!
+    sleep 3
+    count="$(backup_restic_count "${root}/stub.log")"
+    t_check "a restart with only the last attempt does not run immediately" \
+        bash -c '[[ "$1" == 0 && "$(<"$2")" == "$3" ]]' \
+        _ "${count}" "${root}/state/sjv-backup-wal.epoch" "${now}"
+    backup_stop_pid "${scheduler}"
+    scheduler=0
+    # next is committed and epoch still has the previous, already overdue attempt.
+    now="$(date +%s)"
+    stale="$(( now - 10000 ))"
+    upcoming="$(( now + 300 ))"
+    printf '%s\n' "${stale}" > "${root}/state/sjv-backup-wal.epoch"
+    printf '%s\n' "${upcoming}" > "${root}/state/sjv-backup-wal.next"
+    rm -f "${root}/stub.log" "${root}/state/sjv-backup-wal.json"
+    env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" supervise >/dev/null 2>&1 &
+    scheduler=$!
+    sleep 3
+    count="$(backup_restic_count "${root}/stub.log")"
+    first=""
+    if [[ -f "${root}/state/sjv-backup-wal.epoch" ]]; then
+        first="$(<"${root}/state/sjv-backup-wal.epoch")"
+    fi
+    second=""
+    if [[ -f "${root}/state/sjv-backup-wal.next" ]]; then
+        second="$(<"${root}/state/sjv-backup-wal.next")"
+    fi
+    t_check "a restart honors next when the epoch write did not finish" \
+        bash -c 'kill -0 "$1" && [[ "$2" == 0 && "$3" == "$4" && "$5" == "$6" ]]' \
+        _ "${scheduler}" "${count}" "${first}" "${stale}" "${second}" "${upcoming}"
+    backup_stop_pid "${scheduler}"
+    scheduler=0
+    printf '%s\n' 1 > "${root}/state/sjv-backup-wal.epoch"
+    printf '%s\n' 1 > "${root}/state/sjv-backup-wal.next"
+    rm -f "${root}/stub.log" "${root}/state/sjv-backup-wal.json"
+    env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" supervise >/dev/null 2>&1 &
+    scheduler=$!
+    first="$(backup_wait_epoch "${root}/state/sjv-backup-wal.epoch" "1" 80 || true)"
+    sleep 3
+    count="$(backup_restic_count "${root}/stub.log")"
+    t_check "a due restart runs once and then waits the normal interval" \
+        bash -c '[[ -n "$1" && "$1" != 1 && "$2" == 1 ]] && grep -F -q "\"status\":\"ok\"" "$3"' \
+        _ "${first}" "${count}" "${root}/state/sjv-backup-wal.json"
+    t_check "the single restart attempt schedules the normal interval" \
+        backup_wait_delta "${root}/state/sjv-backup-wal.epoch" "${root}/state/sjv-backup-wal.next" 300 20
+    backup_stop_pid "${scheduler}"
+    scheduler=0
 }
 
 test_backup_image() {
@@ -456,5 +927,6 @@ run_backup_tests() {
     test_backup_compose
     test_backup_run
     test_backup_locks
+    test_backup_wal_schedule
     test_backup_image
 }
