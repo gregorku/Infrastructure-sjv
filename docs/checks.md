@@ -52,6 +52,7 @@ Stav: etapa B1b. Sada běží offline. `docker compose config` se spustí jen kd
 | ShellCheck | nemusí být nainstalovaný | `./scripts/shellcheck.sh` (kód 3 = nespuštěno) |
 | `require_mountpoint` v testovacím režimu | testovací režim ho přeskakuje | bez `SJV_TEST_BASE_DIR` a bez `/docker-data` musí `init.sh`, `update-env.sh` i `check-env.sh` skončit chybou a nic nevytvořit |
 | Izolovaná záloha a obnova pgBackRest | `test.sh` nespouští databázový kontejner | ruční běh jen v dočasném adresáři, mimo `/docker-data`. Poslední úspěch je 20. 11. 2026 a postup je v [operations.md](operations.md#záloha-a-obnova-postgresql) |
+| Ingest migrace PostgreSQL 19.0 | `test.sh` nespouští databázový kontejner | `app/backend/tests/isolated-schema-test.sh` ve vlastním dočasném Podman úložišti. Maže jen `/tmp/sjv-alembic-itest` a svou testovací síť. Kontroluje `alembic upgrade head`, `alembic check`, roli fragmentu, frontu dekódování, měsíc `device_events`, mapování `endpoint_credentials`, zákaz čtení `secret_enc` pro `sjv_readonly` a retenci `DETACH PARTITION CONCURRENTLY` |
 
 ## Kontrola na serveru po instalaci
 

@@ -59,6 +59,8 @@ Stav: čeká na schválení. Cílový termín zahájení ostrého sběru skuteč
 
 ### 4. Schéma databáze a migrace
 
+K 20. 11. 2026 je hotová jen první část: migrace `0001_ingest_schema`, oprávnění přijímajících procesů k `INSERT` do `decode_queue`, spotřeba fronty rolí `sjv_worker` a izolovaný test na prázdné PostgreSQL 19.0. R34 v téže migraci drží roli fragmentu, měsíc `device_events` podle `received_at` a mapování `endpoint_credentials`. Fáze 4 tím není uzavřená. Chybí kmenová data, členství, instalace, výměny, metrologie, notifikace, audit, `maintenance.sh` a testy, které na těchto tabulkách stojí. Collector, MQTT a dekodér nejsou součástí této části. `sjv_collector`, `sjv_api` a `sjv_worker` `secret_enc` nečtou. `sjv_readonly` na `endpoint_credentials` čte jen metadata řádku a `secret_enc` ne. Kdo bude DTLS PSK číst, zůstává otevřené do návrhu UDP/DTLS listeneru. Odchozí token platformy v této tabulce není a do Etapy 1 nepatří.
+
 - Alembic podle [database-design.md](database-design.md):
   - kmenová data se soft delete, uživatelé s anonymizací, RBAC (`board` a `technician` nepřiřaditelné),
   - členství, instalace a přiřazení zdrojů s exclusion constrainty,

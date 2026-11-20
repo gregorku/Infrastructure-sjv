@@ -8,6 +8,8 @@ Sběrná zařízení navazují spojení směrem k VPS. Výjimka je dotaz na ciz�
 
 Tabulky jsou v [database-design.md](database-design.md), firmware vlastního ESP v [firmware-design.md](firmware-design.md), bezpečnost příjmu v [security.md](security.md).
 
+K 20. 11. 2026 je v PostgreSQL jen schéma migrace `0001_ingest_schema`. MQTT klient, HTTPS API, worker a dekodér nejsou. Fragment bez prokázaného `message_ref` umí databáze uložit jako novou sadu `isolated` a trigger odmítne změnu jejího stavu. `repeat` a `conflict` pustí jen sada, která je v tom okamžiku `collecting`. Skládání, spojení podle `group_key` a záznam doručení po `timed_out` tato etapa nezavádí. Schéma pro ten záznam dál není určené. `device_events.partition_month` je měsíc `received_at` v UTC.
+
 ## Vstupní zdroje
 
 | Zdroj | Transport | Co je známé | Kam patří odečet |
@@ -191,7 +193,7 @@ Postup podle priority:
 | `captured_at_est` starší než `INGEST_MAX_MESSAGE_AGE` (30 dní) | `too_old` |
 | `rx.unix_ms` (NTP) a odhad z epochy se liší víc než tolerance | platí epocha, příznak `clock_disagreement`, událost |
 
-`partition_month` příjmu, payloadu tohoto příjmu a `decoded_observations` je měsíc `server_received_at` nebo `received_at`. `partition_month` telegramu je měsíc kotvy. Příjem z prosince 2028, který odkazuje na telegram z ledna 2027, leží v prosinci 2028. Lednová identita telegramu je ve sloupcích `raw_telegram_id` a `raw_partition_month` a není to cizí klíč. Retence příjmu je 24 měsíců od prosince 2028. Retence telegramu je 24 měsíců od ledna 2027. Limity stáří a budoucnosti dál rozhodují, jestli z příjmu smí vzniknout odečet. Neříkají, do které partition se příjem uloží.
+`partition_month` příjmu, payloadu tohoto příjmu a `decoded_observations` je měsíc `server_received_at` nebo `received_at`. `partition_month` telegramu je měsíc kotvy. `partition_month` události zařízení je měsíc `received_at` v UTC a `occurred_at` ho neurčuje. Příjem z prosince 2028, který odkazuje na telegram z ledna 2027, leží v prosinci 2028. Lednová identita telegramu je ve sloupcích `raw_telegram_id` a `raw_partition_month` a není to cizí klíč. Retence příjmu je 24 měsíců od prosince 2028. Retence telegramu je 24 měsíců od ledna 2027. Limity stáří a budoucnosti dál rozhodují, jestli z příjmu smí vzniknout odečet. Neříkají, do které partition se příjem uloží.
 
 ### Replay
 
@@ -439,6 +441,8 @@ BEGIN
 ACK až po COMMIT. Odpověď má jeden záznam na každou položku a její stav.
 ```
 
+Řádek `decode_queue` vkládá v kroku 7a role přijímajícího procesu, a jen když je výsledek `pending`. U MQTT je to `sjv_collector`, u HTTPS `sjv_api`. Obě role mají na frontu jen `INSERT`. `sjv_worker` řádek nevkládá. Bere ho `FOR UPDATE SKIP LOCKED`, zapíše zámek a počet pokusů a po vyčerpání pokusů ho smaže. `suspect_replay`, `server_only`, `ambiguous` a `needs_review` frontu nezakládají.
+
 Logické selhání jedné položky (`invalid`, `unknown_meter`, `too_old`, `probable_duplicate`, `needs_review`) uloží její příjem a pokračuje na další. Nevyřadí sourozence a nevrátí jejich práci. Zařízení smí frontu smazat až po ACK, ve kterém má uložený výsledek každá položka. `duplicate_delivery` v tom seznamu platí jen pro položku, jejíž klíč už existoval. Stejný `content_hash` bez prokázaného identifikátoru tímto krokem neprojde.
 
 ### Proč je to bezpečné při souběhu
@@ -610,6 +614,8 @@ COMMIT
 
 Budoucí možnost, ne součást současného postupu: rozpoznání opakovaného doručení u `isolated` bude možné až po samostatném PoC, které prokáže stabilní identitu téhož logického fragmentu napříč opakovanými doručeními. Identifikátor jednoho transportního přenosu nestačí.
 
+`repeat` a `conflict` databáze přijme jen tehdy, když je sada v okamžiku vložení nebo změny role `collecting`. `UPDATE` ostatních sloupců fragmentu, nebo zápis stejné role, stav sady znovu nezkoumá. Po vložení řádku `conflict` postup sady teprve přepne na `conflict`.
+
 Neúplná sada s prokázaným `message_ref` zůstane `collecting`. Worker po `deadline_at` nastaví `timed_out`, zapíše `ingest_rejections` s důvodem `fragment_timeout` a dekodér nezavolá. `INGEST_FRAGMENT_TIMEOUT` platí jen pro tyto skládané sady s prokázanou identitou. Sada `isolated` tento limit nemá a do `collecting`, `complete`, `conflict` ani `timed_out` nepřejde. Chybějící fragment se nulami nedoplňuje. Nejvyšší přijatý index se nepovažuje za důkaz, že zpráva je celá: bez `expected_count` nebo příznaku konce od zdroje sada do `complete` nepřejde.
 
 ### Scénář opožděného fragmentu
@@ -718,7 +724,7 @@ Každé měřidlo má v každém okamžiku právě jeden přiřazený stream (`m
 
 ## Dekódování
 
-- Worker bere `decode_queue` přes `SKIP LOCKED` a volá zafixovaný `wmbusmeters` jako podproces s hex telegramem, driverem a klíčem z dešifrovaného úložiště. Výstup je JSON.
+- Worker bere `decode_queue` přes `FOR UPDATE SKIP LOCKED` a volá zafixovaný `wmbusmeters` jako podproces s hex telegramem, driverem a klíčem z dešifrovaného úložiště. Výstup je JSON. Řádek fronty vložil přijímající proces. Worker ho po vyčerpání pokusů smaže.
 - Klíč AES se dešifruje jen v paměti workeru a nedostane se do argumentů procesu ani do logů. Předá se přes stdin, nebo přes dočasný soubor s právy `600` v tmpfs. Konkrétní způsob ověří PoC.
 - Čas odečtu (`measured_at`):
   - čas z hodin měřidla, pokud ho telegram obsahuje a je věrohodný (`time_basis = meter_clock`),

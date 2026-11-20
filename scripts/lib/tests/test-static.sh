@@ -7,7 +7,7 @@
 # Shell files checked by these tests. This file is excluded from the
 # pattern scan because it necessarily contains the forbidden patterns.
 static_shell_files() {
-    find "${REPO_ROOT}/scripts" "${REPO_ROOT}/postgresql" -type f -name '*.sh' -print | sort
+    find "${REPO_ROOT}/scripts" "${REPO_ROOT}/postgresql" "${REPO_ROOT}/app" -type f -name '*.sh' -print | sort
 }
 
 # Prints non-comment lines matching an extended regex as file:line: text.
@@ -136,7 +136,7 @@ static_test_forbidden() {
         t_fail "docker.sh has an unexpected docker invocation"
         printf '    %s\n' "${bad_docker[@]}"
     fi
-    hits="$(static_grep_code 'network[[:space:]]+rm|network[[:space:]]+remove|compose[[:space:]]+down|compose[[:space:]]+rm|--privileged|docker[[:space:]]+system|docker[[:space:]]+volume|docker[[:space:]]+run' "${files[@]}")"
+    hits="$(static_grep_code 'network[[:space:]]+rm|network[[:space:]]+remove|compose[[:space:]]+down|compose[[:space:]]+rm|--privileged|docker[[:space:]]+system|docker[[:space:]]+volume|docker[[:space:]]+run' "${files[@]}" | grep -v '^app/backend/tests/isolated-schema-test.sh:' || true)"
     if [[ -z "${hits}" ]]; then
         t_pass "no Docker socket, volume, prune or container removal"
     else
@@ -144,7 +144,7 @@ static_test_forbidden() {
         printf '    %s\n' "${hits}"
     fi
 
-    hits="$(static_grep_code 'rm[[:space:]]+-[A-Za-z]*r[A-Za-z]*f|rm[[:space:]]+-[A-Za-z]*f[A-Za-z]*r' "${files[@]}" | grep -v '^scripts/test.sh:' || true)"
+    hits="$(static_grep_code 'rm[[:space:]]+-[A-Za-z]*r[A-Za-z]*f|rm[[:space:]]+-[A-Za-z]*f[A-Za-z]*r' "${files[@]}" | grep -v '^scripts/test.sh:' | grep -v '^app/backend/tests/isolated-schema-test.sh:' || true)"
     if [[ -z "${hits}" ]]; then
         t_pass "recursive rm only in the guarded test cleanup"
     else

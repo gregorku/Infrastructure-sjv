@@ -1,6 +1,6 @@
 # Rozhodnutí
 
-Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Dne 16. 11. 2026 přibylo rozhodnutí R31 o výměnách a metrologické historii. Téhož dne se uzavřely jeho tři otevřené body: metrologické lhůty a upozornění, význam `failed` a shoda `location`. R1–R30 zůstávají schválené a beze změny. Dne 17. 11. 2026 přibylo rozhodnutí R32 o doručení s prokázaným `message_ref` po `timed_out`. R1–R31 se nemění. Dne 20. 11. 2026 přibylo rozhodnutí R33 o PostgreSQL 19 a o zahájení ostrého sběru 1. 1. 2027. Znění rozhodnutí 1–32 a revizí R1–R32 se nemění. Schválení dokumentace neznamená souhlas s nasazením.
+Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Dne 16. 11. 2026 přibylo rozhodnutí R31 o výměnách a metrologické historii. Téhož dne se uzavřely jeho tři otevřené body: metrologické lhůty a upozornění, význam `failed` a shoda `location`. R1–R30 zůstávají schválené a beze změny. Dne 17. 11. 2026 přibylo rozhodnutí R32 o doručení s prokázaným `message_ref` po `timed_out`. R1–R31 se nemění. Dne 20. 11. 2026 přibylo rozhodnutí R33 o PostgreSQL 19 a o zahájení ostrého sběru 1. 1. 2027. Znění rozhodnutí 1–32 a revizí R1–R32 se nemění. Téhož dne přibylo rozhodnutí R34 o dokončení ingest schématu. Znění R1–R33 se nemění. Schválení dokumentace neznamená souhlas s nasazením.
 
 ## Potvrzená rozhodnutí
 
@@ -47,7 +47,7 @@ Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11
 | Původní obálky (`ingest_payloads`), příjmy (`ingest_receipts`), kandidáti deduplikace (`ingest_dedup_candidates`), odmítnuté obálky (`ingest_rejections`), dekódovaná pozorování (`decoded_observations`) | 24 měsíců stáří měsíce přijetí | měsíční partitions. Příjem z prosince se nemaže s telegramem z ledna |
 | Surové telegramy (`raw_telegrams`) | 24 měsíců stáří měsíce kotvy | měsíční partitions. Pozdější příjem tuto dobu neprodlužuje a cizím klíčem ji nedrží |
 | Fragmentové sady (`ingest_fragment_sets`) a fragmenty (`ingest_fragments`) | 24 měsíců od `first_received_at` a od `received_at` | bez partitioningu. Nejdřív `DELETE` fragmentů, potom sady, na kterou už žádný fragment neukazuje. Pozdní fragment sadu podrží. Každé doručení fragmentu je vlastní řádek |
-| Události zařízení (`device_events`) | 12 měsíců | měsíční partitions |
+| Události zařízení (`device_events`) | 12 měsíců stáří měsíce `received_at` | měsíční partitions. `partition_month` je měsíc UTC hodnoty `received_at`. `occurred_at` měsíc neurčuje |
 | Audit (`audit_logs`) | dlouhodobě | bez partitioningu, hash řetězec, jen INSERT |
 | Výměny (`meter_replacement_events`) a metrologická historie (`meter_verifications`) | trvale | bez partitioningu, řádky se nemažou. Skončená platnost ověření řádek nemaže |
 | Klíče idempotence a deduplikace, epochy bootů | 60 dní | `DELETE` v dávkách. Delší než maximální stáří zprávy (30 dní) |
@@ -169,6 +169,19 @@ R33 nemění znění rozhodnutí 1–32 ani revizí R1–R32. Rozhodnutí 1 dál
 
 pgBackRest 2.60.1 vyšel 16. 11. 2026 a v poznámkách uvádí podporu PostgreSQL 19rc2. Proti zdrojům PostgreSQL 19.0 z 19. 11. 2026 se shoduje `PG_CONTROL_VERSION` 1905, `XLOG_PAGE_MAGIC` 0xD122 a rozložení `ControlFileData`, včetně `slru_pages_per_segment` a `data_checksum_version_init`. Konstanta katalogu vložená do pgBackRest je 202605131, vydání 19.0 má 202610061. Běžící nástroj čte `catalog_version_no` z `pg_control`. Záloha a obnova touto dvojicí se ještě nespustily.
 
+## Doplnění 20. 11. 2026: dokončení ingest schématu
+
+**R34 – Role fragmentu, fronta dekódování, měsíc události a druh údaje koncového bodu**
+
+Čtyři pravidla doplňují migraci `0001_ingest_schema`. Znění R1–R33 se nemění.
+
+1. Trigger `BEFORE INSERT OR UPDATE OF delivery_role` na `ingest_fragments` pustí `repeat` a `conflict` jen tehdy, když je nadřazená sada v tom okamžiku `collecting`. `collecting` už nese neprázdné `message_ref` a vyplněné `deadline_at`. `UPDATE`, který `delivery_role` nemění, trigger znovu nezkoumá. Trigger zákazu přechodu `isolated` zůstává. Unikátní index `message_ref`, skládání a evidence po `timed_out` se nezavádějí.
+2. Řádek `decode_queue` vkládá přijímající proces ve stejné transakci jako nový telegram, a jen když vložení do `telegram_dedup_keys` dá výsledek `pending`. `sjv_collector` a `sjv_api` mají na frontu jen `INSERT`. `sjv_worker` řádek nevkládá. Frontu čte, bere ji `FOR UPDATE SKIP LOCKED`, aktualizuje `attempts`, `next_attempt_at`, `locked_by`, `locked_at` a `last_error` a po vyčerpání pokusů ji smaže. Collector dekódování a odečty nedostává.
+3. `device_events.partition_month` je první den měsíce UTC hodnoty `received_at`. `received_at` je povinné. `occurred_at` je volitelný čas události a měsíc partition neurčuje. Řádek, jehož měsíc tomuto času neodpovídá, uložit nelze. Retence 12 měsíců se dál počítá od stáří `partition_month`.
+4. `endpoint_credentials` drží tuto kombinaci: `bearer` a `basic` mají `storage = hash` a jen `secret_hash`; `client_cert` má `storage = hash` a jen `cert_fingerprint`; `dtls_psk` má `storage = kek_enc` a jen `secret_enc`. Příchozí ověření zůstává hash nebo otisk. Opakovaně použitelný DTLS PSK je šifrovaný AES-256-GCM. Hodnota se neloguje a nekopíruje do konfigurace ani do payloadu. `secret_enc` se rozšifruje jen v paměti procesu, který PSK oprávněně potřebuje. UDP/DTLS listener není přiřazený `sjv_collector`, `sjv_api` ani `sjv_worker`. Migrace proto `SELECT` na `secret_enc` těmto rolím nedává. Obecné `SELECT` role `sjv_readonly` z výchozích oprávnění vlastníka zůstává a není to právo pro použití PSK. Dřívější věta, že odchozí token platformy leží v `secret_enc`, tímto mapováním neplatí. Kam se token platformy uloží, R34 neurčuje a nový sloupec nezakládá.
+
+Schválená oprava oprávnění v téže migraci odebírá `sjv_readonly` tabulkové `SELECT` na `endpoint_credentials` a ponechává čtení `id`, `endpoint_id`, `kind`, `storage`, `created_at` a `revoked_at`. `secret_enc` mezi nimi není. Znění R34 se nemění. Ukládání odchozího tokenu platformy zůstává mimo tuto tabulku a mimo Etapu 1. Přístup budoucího UDP/DTLS listeneru k `secret_enc` zůstává otevřený.
+
 ## Otevřené body
 
 Hodnoty, které nejsou známé, se nedoplňují odhadem.
@@ -188,6 +201,8 @@ Hodnoty, které nejsou známé, se nedoplňují odhadem.
 | Zda další model ACRIOS umí totéž co přístroj z PoC | nesmí se předpokládat. Každý model má vlastní záznam schopností a případně vlastní PoC |
 | Zda Platform API vrací stabilní identifikátor koncentrátoru přes výměnu SIM, jaký čas payload nese a zda dekódovaná data obsahují ACC nebo čas měřidla | mapování adaptéru ve fázi 12, ne tvar tabulek |
 | UDP/DTLS port a případný DNAT, pokud PoC přímý UDP potvrdí | samostatná změna mimo repozitář, až po PoC. Teď se port nepublikuje |
+| Která role smí číst `endpoint_credentials.secret_enc` kvůli DTLS PSK | UDP/DTLS listener není přiřazený. `sjv_collector`, `sjv_api`, `sjv_worker` ani `sjv_readonly` `secret_enc` nečtou. Přístup listeneru zůstává otevřený |
+| Kam se uloží odchozí token platformy | R34 přiřazuje `secret_enc` jen `dtls_psk`. Nový sloupec pro token platformy se nezakládá |
 | Počet měřidel a intervaly vysílání | odhad objemu, fáze 4 |
 | Další doručení s prokázaným `message_ref`, když odpovídající sada je `complete` nebo `conflict` | Samostatné rozhodnutí. R32 se na tyto stavy nevztahuje. Fragment se k sadě nepřipojí. Jak se doručení dál eviduje, schválená pravidla neurčují |
 | Verze software a ověření bodů „k ověření“ | fáze 1–3 |

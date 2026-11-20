@@ -580,6 +580,39 @@ EOF
         bash -c 'grep -q "POSTGRES_USER: \${PG_BOOTSTRAP_USER:?PG_BOOTSTRAP_USER}" "$1" && ! grep -q "CREATE ROLE sjv_bootstrap" "$2"' _ "${compose}" "${roles}"
 }
 
+test_ingest_migration() {
+    print_section "Ingest migration"
+    local backend="${REPO_ROOT}/app/backend"
+    local revision="${backend}/alembic/versions/0001_ingest_schema.py"
+    local pre="${backend}/alembic/versions/0001_pre.sql"
+    local post="${backend}/alembic/versions/0001_post.sql"
+    local metadata="${backend}/sjv_db/metadata.py"
+    local envpy="${backend}/alembic/env.py"
+    t_check "the migration reads the database URL from the environment" \
+        grep -q 'SJV_DATABASE_URL' "${envpy}"
+    t_check "the migration file does not contain a database password" \
+        bash -c '! grep -Eq "PASSWORD|postgresql(\\+psycopg)?://[^\"[:space:]]+:[^\"[:space:]]+@" "$1" "$2" "$3" "$4" "$5"' _ \
+            "${revision}" "${pre}" "${post}" "${metadata}" "${backend}/alembic.ini"
+    t_check "collector grants are specific and do not use ALL PRIVILEGES" \
+        bash -c 'grep -q "TO sjv_collector" "$1" && ! grep -Eq "GRANT ALL|ALL PRIVILEGES" "$1"' _ "${post}"
+    t_check "message_ref has no unique index in the migration" \
+        bash -c '! grep -Eq "UNIQUE[[:space:]]*\\(.*message_ref|message_ref.*UNIQUE" "$1" "$2"' _ "${metadata}" "${post}"
+    t_check "isolated status is protected by the documented trigger and check" \
+        bash -c 'grep -q "sjv_ingest_fragment_set_status" "$1" && grep -q "status_identity" "$2"' _ "${post}" "${metadata}"
+    t_check "repeat and conflict require a collecting set" \
+        bash -c 'grep -q "sjv_ingest_fragment_delivery_role" "$1" && grep -q "BEFORE INSERT OR UPDATE OF delivery_role" "$1"' _ "${post}"
+    t_check "receiving roles insert the decode queue and the worker consumes it" \
+        bash -c 'grep -Fq "GRANT INSERT ON decode_queue TO sjv_collector" "$1" && grep -Fq "GRANT INSERT ON decode_queue TO sjv_api" "$1" && grep -Fq "GRANT DELETE ON decode_queue TO sjv_worker" "$1" && ! grep -Fq "GRANT INSERT ON decode_queue TO sjv_worker" "$1"' _ "${post}"
+    t_check "device events follow the received month and credentials follow kind" \
+        bash -c 'grep -q kind_storage "$1" && grep -F -q "received_at\", TZ, nullable=False" "$1"' _ "${metadata}"
+    t_check "the migration does not grant secret_enc or device creation" \
+        bash -c '! grep -Eq "secret_enc|INSERT ON devices|GRANT INSERT ON devices" "$1"' _ "${post}"
+    t_check "readonly keeps endpoint credential metadata and not the whole table" \
+        bash -c 'grep -Fq "REVOKE SELECT ON TABLE endpoint_credentials FROM sjv_readonly" "$1" && grep -Fq "id, endpoint_id, kind, storage, created_at, revoked_at" "$1"' _ "${post}"
+    t_check "downgrade is refused" \
+        grep -q 'forward-only' "${revision}"
+}
+
 run_infra_tests() {
     print_header "Traefik and CrowdSec"
     test_infra_repository
@@ -589,4 +622,5 @@ run_infra_tests() {
     test_infra_key_and_compose
     test_infra_log_rotation
     test_postgresql_service
+    test_ingest_migration
 }

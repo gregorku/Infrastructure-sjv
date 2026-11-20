@@ -21,3 +21,5 @@ dynamic-security.json
 
 # Local test runs (scripts/test.sh).
 .test-tmp/
+__pycache__/
+*.pyc
