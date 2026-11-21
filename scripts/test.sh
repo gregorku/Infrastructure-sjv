@@ -50,7 +50,7 @@ cleanup_run_dir() {
 run_ingest_contract_tests() {
     print_header "Ingest contract"
     if ! command -v python3 >/dev/null 2>&1; then
-        t_fail "python3 is required for the ingest contract tests"
+        t_fail "python3 is required for the ingest contract tests. Install the python3 package: apt-get install python3 shellcheck"
         return
     fi
     # The project has no pytest. unittest is the standard library and the
@@ -66,7 +66,7 @@ run_shellcheck_step() {
     "${SCRIPT_DIR}/shellcheck.sh" || rc=$?
     case "${rc}" in
         0) t_pass "shellcheck: no findings" ;;
-        3) t_skip "shellcheck is not installed; run ./scripts/shellcheck.sh where it is available" ;;
+        3) t_skip "shellcheck is not installed. Install the shellcheck package: apt-get install python3 shellcheck. Nothing was checked." ;;
         *) t_fail "shellcheck reported findings" ;;
     esac
 }
@@ -98,7 +98,9 @@ case "${1:---static}" in
     --static) main ;;
     --help)
         printf '%s\n' "Usage: ./scripts/test.sh [--static]" \
-            "Runs syntax, static, environment-library, script and ingest-contract tests offline."
+            "Runs syntax, static, environment-library, script and ingest-contract tests offline." \
+            "A complete run on Debian 13 needs the python3 and shellcheck packages: apt-get install python3 shellcheck." \
+            "Those packages are not required to operate the stack."
         ;;
     *) fail "Unknown option: $1" ;;
 esac

@@ -115,13 +115,13 @@ post_deploy_write_bouncer_key() {
     (
         set -Eeuo pipefail
         local tmp=""
-        # shellcheck disable=SC2329 # invoked by the EXIT trap below
+        # shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap below
         cleanup() {
             if [[ -n "${tmp}" && -f "${tmp}" && ! -L "${tmp}" ]]; then
                 rm -f -- "${tmp}"
             fi
         }
-        # shellcheck disable=SC2329 # invoked by the signal traps below
+        # shellcheck disable=SC2317,SC2329 # invoked by the signal traps below
         on_signal() {
             local sig="$1"
             cleanup
@@ -214,12 +214,12 @@ crowdsec_probe_once() {
     code="$(
         set -Eeuo pipefail
         local staged="" out="" status rc=0
-        # shellcheck disable=SC2329 # invoked by the EXIT trap below
+        # shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap below
         cleanup() {
             [[ -n "${staged}" && -f "${staged}" && ! -L "${staged}" ]] && rm -f -- "${staged}"
             [[ -n "${out}" && -f "${out}" && ! -L "${out}" ]] && rm -f -- "${out}"
         }
-        # shellcheck disable=SC2329 # invoked by the signal traps below
+        # shellcheck disable=SC2317,SC2329 # invoked by the signal traps below
         on_signal() {
             local sig="$1"
             cleanup

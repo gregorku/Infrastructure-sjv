@@ -104,7 +104,7 @@ test_infra_networks() {
     local created="${T_RUN_DIR}/networks-created"
     rm -f "${created}"
 
-    # shellcheck disable=SC2329 # passed to t_expect_ok by name
+    # shellcheck disable=SC2317,SC2329 # passed to t_expect_ok by name
     infra_plan_create() {
         fixture_valid_env RUNTIME_ENV
         docker_network_exists() { return 1; }
@@ -119,7 +119,7 @@ test_infra_networks() {
     t_check "sjv-internal is created with --internal and the others are not" \
         bash -c '[[ "$(cat "$1")" == "$(printf "%s\n" "sjv-proxy 172.30.10.0/24 172.30.10.1 no" "sjv-internal 172.30.11.0/24 172.30.11.1 yes" "sjv-mqtt 172.30.12.0/24 172.30.12.1 no" "sjv-egress 172.30.13.0/24 172.30.13.1 no")" ]]' _ "${created}"
 
-    # shellcheck disable=SC2329 # passed to t_expect_fail by name
+    # shellcheck disable=SC2317,SC2329 # passed to t_expect_fail by name
     infra_plan_foreign() {
         fixture_valid_env RUNTIME_ENV
         docker_network_exists() { return 0; }
@@ -131,7 +131,7 @@ test_infra_networks() {
     t_expect_fail "a foreign network with the project name is refused" "not managed" infra_plan_foreign
     t_check "a foreign network was not recreated" test ! -s "${created}"
 
-    # shellcheck disable=SC2329 # passed to t_expect_fail by name
+    # shellcheck disable=SC2317,SC2329 # passed to t_expect_fail by name
     infra_plan_overlap() {
         fixture_valid_env RUNTIME_ENV
         docker_network_exists() { return 1; }
@@ -144,7 +144,7 @@ test_infra_networks() {
     t_expect_fail "an overlapping existing network blocks creation" "overlaps existing network" infra_plan_overlap
     t_check "an overlapping plan creates nothing" test ! -s "${created}"
 
-    # shellcheck disable=SC2329 # passed to t_expect_ok by name
+    # shellcheck disable=SC2317,SC2329 # passed to t_expect_ok by name
     infra_plan_keep() {
         fixture_valid_env RUNTIME_ENV
         docker_network_exists() { return 0; }

@@ -12,6 +12,14 @@ Stav: etapa B1b. Sada běží offline. `docker compose config` se spustí jen kd
 
 `test.sh` nepotřebuje root, síť, Docker ani `/docker-data`. Skončí nenulovým kódem, pokud selže kterýkoli test. Přeskočené testy vypíše jako `SKIP` s důvodem a nepočítá je jako úspěšné.
 
+Provozní skripty `python3` ani `shellcheck` nevolají a `check_environment` je nevyžaduje. Kompletní běh na Debianu 13 tyto dva balíčky potřebuje:
+
+```bash
+apt-get install python3 shellcheck
+```
+
+Chybějící `python3` ukončí krok kontraktu ingestu chybou a text pojmenuje balíček `python3`. Chybějící `shellcheck` nechá `shellcheck.sh` skončit kódem 3 a doporučí `apt-get install shellcheck`. `test.sh` tento krok přeskočí a dál doporučí `apt-get install python3 shellcheck`. Ostatní testy a bezpečnostní kontroly pokračují.
+
 ## Co ověřuje `test.sh`
 
 ### Statické kontroly
@@ -46,14 +54,14 @@ Stav: etapa B1b. Sada běží offline. `docker compose config` se spustí jen kd
 
 ### Kontrakt ingestu
 
-- `app/backend/tests/test_ingest_contract.py` běží přes `python3` a standardní `unittest`. Pytest v projektu není. Test neotevírá PostgreSQL ani kontejner. Selhání kteréhokoli případu ukončí `test.sh` nenulovým kódem. Výstup nepíše bajtkód do repozitáře.
+- `app/backend/tests/test_ingest_contract.py` běží přes `python3` a standardní `unittest`. Pytest v projektu není. Test neotevírá PostgreSQL ani kontejner. Selhání kteréhokoli případu ukončí `test.sh` nenulovým kódem. Chybějící příkaz `python3` skončí stejnou chybou a text pojmenuje balíček `python3`. Výstup nepíše bajtkód do repozitáře.
 
 ## Testy, které `test.sh` nespustí
 
 | Test | Důvod | Jak ověřit |
 | --- | --- | --- |
 | `.env` jiného vlastníka | `test.sh` ho spustí, jen když běží jako root | jinak je poctivě přeskočený |
-| ShellCheck | nemusí být nainstalovaný | `./scripts/shellcheck.sh` (kód 3 = nespuštěno) |
+| ShellCheck | balíček `shellcheck` chybí | `./scripts/shellcheck.sh` skončí kódem 3 a doporučí `apt-get install shellcheck`. `test.sh` krok přeskočí |
 | `require_mountpoint` v testovacím režimu | testovací režim ho přeskakuje | bez `SJV_TEST_BASE_DIR` a bez `/docker-data` musí `init.sh`, `update-env.sh` i `check-env.sh` skončit chybou a nic nevytvořit |
 | Izolovaná záloha a obnova pgBackRest | `test.sh` nespouští databázový kontejner | ruční běh jen v dočasném adresáři, mimo `/docker-data`. Poslední úspěch je 20. 11. 2026 a postup je v [operations.md](operations.md#záloha-a-obnova-postgresql) |
 | Ingest migrace PostgreSQL 19.0 | `test.sh` nespouští databázový kontejner | `app/backend/tests/isolated-schema-test.sh` ve vlastním dočasném Podman úložišti. Maže jen `/tmp/sjv-alembic-itest` a svou testovací síť. Kontroluje `alembic upgrade head`, `alembic check`, roli fragmentu, frontu dekódování, měsíc `device_events`, mapování `endpoint_credentials`, zákaz čtení `secret_enc` pro `sjv_readonly`, uložení payloadu a položek a příjem prázdné obálky rolí `sjv_collector` |

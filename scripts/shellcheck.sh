@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 if ! command -v shellcheck >/dev/null 2>&1; then
-    printf '%s\n' "shellcheck is not installed. Nothing was checked." >&2
+    printf '%s\n' "shellcheck is not installed. Install the shellcheck package: apt-get install shellcheck. Nothing was checked." >&2
     exit 3
 fi
 

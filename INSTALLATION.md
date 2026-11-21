@@ -37,7 +37,19 @@ Související dokumenty:
 
 ## B. Předpoklady
 
-Skripty `init.sh`, `update-env.sh`, `check-env.sh`, `deploy.sh` a `post-deploy.sh` volají `check_environment`. Ta vyžaduje root a příkazy `awk`, `base64`, `cmp`, `cp`, `date`, `find`, `findmnt`, `flock`, `head`, `install`, `mktemp`, `sort`, `stat` a `tr`. `deploy.sh` a `post-deploy.sh` navíc chtějí `docker` a fungující `docker compose`. `create-dashboard-user.sh` chce `htpasswd`. `rotate-traefik-logs.sh` chce root, `gzip`, `truncate`, `sync`, `date`, `find`, `cp` a `mktemp`.
+### Provoz
+
+Skripty `init.sh`, `update-env.sh`, `check-env.sh`, `deploy.sh` a `post-deploy.sh` volají `check_environment`. Ta vyžaduje root a příkazy `awk`, `base64`, `cmp`, `cp`, `date`, `find`, `findmnt`, `flock`, `head`, `install`, `mktemp`, `sort`, `stat` a `tr`. `deploy.sh` a `post-deploy.sh` navíc chtějí `docker` a fungující `docker compose`. `create-dashboard-user.sh` chce `htpasswd`. `rotate-traefik-logs.sh` chce root, `gzip`, `truncate`, `sync`, `date`, `find`, `cp` a `mktemp`. `python3` a `shellcheck` mezi těmito příkazy nejsou. Provozní instalace je bez nich spustitelná.
+
+### Vývoj a testování
+
+Kompletní `./scripts/test.sh` na Debianu 13 potřebuje balíčky `python3` a `shellcheck`. Na VPS se neinstalují kvůli `init.sh` ani `deploy.sh`.
+
+```bash
+apt-get install python3 shellcheck
+```
+
+Chybějící `python3` ukončí krok kontraktu ingestu chybou a text pojmenuje balíček `python3`. Chybějící `shellcheck` nechá `./scripts/shellcheck.sh` skončit kódem 3 a doporučí `apt-get install shellcheck`. Python k tomu není potřeba. `test.sh` tento krok přeskočí, ostatní testy a bezpečnostní kontroly doběhnou a dál doporučí `apt-get install python3 shellcheck`.
 
 Cílová databáze v Compose je PostgreSQL 19.0 s pgBackRest 2.60.1. Image je `POSTGRES_IMAGE` v `.env.example`, tag `19.0` a index digest. Tag `19` ani `latest` validace nepřijme. Služba `sjv-postgresql` nepublikuje port a je jen v síti `sjv-internal`.
 
@@ -223,7 +235,7 @@ Kontrola databáze, oprávnění rolí a schématu na VPS hotový skript nemá. 
 ./scripts/test.sh
 ```
 
-`./scripts/test.sh --static` je totéž. Výchozí argument je `--static`. Běh je offline. `./scripts/shellcheck.sh` skončí kódem 3, když ShellCheck není nainstalovaný.
+`./scripts/test.sh --static` je totéž. Výchozí argument je `--static`. Běh je offline. Na Debianu 13 ho doplňují balíčky `python3` a `shellcheck` příkazem `apt-get install python3 shellcheck`. Samostatný `./scripts/shellcheck.sh` bez balíčku skončí kódem 3 a doporučí `apt-get install shellcheck`.
 
 Dostupnost HTTPS pro `SJV_DOMAIN` závisí na HAProxy a DNS mimo tento repozitář. Příkaz, který by je z checkoutu ověřil, tu není. Dashboard se publikuje jen s existujícím souborem hesel a s `ADMIN_IP_ALLOWLIST`.
 
@@ -321,7 +333,7 @@ Logy stdout kontejnerů jsou ovladač `json-file`. Soubory Traefiku jsou `/docke
 | `scripts/post-deploy.sh` | registrace bouncer klíče | po `deploy.sh`, když běží CrowdSec | ano, klíč netiskne |
 | `scripts/reload.sh` | totéž co `deploy.sh` | místo dalšího `deploy.sh` | ano |
 | `scripts/rotate-traefik-logs.sh` | copytruncate `access.log` | ručně, dokud timer není nasazený | ano, prázdný soubor nerotuje |
-| `scripts/test.sh` | offline testy | vývoj, před změnou, bez VPS | ano, hostitele nemění |
-| `scripts/shellcheck.sh` | ShellCheck skriptů | spolu s `test.sh`, nebo samostatně | ano, kód 3 znamená, že ShellCheck chybí |
+| `scripts/test.sh` | offline testy | vývoj, před změnou, bez VPS | ano, hostitele nemění. Debian 13: `python3` a `shellcheck` |
+| `scripts/shellcheck.sh` | ShellCheck skriptů | spolu s `test.sh`, nebo samostatně | ano, kód 3 doporučí `apt-get install shellcheck` |
 
 `upgrade.sh`, `backup.sh`, `restore.sh` a `maintenance.sh` v této tabulce nejsou, protože v `scripts/` nejsou.

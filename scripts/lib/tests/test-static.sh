@@ -245,6 +245,25 @@ static_test_env_example() {
 
 declare -gA STATIC_EXAMPLE=()
 
+static_test_tool_packages() {
+    print_section "Test tool packages"
+    local test_sh="${REPO_ROOT}/scripts/test.sh"
+    local shellcheck_sh="${REPO_ROOT}/scripts/shellcheck.sh"
+    local common_sh="${REPO_ROOT}/scripts/lib/common.sh"
+    t_check "a missing python3 names the python3 package" \
+        grep -q 'Install the python3 package: apt-get install python3 shellcheck' "${test_sh}"
+    t_check "standalone shellcheck names only the shellcheck package" \
+        grep -q 'Install the shellcheck package: apt-get install shellcheck.' "${shellcheck_sh}"
+    t_check "standalone shellcheck does not ask for python3" \
+        bash -c '! grep -q python3 "$1"' _ "${shellcheck_sh}"
+    t_check "test.sh repeats the shellcheck package name" \
+        grep -q 'Install the shellcheck package: apt-get install python3 shellcheck' "${test_sh}"
+    t_check "a missing shellcheck still exits 3" \
+        grep -qx '    exit 3' "${shellcheck_sh}"
+    t_check "production environment check does not require python3 or shellcheck" \
+        bash -c '! grep -Eq "python3|shellcheck" "$1"' _ "${common_sh}"
+}
+
 run_static_tests() {
     print_header "Static checks"
     static_test_syntax
@@ -252,4 +271,5 @@ run_static_tests() {
     static_test_forbidden
     static_test_repository
     static_test_env_example
+    static_test_tool_packages
 }
