@@ -45,7 +45,7 @@ Veřejné HTTP a HTTPS jdou na Traefik, porty 80 a 443. Dashboard je port 8443 a
 
 `/docker-data` musí být samostatný mountpoint. Když není, `init.sh`, `update-env.sh` a `check-env.sh` skončí chybou a adresář ani `.env` nezaloží. Git checkout má být mimo `/docker-data`. Konvence `/incus-dir/git/Infrastructure-sjv` v dokumentaci pořád není potvrzená.
 
-Adresáře, práva a svazky zakládá `init.sh`. Tabulka cest je v [docs/operations.md](docs/operations.md#adresáře). Data PostgreSQL jsou `/docker-data/infrastructure-sjv/postgresql`, v kontejneru `/var/lib/postgresql`, PGDATA podle image `/var/lib/postgresql/19/docker`. Repozitář pgBackRest je `/docker-data/backups/infrastructure-sjv/pgbackrest`.
+Adresáře, práva a svazky zakládá `init.sh`. Tabulka cest je v [docs/operations.md](docs/operations.md#adresáře). Data PostgreSQL jsou `/docker-data/infrastructure-sjv/postgresql`, v kontejneru `/var/lib/postgresql`, PGDATA podle image `/var/lib/postgresql/19/docker`. Repozitář pgBackRest je `/docker-data/backups/infrastructure-sjv/pgbackrest`. Build context image je jiná cesta: `/docker-data/stacks/infrastructure-sjv/postgresql`. `init.sh` a `deploy.sh` ji plní z adresáře `postgresql/` v Gitu. `compose/40-postgresql.yml` má `context: ../postgresql`, takže z runtime souboru `compose/40-postgresql.yml` tato cesta vyjde. Datový adresář se při tom nepřepisuje.
 
 Hesla databázových rolí, MQTT a rest-server vznikají až v runtime `.env` nebo v souborech pod `/docker-data`. Do dokumentace nepatří.
 
@@ -86,7 +86,7 @@ Před `deploy.sh` musí `sudo ./scripts/check-env.sh` skončit patičkou `Enviro
 
 ### `init.sh`
 
-Spouští se jako první, na stroji s mountem `/docker-data`. Založí adresáře, zúží příliš otevřená práva, odmítne symlink a adresář jiného vlastníka a zkopíruje soubory stacku včetně `.env.example`. Existující `.env` nemění. Kontejnery ani data nemaže.
+Spouští se jako první, na stroji s mountem `/docker-data`. Založí adresáře, zúží příliš otevřená práva, odmítne symlink a adresář jiného vlastníka a zkopíruje soubory stacku bez tajemství: `.env.example`, Compose, `configs/` a `postgresql/` včetně `Dockerfile`, `pgbackrest.conf` a `docker-entrypoint-initdb.d`. Cíl build contextu je `/docker-data/stacks/infrastructure-sjv/postgresql`. Soubor, který už se shoduje, se nepřepíše. Existující `.env` nemění. Kontejnery ani data nemaže.
 
 ```bash
 sudo ./scripts/init.sh
@@ -234,7 +234,7 @@ Záloha a obnova produkčním skriptem ověřit nejdou. `backup.sh` a `restore.s
 Aktualizace konfigurace a znovuspuštění Traefiku a CrowdSec:
 
 1. V checkoutu převzít nový Git. Příkaz `git pull` a vzdálený repozitář tu nejsou určené.
-2. `sudo ./scripts/init.sh`, aby se do stacku dostala nová `.env.example` a soubory Compose.
+2. `sudo ./scripts/init.sh`, aby se do stacku dostala nová `.env.example`, soubory Compose a build context `postgresql/`.
 3. `sudo ./scripts/update-env.sh`. Existující uživatelské hodnoty a vygenerovaná hesla nechá. `framework` hodnoty srovná se šablonou.
 4. `sudo ./scripts/check-env.sh`.
 5. `sudo ./scripts/deploy.sh` nebo `sudo ./scripts/reload.sh`.

@@ -13,7 +13,7 @@ Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Tr
 
 | Cesta | Práva | Obsah |
 | --- | --- | --- |
-| `/docker-data/stacks/infrastructure-sjv` | 750 | runtime `.env`, kopie `.env.example`, později Compose |
+| `/docker-data/stacks/infrastructure-sjv` | 750 | runtime `.env`, kopie `.env.example`, Compose, `configs/` a build context `postgresql/` |
 | `/docker-data/infrastructure-sjv` | 755 | data služeb |
 | `/docker-data/infrastructure-sjv/state` | 700 | stav skriptů |
 | `/docker-data/infrastructure-sjv/secrets` | 700 | soubory s tajemstvími pro služby (od pozdějších etap) |
@@ -34,7 +34,7 @@ Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Tr
 
 ## Postup první instalace
 
-1. `sudo ./scripts/init.sh` vytvoří adresáře a zkopíruje `.env.example` do stacku. `.env` nevytváří.
+1. `sudo ./scripts/init.sh` vytvoří adresáře a zkopíruje soubory stacku bez tajemství: `.env.example`, Compose, `configs/` a `postgresql/`. `.env` nevytváří. Shodný soubor při dalším běhu nepřepíše. Build context je `/docker-data/stacks/infrastructure-sjv/postgresql`. Compose v `compose/40-postgresql.yml` má `context: ../postgresql`, takže po synchronizaci míří sem. Datový adresář `/docker-data/infrastructure-sjv/postgresql` zůstává zvlášť a skript do něj tyto soubory nekopíruje.
 2. `sudo ./scripts/update-env.sh` vytvoří `.env` (práva 600), vygeneruje hesla a vypíše jména proměnných, které ještě obsahují `set_*` nebo dokumentační hostname.
 3. V `/docker-data/stacks/infrastructure-sjv/.env` nahraď `example.com` a `mqtt.example.com` skutečnými jmény a doplň zbylé `set_*`. Hodnoty piš bez uvozovek. Existující domény další běh `update-env.sh` nepřepíše.
 4. `sudo ./scripts/check-env.sh` musí skončit bez chyb. Varování (například chybějící vzdálená záloha) je třeba vědomě přijmout.

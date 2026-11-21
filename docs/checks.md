@@ -32,7 +32,7 @@ Stav: etapa B1b. Sada běží offline. `docker compose config` se spustí jen kd
 ### Skripty v testovacím režimu
 
 - Pojistka `SJV_TEST_BASE_DIR`: jen přesně `.test-tmp/<běh>/base` uvnitř checkoutu. Cesta se neporovnává jako regulární výraz. Symlink v kterékoli složce, `atest-tmp` i `//test-tmp` jsou odmítnuté.
-- `init.sh`: adresáře a práva, kopie `.env.example`, žádný `.env`, opakovaný běh beze změny, zúžení práv, odmítnutí symlinku.
+- `init.sh`: adresáře a práva, kopie `.env.example`, žádný `.env`, opakovaný běh beze změny, zúžení práv, odmítnutí symlinku. `postgresql` je v `DEPLOY_ITEMS`. Synchronizace zkopíruje `Dockerfile`, `pgbackrest.conf` a `docker-entrypoint-initdb.d` do stacku. Druhý běh tyto shodné soubory nemění. Compose `context: ../postgresql` po kopii míří na `/docker-data/stacks/infrastructure-sjv/postgresql`, ne do datového adresáře. `/docker-data` test nesáhne.
 - `update-env.sh`: vytvoření `.env`, výpis placeholderů a dokumentačních jmen, opakovaný běh beze změny souborů i adresářů, zachování doplněných hodnot včetně `SJV_DOMAIN` a `MQTT_HOSTNAME`, záloha před obnovou hodnoty `framework`, zámek proti souběhu, odmítnutí zastaralé kopie `.env.example`.
 - `update-env.sh` a `check-env.sh` volají `require_mountpoint` dřív, než sáhnou na `.env`. Bez mountpointu nic nezapíšou a nezaloží adresář.
 - `check-env.sh`: odmítne `example.com` a `mqtt.example.com` jako produkční domény a spolu s nimi ostatní chyby, práva 644 u `.env` i záloh, osiřelý `.env.tmp.*`, visící symlink `.env` v checkoutu a nebezpečný allowlist; přijme kompletní konfiguraci; nikdy nic nezmění a nevypíše tajemství.

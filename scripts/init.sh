@@ -16,7 +16,8 @@ log_install_err_trap
 case "${1:-}" in
     "") ;;
     --help)
-        printf '%s\n' "Usage: ./scripts/init.sh" "Creates the directory layout under ${BASE_DIR} and copies .env.example into the stack."
+        printf '%s\n' "Usage: ./scripts/init.sh" \
+            "Creates the directory layout under ${BASE_DIR} and copies secret-free stack files, including postgresql/."
         exit 0
         ;;
     *) fail "Unknown option: $1" ;;
