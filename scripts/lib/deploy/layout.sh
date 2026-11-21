@@ -39,6 +39,40 @@ layout_prepare_acme() {
     [[ "$(file_mode "${ACME_FILE}")" == 600 ]] || fail "${ACME_FILE} has mode $(file_mode "${ACME_FILE}"). It must be 600."
 }
 
+# Creates an empty access.log so CrowdSec can open /logs/access.log on its
+# first start. An existing regular file is left unchanged. A symlink is
+# refused and is not followed. noclobber avoids truncating a file that
+# appears between the check and the create.
+layout_prepare_access_log() {
+    local dir="${TRAEFIK_DIR}/logs" live="${TRAEFIK_DIR}/logs/access.log"
+    [[ "${dir}" == /* && "${dir}" != "/" && "${dir}" != *..* ]] || fail "Unsafe log directory."
+    [[ -d "${dir}" && ! -L "${dir}" ]] || fail "Traefik log directory is missing or is a symlink."
+    [[ "$(cd -- "${dir}" && pwd -P)" == "${dir}" ]] || fail "Traefik log directory is not a canonical path."
+    if path_present "${live}"; then
+        layout_keep_access_log "${live}"
+        return 0
+    fi
+    if ! (umask 137 && set -o noclobber && : > "${live}"); then
+        layout_keep_access_log "${live}"
+        return 0
+    fi
+    chmod 640 "${live}"
+    [[ -f "${live}" && ! -L "${live}" ]] || fail "access.log is not a regular file."
+    [[ ! -s "${live}" ]] || fail "A new access.log was not empty."
+    [[ "$(file_mode "${live}")" == "640" ]] || fail "access.log has mode $(file_mode "${live}"). It must be 640."
+    [[ "$(file_owner "${live}")" == "${EUID}" ]] || fail "access.log is owned by uid $(file_owner "${live}"), expected ${EUID}."
+    info "Created ${live} (mode 640)."
+}
+
+layout_keep_access_log() {
+    local live="$1"
+    [[ ! -L "${live}" ]] || fail "access.log is a symlink. Refusing to replace it."
+    [[ -f "${live}" ]] || fail "access.log exists and is not a regular file."
+    [[ "$(file_owner "${live}")" == "${EUID}" ]] || fail "access.log is owned by uid $(file_owner "${live}"), expected ${EUID}."
+    [[ "$(readlink -f -- "${live}")" == "${live}" ]] || fail "access.log resolves outside the log directory."
+    info "access.log already exists. Its contents were not changed."
+}
+
 # Root keeps ownership so a later init still accepts the directory. Group 999
 # is the postgres group inside the official image. ensure_dir never loosens a
 # mode, so the group write bit is applied here on purpose.

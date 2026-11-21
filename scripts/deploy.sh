@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Renders the Traefik runtime and, outside test mode, starts Traefik and CrowdSec.
-# Safe to run repeatedly. Does not remove networks, volumes or foreign containers.
+# Renders Traefik and, outside test mode, starts Traefik, CrowdSec and sjv-backup.
+# A missing access.log is created empty first. Safe to run repeatedly.
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/config.sh
@@ -30,6 +30,7 @@ case "${1:-}" in
     --help)
         printf '%s\n' "Usage: ./scripts/deploy.sh [--render-only]" \
             "Validates .env, renders Traefik and starts sjv-traefik, sjv-crowdsec and sjv-backup." \
+            "A missing access.log is created empty before those containers start." \
             "--render-only writes the runtime files and does not call Docker."
         exit 0
         ;;
@@ -66,6 +67,7 @@ if [[ "${RUNTIME_ENV[TRAEFIK_TLS_MODE]}" == letsencrypt ]]; then
         info "Let's Encrypt will request a separate certificate for ${RUNTIME_ENV[MQTT_HOSTNAME]}. It stays in acme.json for a later Mosquitto handoff."
     fi
 fi
+layout_prepare_access_log
 docker_compose up -d --build traefik crowdsec sjv-backup
 ok "Traefik, CrowdSec and the backup client were reconciled. Other projects were not changed."
 deploy_crowdsec_install_collections

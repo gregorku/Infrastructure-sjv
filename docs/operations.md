@@ -39,7 +39,7 @@ Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Tr
 3. V `/docker-data/stacks/infrastructure-sjv/.env` nahraď `example.com` a `mqtt.example.com` skutečnými jmény a doplň zbylé `set_*`. Hodnoty piš bez uvozovek. Existující domény další běh `update-env.sh` nepřepíše.
 4. `sudo ./scripts/check-env.sh` musí skončit bez chyb. Varování (například chybějící vzdálená záloha) je třeba vědomě přijmout.
 5. `sudo ./scripts/create-dashboard-user.sh` uloží heslo dashboardu. Bez tohoto kroku se dashboard nepublikuje.
-6. `sudo ./scripts/deploy.sh` vykreslí Traefik, založí čtyři sítě projektu a spustí `sjv-traefik`, `sjv-crowdsec` a `sjv-backup`. Bez hesla, certifikátu a `RESTIC_REPOSITORY` klient nic nezálohuje a jen hlásí, že vzdálená záloha není nakonfigurovaná.
+6. `sudo ./scripts/deploy.sh` vykreslí Traefik, založí čtyři sítě projektu, před startem kontejnerů založí prázdný `access.log`, když chybí, a spustí `sjv-traefik`, `sjv-crowdsec` a `sjv-backup`. Existující log se nezkrátí. `--render-only` tento soubor nezakládá a Docker nezavolá. Bez hesla, certifikátu a `RESTIC_REPOSITORY` klient nic nezálohuje a jen hlásí, že vzdálená záloha není nakonfigurovaná.
 7. `sudo ./scripts/post-deploy.sh` zaregistruje bouncer klíč u CrowdSec, znovu vykreslí middleware a v případě potřeby restartuje Traefik. Klíč se nevypisuje.
 
 Opakované spuštění je bezpečné. Pokud se nic nezměnilo, soubory se nepřepisují a nevzniká záloha. `reload.sh` volá stejný `deploy.sh`. V testovacím režimu `deploy.sh` bez `--render-only` skončí chybou a Docker nezavolá.
@@ -100,6 +100,7 @@ Bouncer klíč není v `.env` ani v Gitu. Vznikne až v běžícím CrowdSec a u
 Limit `json-file` v Compose omezuje jen stdout kontejneru. Soubory `traefik.log` a `access.log` se jím nerotují.
 
 - `traefik.log` rotuje proces Traefiku: 20 MB, 14 záloh, 14 dní, gzip. Signál USR1 tento soubor znovu neotevírá, proto ho skript nepřesouvá.
+- `deploy.sh` před `docker compose up` založí prázdný `access.log` s právy 640, když soubor ještě není. CrowdSec tak při prvním startu najde `/logs/access.log` a kvůli chybějícímu souboru se nerestartuje. Existující obsah se nepřepisuje. Symlink se odmítne. `--render-only` soubor nezakládá.
 - `access.log` Traefik sám nerotuje. `sudo ./scripts/rotate-traefik-logs.sh` udělá copytruncate: zkopíruje obsah, po úspěšném gzipu zkrátí původní soubor na nulu a ponechá inode, vlastníka i práva. CrowdSec dál čte `/logs/access.log`. Řádky zapsané mezi kopií a zkrácením mohou chybět. Při přerušení před zkrácením zůstane původní soubor a smaže se jen nedokončený dočasný soubor. Archivů se drží 14, práva 640. Prázdný soubor se nerotuje. `--force` přeskočí práh 20 MB a 24 hodin, prázdný soubor stejně nechá být.
 - Návrh hodinového timeru je `ops/systemd/sjv-traefik-logrotate.service` a `.timer`. Cesta checkoutu v jednotce je pořád nepotvrzená konvence. Jednotky se do NixOS neinstalují. Než timer běží, strop `access.log` nastane až po ručním spuštění skriptu.
 

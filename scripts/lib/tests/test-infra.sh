@@ -221,6 +221,8 @@ test_infra_render() {
         t_fail "deploy.sh --render-only succeeds (exit ${T_RC}): ${T_OUT##*$'\n'}"
     fi
     t_check "render says Docker was not called" t_contains "${T_OUT}" "Docker was not called"
+    t_check "render-only does not create access.log" \
+        test ! -e "${T_BASE}/infrastructure-sjv/traefik/logs/access.log"
     t_check "Traefik static config has no Docker socket" test -z "$(grep -n 'docker.sock' "${stack}/runtime/traefik/traefik.yml" || true)"
     t_check "Traefik uses the file provider" grep -q 'directory: /etc/traefik/dynamic' "${stack}/runtime/traefik/traefik.yml"
     t_check "traefik.log rotation limits are rendered" \
@@ -320,6 +322,100 @@ test_infra_key_and_compose() {
     t_check "compose config left the git admin file unchanged" \
         bash -c '[[ "$(cksum "$1")" == "$2" ]]' _ "${REPO_ROOT}/compose/15-traefik-admin-port.yml" "${git_admin}"
     t_check "the /docker-data path is unchanged" \
+        bash -c '[[ "$1" == "$2" ]]' _ "${docker_data_before}" "$(docker_data_snapshot)"
+}
+
+# Calls the deploy helper in a child whose base is the test directory.
+access_log_prepare() {
+    t_run env NO_COLOR=1 SJV_TEST_BASE_DIR="${T_BASE}" bash --noprofile --norc -c '
+        set -Eeuo pipefail
+        source "$1/scripts/config.sh"
+        source "$1/scripts/lib/logging.sh"
+        source "$1/scripts/lib/common.sh"
+        source "$1/scripts/lib/deploy/layout.sh"
+        layout_prepare_access_log
+    ' _ "${REPO_ROOT}"
+}
+
+deploy_prepares_access_log_before_compose() {
+    local stage=0 line
+    while IFS= read -r line; do
+        case "${line}" in
+            'if [[ "${RENDER_ONLY}" -eq 1 ]]; then')
+                [[ "${stage}" -eq 0 ]] || return 1
+                stage=1
+                ;;
+            'layout_prepare_access_log')
+                [[ "${stage}" -eq 1 ]] || return 1
+                stage=2
+                ;;
+            'docker_compose up -d --build traefik crowdsec sjv-backup')
+                [[ "${stage}" -eq 2 ]] || return 1
+                stage=3
+                ;;
+        esac
+    done < "${REPO_ROOT}/scripts/deploy.sh"
+    [[ "${stage}" -eq 3 ]]
+}
+
+test_infra_access_log_prepare() {
+    print_section "Access log for CrowdSec"
+    local logs live marker before inode mode docker_data_before target
+    docker_data_before="$(docker_data_snapshot)"
+    t_check "deploy creates access.log after render-only and before compose" \
+        deploy_prepares_access_log_before_compose
+    infra_reset_base
+    run_script init.sh
+    t_check "init leaves access.log absent" test "${T_RC}" -eq 0
+    logs="${T_BASE}/infrastructure-sjv/traefik/logs"
+    live="${logs}/access.log"
+    t_check "init does not create access.log" test ! -e "${live}"
+    access_log_prepare
+    t_check "a missing access.log is created" test "${T_RC}" -eq 0
+    t_check "the new access.log is a regular file" test -f "${live}"
+    t_check "the new access.log is not a symlink" test ! -L "${live}"
+    t_check "the new access.log is empty" test ! -s "${live}"
+    t_check "the new access.log is mode 640" test "$(stat -c %a "${live}")" = 640
+    t_check "the new access.log is owned by the deploying user" test "$(stat -c %u "${live}")" = "$(id -u)"
+    inode="$(stat -c %i "${live}")"
+    access_log_prepare
+    t_check "a second prepare keeps the empty file" test "${T_RC}" -eq 0
+    t_check "a second prepare keeps the inode" test "$(stat -c %i "${live}")" = "${inode}"
+    t_check "a second prepare leaves the file empty" test ! -s "${live}"
+
+    marker="SECRET-ACCESS-LOG"
+    printf '%s\n' "${marker}" > "${live}"
+    before="$(cksum "${live}")"
+    inode="$(stat -c %i "${live}")"
+    mode="$(stat -c %a "${live}")"
+    access_log_prepare
+    t_check "an existing access.log is accepted" test "${T_RC}" -eq 0
+    t_check "an existing access.log keeps its bytes" test "$(cksum "${live}")" = "${before}"
+    t_check "an existing access.log keeps its inode" test "$(stat -c %i "${live}")" = "${inode}"
+    t_check "an existing access.log keeps its mode" test "$(stat -c %a "${live}")" = "${mode}"
+    t_check "the prepare output does not contain the log line" t_not_contains "${T_OUT}" "${marker}"
+
+    target="${logs}/access.log.real"
+    mv "${live}" "${target}"
+    ln -s access.log.real "${live}"
+    access_log_prepare
+    t_check "a symlinked access.log is refused" test "${T_RC}" -ne 0
+    t_check "the refusal names the symlink" t_contains "${T_OUT}" "symlink"
+    t_check "the symlink was not replaced" test -L "${live}"
+    t_check "the symlink target was not changed" grep -qx "${marker}" "${target}"
+    rm -f "${live}"
+    mv "${target}" "${live}"
+
+    rm -f "${live}"
+    mkdir "${live}"
+    printf '%s\n' "keep-inside" > "${live}/keep"
+    access_log_prepare
+    t_check "a directory named access.log is refused" test "${T_RC}" -ne 0
+    t_check "the directory contents stay in place" grep -qx "keep-inside" "${live}/keep"
+    rm -f "${live}/keep"
+    rmdir "${live}"
+
+    t_check "preparing access.log does not touch /docker-data" \
         bash -c '[[ "$1" == "$2" ]]' _ "${docker_data_before}" "$(docker_data_snapshot)"
 }
 
@@ -620,6 +716,7 @@ run_infra_tests() {
     test_infra_networks
     test_infra_render
     test_infra_key_and_compose
+    test_infra_access_log_prepare
     test_infra_log_rotation
     test_postgresql_service
     test_ingest_migration

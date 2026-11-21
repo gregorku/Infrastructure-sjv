@@ -130,13 +130,13 @@ Když soubor hesel už existuje, aktualizuje jen zadaný účet a ostatní nech�
 
 ### `deploy.sh`
 
-Až po úspěšném `check-env.sh` a po souboru hesel dashboardu, pokud se má dashboard publikovat. Načte runtime `.env`, připraví layout, vykreslí Traefik, založí čtyři sítě projektu, pokud nekolidují s cizí sítí, a spustí jen služby `traefik`, `crowdsec` a `sjv-backup`. PostgreSQL, MQTT ani aplikaci nespouští. Cizí kontejnery a sítě nemaže.
+Až po úspěšném `check-env.sh` a po souboru hesel dashboardu, pokud se má dashboard publikovat. Načte runtime `.env`, připraví layout, vykreslí Traefik a založí čtyři sítě projektu, pokud nekolidují s cizí sítí. Těsně před startem kontejnerů založí prázdný `/docker-data/infrastructure-sjv/traefik/logs/access.log`, když soubor chybí. Nový soubor má práva 640 a vlastníka uživatele, který skript spouští. V provozu je to root. Existující běžný soubor se nenačte znovu a jeho obsah, inode ani práva se nemění. Symlink se odmítne a cíl se neotevře. Teprve potom skript spustí služby `traefik`, `crowdsec` a `sjv-backup`. CrowdSec má akviziční soubor `/logs/access.log` k dispozici už při prvním startu, takže kvůli chybějícímu logu není potřeba kontejner `sjv-crowdsec` restartovat. PostgreSQL, MQTT ani aplikaci nespouští. Cizí kontejnery a sítě nemaže.
 
 ```bash
 sudo ./scripts/deploy.sh
 ```
 
-`--render-only` jen zapíše runtime soubory a Docker nezavolá. V testovacím režimu bez této volby skript skončí chybou.
+`--render-only` jen zapíše runtime soubory. Docker nezavolá a `access.log` nezaloží. V testovacím režimu bez této volby skript skončí chybou dřív, než sáhne na log.
 
 Úspěch je patička `Deploy completed. Next: ./scripts/post-deploy.sh`. Opakovaný běh je bezpečný. Když se nic nezměnilo, soubory se nepřepisují. Bez hesla, certifikátu a `RESTIC_REPOSITORY` klient `sjv-backup` nic nezálohuje a jen hlásí, že vzdálená záloha není nakonfigurovaná.
 
@@ -216,6 +216,7 @@ Kontroly, které projekt sám popisuje:
 2. `stat -c '%a %U' /docker-data/stacks/infrastructure-sjv/.env` vrátí `600 root`. To je kontrola z [docs/checks.md](docs/checks.md#kontrola-na-serveru-po-instalaci). Cesta checkoutu v tom dokumentu je nepotvrzená konvence.
 3. `docker logs sjv-backup` a soubory `state/sjv-backup-daily.json` a `state/sjv-backup-wal.json`. Healthcheck této služby hlídá jen živost plánovače. Stav `failed` není úspěšná záloha.
 4. Soubor bouncer klíče existuje a `check-env.sh` hlásí, že je soukromý. Hodnotu nečte.
+5. Po startu `sjv-crowdsec` v jeho logu není `No matching files for pattern /logs/access.log`. Až Traefik zapíše alespoň jeden řádek, uvnitř kontejneru `cscli metrics show acquisition parsers` ukáže zdroj `file:/logs/access.log` s nenulovým počtem načtených a parsovaných řádků. Příkaz z hostitele je `docker exec sjv-crowdsec cscli metrics show acquisition parsers`. Prázdný soubor při startu ještě žádný řádek nemá, proto nula do první skutečné žádosti není chyba akvizice.
 
 Kontrola databáze, oprávnění rolí a schématu na VPS hotový skript nemá. V izolovaném testu ji dělá `app/backend/tests/isolated-schema-test.sh` včetně `schema_tests.py`, `ingest_accept_tests.py` a `retention_tests.py`. Na VPS se nespouští.
 
