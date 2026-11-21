@@ -84,7 +84,7 @@ Rozdíly proti referenci:
 
 ### Implementace B1b
 
-V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefik.yml`, `compose/15-traefik-admin-port.yml`, `compose/20-crowdsec.yml`, `compose/30-backup.yml`, `compose/40-postgresql.yml`, `backup/`, `postgresql/`, `configs/traefik/dynamic/` a `configs/crowdsec/`. Služby aplikace a Mosquitto v Compose ještě nejsou. `sjv-postgresql` je v Compose a tyto testy ho nespouštějí. `deploy.sh` ho také nespouští. `sjv-backup` vzdálenou kopii plánuje. Izolovaný test spustil `stanza-create`, `pgbackrest check`, plnou zálohu a obnovu do samostatného clusteru. `pg_dump`, `backup.sh` a `restore.sh` v repozitáři nejsou.
+V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefik.yml`, `compose/15-traefik-admin-port.yml`, `compose/20-crowdsec.yml`, `compose/30-backup.yml`, `compose/40-postgresql.yml`, `backup/`, `postgresql/`, `configs/traefik/dynamic/` a `configs/crowdsec/`. Služby aplikace a Mosquitto v Compose ještě nejsou. `sjv-postgresql` je v Compose a tyto testy ho nespouštějí. `deploy.sh` ho také nespouští. `sjv-backup` v Compose zůstává a vzdálenou kopii plánuje. `deploy.sh` ho v první fázi nespouští. Izolovaný test spustil `stanza-create`, `pgbackrest check`, plnou zálohu a obnovu do samostatného clusteru. `pg_dump`, `backup.sh` a `restore.sh` v repozitáři nejsou.
 
 - Sítě jsou `external`. Zakládá je `deploy.sh` a označí je `com.infrastructure-sjv.managed=true`. Cizí síť se stejným jménem skript nemění ani nemaže. `sjv-internal` vzniká s `--internal`.
 - Pevná adresa Traefiku na `sjv-proxy` je první adresa za branou této sítě. Počítá ji `deploy.sh` a předá ji Compose jako `TRAEFIK_PROXY_ADDRESS`. V `.env` tato hodnota není.

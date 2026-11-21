@@ -2,7 +2,7 @@
 
 Informační systém SJV: sběr odečtů měřidel (wM-Bus), aplikace pro členy a správu, zálohy. Běží jako Docker stack v Incus kontejneru `sjv-monitoring`. Veřejné jméno je hodnota `SJV_DOMAIN` v runtime `.env`.
 
-Stav: etapa B1b (instalační základ). `deploy.sh` spouští Traefik, CrowdSec a trvalou službu `sjv-backup`. Služba `sjv-postgresql` je v Compose a tento skript ji nespouští. Aplikace, MQTT a `pg_dump` zatím nejsou implementované. Izolovaný test dokončil `stanza-create`, plnou zálohu pgBackRest a obnovu do samostatného clusteru. Produkční `backup.sh` a `restore.sh` nejsou. Cílová databáze je PostgreSQL 19.0. Zahájení ostrého sběru skutečných dat je 1. 1. 2027.
+Stav: etapa B1b (instalační základ). `deploy.sh` spouští Traefik a CrowdSec. Služby `sjv-backup` a `sjv-postgresql` jsou v Compose a tento skript je nespouští. Aplikace, MQTT a `pg_dump` zatím nejsou implementované. Izolovaný test dokončil `stanza-create`, plnou zálohu pgBackRest a obnovu do samostatného clusteru. Produkční `backup.sh` a `restore.sh` nejsou. Cílová databáze je PostgreSQL 19.0. Zahájení ostrého sběru skutečných dat je 1. 1. 2027.
 
 ## Dokumentace
 
@@ -28,7 +28,7 @@ sudo ./scripts/init.sh                  # adresáře a kopie souborů bez tajems
 sudo ./scripts/update-env.sh            # vytvoří nebo doplní runtime .env
 sudo ./scripts/check-env.sh             # ověří .env, nic nemění
 sudo ./scripts/create-dashboard-user.sh # heslo dashboardu, mimo Git
-sudo ./scripts/deploy.sh                # sítě, Traefik, CrowdSec a sjv-backup
+sudo ./scripts/deploy.sh                # sítě, Traefik a CrowdSec
 sudo ./scripts/post-deploy.sh           # registrace bouncer klíče, klíč se nevypíše
 sudo ./scripts/rotate-traefik-logs.sh   # copytruncate access.log, bez Dockeru
 ./scripts/test.sh                       # offline testy, bez rootu a bez Docker démona

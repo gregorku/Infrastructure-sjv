@@ -349,7 +349,7 @@ deploy_prepares_access_log_before_compose() {
                 [[ "${stage}" -eq 1 ]] || return 1
                 stage=2
                 ;;
-            'docker_compose up -d --build traefik crowdsec sjv-backup')
+            'docker_compose up -d traefik crowdsec')
                 [[ "${stage}" -eq 2 ]] || return 1
                 stage=3
                 ;;
@@ -358,12 +358,27 @@ deploy_prepares_access_log_before_compose() {
     [[ "${stage}" -eq 3 ]]
 }
 
+deploy_first_phase_compose_line() {
+    local line count
+    count="$(grep -c '^docker_compose ' "${REPO_ROOT}/scripts/deploy.sh" || true)"
+    [[ "${count}" -eq 1 ]] || return 1
+    line="$(grep '^docker_compose ' "${REPO_ROOT}/scripts/deploy.sh" || true)"
+    [[ "${line}" == 'docker_compose up -d traefik crowdsec' ]] || return 1
+    [[ "${line}" != *--build* && "${line}" != *sjv-backup* && "${line}" != *postgresql* ]]
+}
+
 test_infra_access_log_prepare() {
     print_section "Access log for CrowdSec"
     local logs live marker before inode mode docker_data_before target
     docker_data_before="$(docker_data_snapshot)"
     t_check "deploy creates access.log after render-only and before compose" \
         deploy_prepares_access_log_before_compose
+    t_check "the first deploy starts only Traefik and CrowdSec" \
+        deploy_first_phase_compose_line
+    t_check "the first deploy does not pass --build" \
+        bash -c '! grep -q -- "--build" "$1"' _ "${REPO_ROOT}/scripts/deploy.sh"
+    t_check "backup and postgresql compose files stay included" \
+        bash -c 'grep -qx "  - compose/30-backup.yml" "$1" && grep -qx "  - compose/40-postgresql.yml" "$1"' _ "${REPO_ROOT}/compose.yml"
     infra_reset_base
     run_script init.sh
     t_check "init leaves access.log absent" test "${T_RC}" -eq 0
