@@ -20,6 +20,7 @@ TABLES = (
     "endpoint_credentials",
     "ingest_sources",
     "ingest_payloads",
+    "ingest_payload_items",
     "ingest_receipts",
     "ingest_message_keys",
     "raw_telegrams",
@@ -34,6 +35,7 @@ TABLES = (
     "meter_readings",
     "reading_provenance",
     "device_events",
+    "retention_log",
 )
 
 
@@ -104,7 +106,7 @@ def main():
         print("PASS trigger")
 
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()
-        if version != ("0001_ingest_schema",):
+        if version != ("0003_retention",):
             fail(f"alembic version is {version}")
         print("PASS alembic version")
 
@@ -127,6 +129,7 @@ def main():
 
         parents = (
             "ingest_payloads",
+            "ingest_payload_items",
             "ingest_receipts",
             "ingest_dedup_candidates",
             "ingest_rejections",
@@ -249,6 +252,81 @@ def main():
         expect_sqlstate(conn, "sjv_collector", "SELECT secret_enc FROM endpoint_credentials", "42501")
         expect_sqlstate(conn, "sjv_collector", "SELECT aes_key_enc FROM meters", "42501")
         expect_sqlstate(conn, "sjv_collector", "DELETE FROM ingest_payloads", "42501")
+        expect_sqlstate(conn, "sjv_collector", "DELETE FROM ingest_payload_items", "42501")
+        expect_sqlstate(
+            conn,
+            "sjv_collector",
+            "UPDATE ingest_payload_items SET message_kind = 'event'",
+            "42501",
+        )
+        expect_sqlstate(conn, "sjv_api", "SELECT original FROM ingest_payload_items", "42501")
+        expect_sqlstate(
+            conn,
+            "sjv_api",
+            "INSERT INTO ingest_payload_items "
+            "(partition_month, payload_id, payload_partition_month, item_index, original) "
+            "VALUES (DATE '2026-11-01', 1, DATE '2026-11-01', 0, '\\x00')",
+            "42501",
+        )
+        expect_sqlstate(
+            conn,
+            "sjv_collector",
+            """
+            INSERT INTO ingest_payload_items (
+                partition_month, payload_id, payload_partition_month, item_index, original
+            )
+            SELECT partition_month, id, partition_month, -1, '\\x00'::bytea
+            FROM ingest_payloads
+            LIMIT 1
+            """,
+            "23514",
+        )
+        expect_sqlstate(
+            conn,
+            "sjv_collector",
+            """
+            INSERT INTO ingest_payload_items (
+                partition_month, payload_id, payload_partition_month, item_index, original
+            )
+            SELECT partition_month, id, DATE '1999-01-01', 0, '\\x00'::bytea
+            FROM ingest_payloads
+            LIMIT 1
+            """,
+            "23514",
+        )
+        privileges = conn.execute(
+            """
+            SELECT
+                has_table_privilege('sjv_readonly', 'ingest_payload_items', 'SELECT'),
+                has_table_privilege('sjv_readonly', 'ingest_payload_items', 'INSERT'),
+                has_table_privilege('sjv_collector', 'ingest_payload_items', 'SELECT'),
+                has_table_privilege('sjv_collector', 'ingest_payload_items', 'INSERT'),
+                has_table_privilege('sjv_collector', 'ingest_payload_items', 'UPDATE'),
+                has_table_privilege('sjv_collector', 'ingest_payload_items', 'DELETE'),
+                has_table_privilege('sjv_api', 'ingest_payload_items', 'SELECT'),
+                has_table_privilege('sjv_api', 'ingest_payload_items', 'INSERT'),
+                has_table_privilege('sjv_worker', 'ingest_payload_items', 'SELECT'),
+                has_table_privilege('sjv_worker', 'ingest_payload_items', 'INSERT'),
+                has_table_privilege('sjv_maintenance', 'ingest_payload_items', 'SELECT'),
+                has_table_privilege('sjv_maintenance', 'ingest_payload_items', 'INSERT'),
+                has_table_privilege('sjv_maintenance', 'ingest_payload_items', 'UPDATE'),
+                has_table_privilege('sjv_maintenance', 'ingest_payload_items', 'DELETE'),
+                has_function_privilege(
+                    'sjv_maintenance',
+                    'sjv_create_month_partition(regclass, date)',
+                    'EXECUTE'
+                )
+            """
+        ).fetchone()
+        if privileges != (
+            True, False,
+            True, True, False, False,
+            False, False,
+            False, False,
+            False, False, False, False,
+            True,
+        ):
+            fail(f"payload item privileges are {privileges}")
         expect_sqlstate(
             conn,
             "sjv_collector",
@@ -800,6 +878,7 @@ def main():
         with conn.transaction():
             conn.execute("SET LOCAL ROLE sjv_maintenance")
             conn.execute("SELECT sjv_create_month_partition('ingest_payloads'::regclass, DATE '2020-01-01')")
+            conn.execute("SELECT sjv_create_month_partition('ingest_payload_items'::regclass, DATE '2020-01-01')")
             conn.execute("SELECT sjv_create_month_partition('ingest_receipts'::regclass, DATE '2020-01-01')")
         conn.execute(
             """
@@ -810,6 +889,16 @@ def main():
             SELECT DATE '2020-01-01', id, 'https', TIMESTAMPTZ '2020-01-15 00:00:00+00',
                    'json', convert_to('old', 'UTF8'), 'received'
             FROM ingest_sources WHERE code = 'esp-sjv-001'
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO ingest_payload_items (
+                partition_month, payload_id, payload_partition_month, item_index, original
+            )
+            SELECT partition_month, id, partition_month, 0, convert_to('item', 'UTF8')
+            FROM ingest_payloads
+            WHERE partition_month = DATE '2020-01-01'
             """
         )
         conn.execute(
@@ -885,6 +974,18 @@ def main():
               )
             """
         )
+        try:
+            conn.execute(
+                "ALTER TABLE ingest_payloads DETACH PARTITION ingest_payloads_p202001 CONCURRENTLY"
+            )
+        except psycopg.Error:
+            pass
+        else:
+            fail("payload partition detached while its items remained")
+        conn.execute(
+            "ALTER TABLE ingest_payload_items DETACH PARTITION ingest_payload_items_p202001 CONCURRENTLY"
+        )
+        conn.execute("DROP TABLE ingest_payload_items_p202001")
         conn.execute(
             "ALTER TABLE ingest_payloads DETACH PARTITION ingest_payloads_p202001 CONCURRENTLY"
         )

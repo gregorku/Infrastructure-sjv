@@ -44,6 +44,10 @@ Stav: etapa B1b. Sada běží offline. `docker compose config` se spustí jen kd
 - Rotace `access.log`: práh velikosti a stáří, copytruncate se stejným inode, vlastníkem a právy, archiv 640, retence 14, odmítnutí symlinku, úklid po selhání gzipu a ponechání souboru mimo adresář logů. `traefik.log` skript nemění.
 - Zápis klíče smaže jen svůj dočasný soubor. Výstup klíč neobsahuje.
 
+### Kontrakt ingestu
+
+- `app/backend/tests/test_ingest_contract.py` běží přes `python3` a standardní `unittest`. Pytest v projektu není. Test neotevírá PostgreSQL ani kontejner. Selhání kteréhokoli případu ukončí `test.sh` nenulovým kódem. Výstup nepíše bajtkód do repozitáře.
+
 ## Testy, které `test.sh` nespustí
 
 | Test | Důvod | Jak ověřit |
@@ -52,7 +56,8 @@ Stav: etapa B1b. Sada běží offline. `docker compose config` se spustí jen kd
 | ShellCheck | nemusí být nainstalovaný | `./scripts/shellcheck.sh` (kód 3 = nespuštěno) |
 | `require_mountpoint` v testovacím režimu | testovací režim ho přeskakuje | bez `SJV_TEST_BASE_DIR` a bez `/docker-data` musí `init.sh`, `update-env.sh` i `check-env.sh` skončit chybou a nic nevytvořit |
 | Izolovaná záloha a obnova pgBackRest | `test.sh` nespouští databázový kontejner | ruční běh jen v dočasném adresáři, mimo `/docker-data`. Poslední úspěch je 20. 11. 2026 a postup je v [operations.md](operations.md#záloha-a-obnova-postgresql) |
-| Ingest migrace PostgreSQL 19.0 | `test.sh` nespouští databázový kontejner | `app/backend/tests/isolated-schema-test.sh` ve vlastním dočasném Podman úložišti. Maže jen `/tmp/sjv-alembic-itest` a svou testovací síť. Kontroluje `alembic upgrade head`, `alembic check`, roli fragmentu, frontu dekódování, měsíc `device_events`, mapování `endpoint_credentials`, zákaz čtení `secret_enc` pro `sjv_readonly` a retenci `DETACH PARTITION CONCURRENTLY` |
+| Ingest migrace PostgreSQL 19.0 | `test.sh` nespouští databázový kontejner | `app/backend/tests/isolated-schema-test.sh` ve vlastním dočasném Podman úložišti. Maže jen `/tmp/sjv-alembic-itest` a svou testovací síť. Kontroluje `alembic upgrade head`, `alembic check`, roli fragmentu, frontu dekódování, měsíc `device_events`, mapování `endpoint_credentials`, zákaz čtení `secret_enc` pro `sjv_readonly`, uložení payloadu a položek a příjem prázdné obálky rolí `sjv_collector` |
+| Retence ingestu staršího než 24 měsíců | `test.sh` nespouští databázový kontejner | Stejný izolovaný běh, `tests/retention_tests.py`, rolí `sjv_maintenance`. Odklad kvůli `decode_queue` a kvůli `decoded` bez odečtu `raw:<id>`. Stavy `needs_review`, `ambiguous`, `pending`, `failed`, `no_key` a `suspect_replay` samy retenci neblokují. Odkaz na payload, který běh nechá, měsíc odloží. Odkaz odstraněný v tomtéž běhu payload pustí. Položky se odpojí před payloadem. `telegram_dedup_keys` se mažou před `raw_telegrams`. Příjem jiného měsíce a `device_events` zůstávají. `DETACH` a `DROP` jednoho potomka jsou jedna transakce a úspěch v `retention_log` je v ní. Chyba další krok měsíce nespustí a úspěšný záznam tohoto kroku nenechá. Zachytitelná chyba odkladu, kroku i vyhodnocení důvodu uvolní session zámek a další běh ho získá. Cizí zámek téže session odmítnutí mladého měsíce neuvolní. Dva běhy současně retenci neprovádějí. Volání uvnitř otevřené transakce skončí před získáním zámku. `COMMIT` po získání zámku procedura nezachytí; `sjv_retention_release_lock` pak uvolní jen zámek této session. Neplatný měsíc, krok nebo prázdný důvod `failed` nezapíšou. Vlastník funkcí je `sjv_owner`. `sjv_collector`, `sjv_api` a `sjv_readonly` retenci nespouštějí a `CREATE` ve schématu `public` nemá nikdo kromě `sjv_owner`. `ingest_receipts` na payload cizí klíč nemá |
 
 ## Kontrola na serveru po instalaci
 

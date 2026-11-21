@@ -377,12 +377,29 @@ Platí, i když konkrétní datagram, topic nebo JSON ACRIOS ještě nejsou zná
 
 ### Transakce jedné přijaté zprávy
 
-Jedna přijatá zpráva je jedna databázová transakce a zpracuje všechny své položky. Samostatná transakce jedné položky by při existujícím klíči zprávy ostatní položky přeskočila. Evidence zpracování je po položkách: primární klíč obsahuje `item_index`.
+Příjem má dvě samostatně potvrzené transakce.
+
+První vloží původní bajty do `ingest_payloads` a každý řádek `ingest_payload_items` a potvrdí je společně, dřív než se rozhoduje identita, deduplikace nebo dekódování. Bajty obálky a bajty položky zůstávají oddělené. Když formát nejde určit bez dalšího vyhodnocení, `content_kind` je `opaque`. Neznámý druh položky se uloží a transakci nezruší. V této transakci nevznikne příjem položky, klíč zprávy, telegram, deduplikační klíč, fronta ani fragment. `proof_basis` zůstává prázdná, dokud její ověření neschválí samostatné rozhodnutí. Boolean `identifier_proven` se uloží jako vstupní údaj položky a při načtení se vrátí. `proof_basis` z něj nevznikne a klíč zprávy se nezaloží.
+
+Druhá transakce položky vyhodnotí a vloží konečné příjmy. Zpracuje všechny položky jedné zprávy. Samostatná transakce jedné položky by při existujícím klíči zprávy ostatní položky přeskočila. Evidence zpracování je po položkách: primární klíč obsahuje `item_index`. Rollback druhé transakce už potvrzený payload nesmaže. ACK, včetně PUBACK, se odešle až po COMMIT konečného výsledku.
+
+Krok B provádí první transakci a z druhé jen prázdnou obálku. `load_envelope` z uloženého payloadu a položek složí původní obálku a nic nezapíše. Vyhodnocení skutečných položek, deduplikace a automatická obnova payloadu, který po pádu mezi transakcemi zůstane bez příjmu, patří navazujícímu kroku a nejsou hotové.
 
 ```text
-BEGIN
+BEGIN  — transakce 1
+  INSERT ingest_payloads s původními bajty obálky.
+  INSERT ingest_payload_items pro položky 0 .. n-1, každá se svými bajty.
+  Prázdná obálka vloží nula položek.
+  Chyba kteréhokoli INSERT vrátí celou transakci.
+COMMIT
+
+BEGIN  — transakce 2
   Rozděl payload na položky 0 .. n-1 v pořadí zdroje.
-  Prázdný seznam je invalid celé obálky: jeden příjem, COMMIT, ACK invalid.
+  Prázdný seznam je invalid celé obálky: jeden příjem
+    status = invalid, item_index = -1, msg_key NULL,
+    bez INSERT do ingest_message_keys.
+    -1 není položka a se skutečným indexem 0 .. n-1 se nepotká.
+    COMMIT, potom ACK invalid.
   Když je identifikátor prokázaný:
     pg_advisory_xact_lock na (ingest_source_id, msg_key_namespace, msg_key)
     ještě před první položkou. Dva workery neprojdou stejným klíčem současně.
@@ -434,11 +451,12 @@ BEGIN
     Neočekávaná chyba databáze: ROLLBACK TO SAVEPOINT item_i.
        Položka i uložený výsledek nemá. Smyčka skončí.
   Když některá položka uložený výsledek nemá:
-    ROLLBACK celé transakce. ACK se neposílá.
-    Zařízení zprávu pošle znovu. Nic z tohoto pokusu nezůstane,
+    ROLLBACK druhé transakce. Payload z první transakce zůstane.
+    ACK se neposílá.
+    Zařízení zprávu pošle znovu. Z vyhodnocení nic nezůstane,
     takže se žádná položka neoznačí jako duplicate_delivery omylem.
-  Jinak COMMIT.
-ACK až po COMMIT. Odpověď má jeden záznam na každou položku a její stav.
+  Jinak COMMIT druhé transakce.
+ACK až po COMMIT druhé transakce. Odpověď má jeden záznam na každou položku a její stav.
 ```
 
 Řádek `decode_queue` vkládá v kroku 7a role přijímajícího procesu, a jen když je výsledek `pending`. U MQTT je to `sjv_collector`, u HTTPS `sjv_api`. Obě role mají na frontu jen `INSERT`. `sjv_worker` řádek nevkládá. Bere ho `FOR UPDATE SKIP LOCKED`, zapíše zámek a počet pokusů a po vyčerpání pokusů ho smaže. `suspect_replay`, `server_only`, `ambiguous` a `needs_review` frontu nezakládají.

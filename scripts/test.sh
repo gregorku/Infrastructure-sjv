@@ -47,6 +47,19 @@ cleanup_run_dir() {
     rmdir -- "${TEST_TMP_ROOT}" 2>/dev/null || true
 }
 
+run_ingest_contract_tests() {
+    print_header "Ingest contract"
+    if ! command -v python3 >/dev/null 2>&1; then
+        t_fail "python3 is required for the ingest contract tests"
+        return
+    fi
+    # The project has no pytest. unittest is the standard library and the
+    # ingest contract tests do not open a database or a container.
+    t_expect_ok "ingest contract unit tests" \
+        env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${REPO_ROOT}/app/backend" \
+        python3 "${REPO_ROOT}/app/backend/tests/test_ingest_contract.py"
+}
+
 run_shellcheck_step() {
     print_header "ShellCheck"
     local rc=0
@@ -74,6 +87,7 @@ main() {
     run_script_tests
     run_infra_tests
     run_backup_tests
+    run_ingest_contract_tests
     run_shellcheck_step
 
     print_footer "No container, network, ZFS or host configuration was touched."
@@ -84,7 +98,7 @@ case "${1:---static}" in
     --static) main ;;
     --help)
         printf '%s\n' "Usage: ./scripts/test.sh [--static]" \
-            "Runs syntax, static, environment-library and script tests offline."
+            "Runs syntax, static, environment-library, script and ingest-contract tests offline."
         ;;
     *) fail "Unknown option: $1" ;;
 esac

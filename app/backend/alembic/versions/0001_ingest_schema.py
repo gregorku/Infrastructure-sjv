@@ -33,7 +33,12 @@ def _execute_script(name: str) -> None:
 def upgrade() -> None:
     _execute_script("0001_pre.sql")
     bind = op.get_bind()
-    SchemaGenerator(bind.dialect, bind, checkfirst=True).traverse_single(metadata)
+    generator = SchemaGenerator(bind.dialect, bind, checkfirst=True)
+    # Later revisions add tables this revision did not create.
+    for table in metadata.sorted_tables:
+        if table.name in ("ingest_payload_items", "retention_log"):
+            continue
+        generator.traverse_single(table)
     _execute_script("0001_post.sql")
 
 

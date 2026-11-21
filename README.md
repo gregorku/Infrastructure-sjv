@@ -2,13 +2,13 @@
 
 Informační systém SJV: sběr odečtů měřidel (wM-Bus), aplikace pro členy a správu, zálohy. Běží jako Docker stack v Incus kontejneru `sjv-monitoring`. Veřejné jméno je hodnota `SJV_DOMAIN` v runtime `.env`.
 
-Stav: etapa B1b (instalační základ, Traefik, CrowdSec, trvalá služba `sjv-backup` a služba `sjv-postgresql`). Aplikace, MQTT a `pg_dump` zatím nejsou implementované. Izolovaný test dokončil `stanza-create`, plnou zálohu pgBackRest a obnovu do samostatného clusteru. Produkční `backup.sh` a `restore.sh` nejsou. Cílová databáze je PostgreSQL 19.0. Zahájení ostrého sběru skutečných dat je 1. 1. 2027.
+Stav: etapa B1b (instalační základ). `deploy.sh` spouští Traefik, CrowdSec a trvalou službu `sjv-backup`. Služba `sjv-postgresql` je v Compose a tento skript ji nespouští. Aplikace, MQTT a `pg_dump` zatím nejsou implementované. Izolovaný test dokončil `stanza-create`, plnou zálohu pgBackRest a obnovu do samostatného clusteru. Produkční `backup.sh` a `restore.sh` nejsou. Cílová databáze je PostgreSQL 19.0. Zahájení ostrého sběru skutečných dat je 1. 1. 2027.
 
 ## Dokumentace
 
 | Dokument | Obsah |
 | --- | --- |
-| [docs/decisions.md](docs/decisions.md) | rozhodnutí 1–32, revize R1–R32, R33 a otevřené body |
+| [docs/decisions.md](docs/decisions.md) | rozhodnutí 1–32, revize R1–R32, R33–R35 a otevřené body |
 | [docs/architecture.md](docs/architecture.md) | služby, sítě, adresáře, tok dat |
 | [docs/database-design.md](docs/database-design.md) | schéma PostgreSQL a role |
 | [docs/data-ingestion.md](docs/data-ingestion.md) | jednotný příjem: ESP, ACRIOS, další koncentrátory a importy |
@@ -17,7 +17,8 @@ Stav: etapa B1b (instalační základ, Traefik, CrowdSec, trvalá služba `sjv-b
 | [docs/external-changes.md](docs/external-changes.md) | změny mimo repozitář (E1–E7) |
 | [docs/firmware-design.md](docs/firmware-design.md) | návrh firmwaru ESP |
 | [docs/implementation-plan.md](docs/implementation-plan.md) | fáze implementace |
-| [docs/operations.md](docs/operations.md) | instalace a správa `.env` |
+| [INSTALLATION.md](INSTALLATION.md) | instalační a provozní příručka podle současných skriptů |
+| [docs/operations.md](docs/operations.md) | adresáře, `.env`, CrowdSec, záloha a obnova |
 | [docs/checks.md](docs/checks.md) | kontroly a testy |
 
 ## Rychlý přehled
@@ -27,13 +28,13 @@ sudo ./scripts/init.sh                  # adresáře a kopie souborů bez tajems
 sudo ./scripts/update-env.sh            # vytvoří nebo doplní runtime .env
 sudo ./scripts/check-env.sh             # ověří .env, nic nemění
 sudo ./scripts/create-dashboard-user.sh # heslo dashboardu, mimo Git
-sudo ./scripts/deploy.sh                # sítě, Traefik a CrowdSec
+sudo ./scripts/deploy.sh                # sítě, Traefik, CrowdSec a sjv-backup
 sudo ./scripts/post-deploy.sh           # registrace bouncer klíče, klíč se nevypíše
 sudo ./scripts/rotate-traefik-logs.sh   # copytruncate access.log, bez Dockeru
 ./scripts/test.sh                       # offline testy, bez rootu a bez Docker démona
 ```
 
-Podrobnosti jsou v [docs/operations.md](docs/operations.md).
+Příručka je [INSTALLATION.md](INSTALLATION.md). Adresáře, politika `.env` a obnova pgBackRest jsou v [docs/operations.md](docs/operations.md).
 
 ## Pravidla repozitáře
 

@@ -7,6 +7,7 @@ Partitions, triggers and grants are applied by the migration after these tables.
 from sqlalchemy import (
     ARRAY,
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     Date,
@@ -307,6 +308,51 @@ ingest_payloads = Table(
     _enum("transport", ("mqtt", "https", "udp_dtls", "platform_api", "file_import")),
     _enum("content_kind", ("wmbus_batch", "wmbus_frame", "json", "csv", "udp_datagram", "api_response", "opaque")),
     _enum("origin", ("received", "assembled")),
+    postgresql_partition_by="RANGE (partition_month)",
+)
+
+ingest_payload_items = Table(
+    "ingest_payload_items",
+    metadata,
+    Column("partition_month", Date, primary_key=True),
+    Column("payload_id", BigInteger, primary_key=True),
+    Column("payload_partition_month", Date, nullable=False),
+    Column("item_index", Integer, primary_key=True),
+    Column("original", LargeBinary, nullable=False),
+    Column("message_kind", Text),
+    Column("msg_key", Text),
+    Column("msg_key_namespace", Text),
+    Column("proof_basis", Text),
+    Column("identifier_proven", Boolean, nullable=False, server_default=text("false")),
+    Column("rx_instance_id", Text),
+    Column("rx_boot", Integer),
+    Column("rx_uptime_ms", BigInteger),
+    Column("device_rx_unix_ms", BigInteger),
+    Column("age_ms", BigInteger),
+    Column("tx_instance_id", Text),
+    Column("tx_boot", Integer),
+    Column("tx_uptime_ms", BigInteger),
+    Column("tx_at", TZ),
+    Column("frame_original", LargeBinary),
+    Column("frame_format", Text),
+    Column("crc_included", Boolean),
+    Column("rssi", Integer),
+    Column("group_key", Text),
+    Column("fragment_index", Integer),
+    Column("source_message_ref", Text),
+    Column("external_message_id", Text),
+    CheckConstraint("item_index >= 0", name="item_index"),
+    CheckConstraint("payload_partition_month = partition_month", name="payload_month"),
+    CheckConstraint(
+        "proof_basis IS NULL OR ("
+        "msg_key IS NOT NULL AND btrim(msg_key) <> '' AND "
+        "msg_key_namespace IS NOT NULL AND btrim(msg_key_namespace) <> '')",
+        name="proof_basis",
+    ),
+    ForeignKeyConstraint(
+        ["payload_id", "payload_partition_month"],
+        ["ingest_payloads.id", "ingest_payloads.partition_month"],
+    ),
     postgresql_partition_by="RANGE (partition_month)",
 )
 
@@ -735,4 +781,18 @@ device_events = Table(
     Column("payload", JSONB),
     CheckConstraint(_month.format(column="received_at"), name="partition_month"),
     postgresql_partition_by="RANGE (partition_month)",
+)
+
+retention_log = Table(
+    "retention_log",
+    metadata,
+    Column("id", BigInteger, Identity(always=False), primary_key=True),
+    Column("recorded_at", TZ, nullable=False, server_default=text("now()")),
+    Column("partition_month", Date, nullable=False),
+    Column("step", Text, nullable=False),
+    Column("result", Text, nullable=False),
+    Column("reason", Text),
+    Column("row_count", BigInteger),
+    CheckConstraint("result IN ('completed', 'deferred', 'failed')", name="result"),
+    CheckConstraint("btrim(step) <> ''", name="step"),
 )

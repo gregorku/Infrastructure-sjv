@@ -268,6 +268,28 @@ migrate() {
     if [[ "${schema_status}" -ne 0 ]]; then
         exit "${schema_status}"
     fi
+    set +e
+    (
+        cd "${BACKEND}"
+        PYTHONPATH="${BACKEND}" SJV_DATABASE_URL="$(cat "${urlfile}")" python3 tests/ingest_accept_tests.py
+    ) > "${TEST_ROOT}/accept-${database}.log" 2>&1
+    local accept_status=$?
+    set -e
+    show_log "${TEST_ROOT}/accept-${database}.log"
+    if [[ "${accept_status}" -ne 0 ]]; then
+        exit "${accept_status}"
+    fi
+    set +e
+    (
+        cd "${BACKEND}"
+        PYTHONPATH="${BACKEND}" SJV_DATABASE_URL="$(cat "${urlfile}")" python3 tests/retention_tests.py
+    ) > "${TEST_ROOT}/retention-${database}.log" 2>&1
+    local retention_status=$?
+    set -e
+    show_log "${TEST_ROOT}/retention-${database}.log"
+    if [[ "${retention_status}" -ne 0 ]]; then
+        exit "${retention_status}"
+    fi
     rm -f "${urlfile}"
 }
 
