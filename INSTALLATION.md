@@ -175,7 +175,7 @@ Chybějící část, prázdný klíč, symlink nebo jiná práva klíče jsou ch
 
 Nejdřív se přečte konfigurace repozitáře. Když už existuje, `init` se nezavolá. Když repozitář prokazatelně neexistuje, založí se a konfigurace se přečte znovu. Oba úspěchy končí patičkou `Remote backup repository is ready. Next: ./scripts/post-deploy.sh`.
 
-HTTP 401, chyba TLS, chyba sítě, chybné heslo klíče a každá jiná diagnostika `init` nespustí. Skript skončí nenulovým kódem a patičku o připraveném repozitáři nevypíše. Obsazený `repo.lock` také skončí chybou bez `init`. V testovacím režimu vyplněný repozitář skončí před Dockerem. Opakování existujícího repozitáře je bezpečné. Obnova po kompromitaci je jiná operace: nový repozitář a nové klíče, jak je popisuje [docs/backup-strategy.md](docs/backup-strategy.md).
+HTTP 401, chyba TLS, chyba sítě, chybné heslo klíče a každá jiná diagnostika `init` nespustí. Text té diagnostiky se zapíše do logu až po vynechání hesel, cesty k souboru klíče a jeho obsahu. Skript skončí nenulovým kódem a patičku o připraveném repozitáři nevypíše. Obsazený `repo.lock` také skončí chybou bez `init`. V testovacím režimu vyplněný repozitář skončí před Dockerem. Opakování existujícího repozitáře je bezpečné. Obnova po kompromitaci je jiná operace: nový repozitář a nové klíče, jak je popisuje [docs/backup-strategy.md](docs/backup-strategy.md).
 
 ### `post-deploy.sh`
 

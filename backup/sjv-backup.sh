@@ -134,6 +134,55 @@ repository_probe_is_absent() {
 
 INIT_ERRFILE=""
 
+# Replaces every literal occurrence. The pattern is quoted, so * ? [ ]
+# in the secret match themselves; backslash-escaping them would look for a
+# backslash. The placeholder is not searched again.
+redact_literal() {
+    local text="$1" secret="$2"
+    if [[ -z "${secret}" ]]; then
+        printf '%s' "${text}"
+        return 0
+    fi
+    printf '%s' "${text//"${secret}"/"<hidden>"}"
+}
+
+# Logs the rejected probe text. Password values, the key-file path and the
+# key-file contents are removed first. The absent-repository match is unchanged.
+log_probe_diagnostic() {
+    local errfile="$1" line redacted secret key_text="" saw=0 i j
+    shift
+    local -a secrets=()
+    for secret in "$@"; do
+        [[ -n "${secret}" ]] || continue
+        secrets+=("${secret}")
+    done
+    if [[ -n "${PASSWORD_FILE:-}" && -f "${PASSWORD_FILE}" && ! -L "${PASSWORD_FILE}" ]]; then
+        key_text="$(<"${PASSWORD_FILE}")" || true
+        [[ -n "${key_text}" ]] && secrets+=("${key_text}")
+    fi
+    for ((i = 0; i < ${#secrets[@]}; i++)); do
+        for ((j = i + 1; j < ${#secrets[@]}; j++)); do
+            if ((${#secrets[j]} > ${#secrets[i]})); then
+                secret="${secrets[i]}"
+                secrets[i]="${secrets[j]}"
+                secrets[j]="${secret}"
+            fi
+        done
+    done
+    log_msg "init-repository refused: repository probe failed"
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line%$'\r'}"
+        [[ -n "${line}" ]] || continue
+        redacted="${line}"
+        for secret in "${secrets[@]+"${secrets[@]}"}"; do
+            redacted="$(redact_literal "${redacted}" "${secret}")"
+        done
+        log_msg "init-repository probe: ${redacted}"
+        saw=1
+    done < "${errfile}"
+    [[ "${saw}" -eq 1 ]] || log_msg "init-repository probe: diagnostic was empty"
+}
+
 # shellcheck disable=SC2317,SC2329
 init_cleanup() {
     local status=$?
@@ -169,6 +218,7 @@ init_repository() {
         log_msg "init-repository refused: repository lock was not free"
         return 1
     fi
+    local saved_rest_password="${RESTIC_REST_PASSWORD:-}" saved_password="${RESTIC_PASSWORD:-}"
     INIT_ERRFILE="$(mktemp)"
     prepare_repository
     run_restic --cacert "${CACERT}" cat config >/dev/null 2>"${INIT_ERRFILE}" || rc=$?
@@ -177,7 +227,9 @@ init_repository() {
         return 0
     fi
     if ! repository_probe_is_absent "${INIT_ERRFILE}"; then
-        log_msg "init-repository refused: repository probe failed"
+        log_probe_diagnostic "${INIT_ERRFILE}" \
+            "${saved_rest_password}" "${saved_password}" \
+            "${RESTIC_PASSWORD_FILE:-}" "${PASSWORD_FILE}"
         return "${rc}"
     fi
     log_msg "init-repository: repository is absent"

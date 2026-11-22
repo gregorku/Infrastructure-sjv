@@ -1063,8 +1063,8 @@ test_backup_init() {
         t_run env "${BACKUP_ENV[@]}" STUB_MODE=reject STUB_EXIT="${code}" STUB_STDERR="${diagnosis}" \
             bash "${script}" init-repository
         t_check "${mode} does not initialize the repository" \
-            bash -c '(( $1 == $2 )) && [[ "$3" == *"repository probe failed"* ]] && [[ ! -e "$4" || "$(grep -c -E " init$" "$4")" -eq 0 ]] && ! grep -F -q unexpected-init "$4"' \
-            _ "${T_RC}" "${code}" "${T_OUT}" "${root}/stub.log"
+            bash -c '(( $1 == $2 )) && [[ "$3" == *"repository probe failed"* ]] && [[ "$3" == *"$5"* ]] && [[ ! -e "$4" || "$(grep -c -E " init$" "$4")" -eq 0 ]] && ! grep -F -q unexpected-init "$4"' \
+            _ "${T_RC}" "${code}" "${T_OUT}" "${root}/stub.log" "${diagnosis}"
     done 3<<EOF
 HTTP 401|21|Fatal: unexpected HTTP response (401): 401 Unauthorized
 a certificate error|22|Fatal: tls: failed to verify certificate: x509: certificate signed by unknown authority
@@ -1076,8 +1076,16 @@ EOF
     t_run env "${BACKUP_ENV[@]}" STUB_MODE=reject STUB_EXIT=26 STUB_STDERR= \
         bash "${script}" init-repository
     t_check "empty probe output does not initialize the repository" \
-        bash -c '(( $1 == 26 )) && [[ "$2" == *"repository probe failed"* ]] && [[ "$(grep -c -E " init$" "$3")" -eq 0 ]]' \
+        bash -c '(( $1 == 26 )) && [[ "$2" == *"repository probe failed"* ]] && [[ "$2" == *"diagnostic was empty"* ]] && [[ "$(grep -c -E " init$" "$3")" -eq 0 ]]' \
         _ "${T_RC}" "${T_OUT}" "${root}/stub.log"
+
+    rm -f "${root}/stub.log" "${root}/cat.count"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=reject STUB_EXIT=27 \
+        STUB_STDERR="probe-marker-visible ${secret} ${keytext} ${root}/key" \
+        bash "${script}" init-repository
+    t_check "a rejected probe logs its diagnostic without secrets or initialization" \
+        bash -c '(( $1 == 27 )) && [[ "$2" == *"repository probe failed"* ]] && [[ "$2" == *"probe-marker-visible"* ]] && [[ "$2" == *"<hidden>"* ]] && [[ "$(grep -c -E " init$" "$3")" -eq 0 ]] && ! grep -F -q unexpected-init "$3" && ! printf "%s\n" "$2" | grep -F -q -e "$4" -e "$5" -e "$6" && ! grep -F -q -e "$4" -e "$5" -e "$6" "$3"' \
+        _ "${T_RC}" "${T_OUT}" "${root}/stub.log" "${secret}" "${keytext}" "${root}/key"
 
     rm -f "${root}/stub.log"
     t_run env "${BACKUP_ENV[@]}" RESTIC_REST_PASSWORD= STUB_MODE=exists bash "${script}" init-repository
@@ -1187,6 +1195,52 @@ test_prepare_repository_username() {
         _ "${T_RC}" "${root}/stub.log" "${secret}" "${keytext}"
 }
 
+test_redact_literal() {
+    print_section "Probe diagnostic redaction"
+    local root script
+    root="${T_RUN_DIR}/backup-redact"
+    script="$(backup_script)"
+    if [[ -d "${root}" ]]; then
+        find "${root}" -mindepth 1 -delete
+    fi
+    backup_prepare_tree "${root}"
+    backup_write_init_stub "${root}"
+    backup_env "${root}" 0 0
+
+    redact_case() {
+        local name="$1" code="$2" secret="$3" diagnosis="$4" expect="$5"
+        rm -f "${root}/stub.log"
+        t_run timeout 2 env "${BACKUP_ENV[@]}" STUB_MODE=reject STUB_EXIT="${code}" \
+            RESTIC_REST_PASSWORD="${secret}" \
+            STUB_STDERR="${diagnosis}" \
+            bash "${script}" init-repository
+        t_check "${name}" \
+            bash -c '(( $1 == $2 )) && [[ "$3" == *"$4"* ]] && [[ "$(grep -c -E " init$" "$5")" -eq 0 ]] && ! grep -F -q unexpected-init "$5" && ! printf "%s\n" "$3" | grep -F -q -e "$6" && ! grep -F -q -e "$6" "$5"' \
+            _ "${T_RC}" "${code}" "${T_OUT}" "${expect}" "${root}/stub.log" "${secret}"
+    }
+
+    redact_case "a normal password is removed from the probe log" \
+        41 "secret-value-123" \
+        "before secret-value-123 after" \
+        "before <hidden> after"
+    redact_case "every copy of a password on one line is removed" \
+        42 "secret-value-123" \
+        "left secret-value-123 mid secret-value-123 right" \
+        "left <hidden> mid <hidden> right"
+    redact_case "a password containing glob characters is removed literally" \
+        43 'a*b?c[d]' \
+        'pre a*b?c[d] and a*b?c[d] post' \
+        "pre <hidden> and <hidden> post"
+    redact_case "text around a redacted password stays in the probe log" \
+        44 "secret-value-123" \
+        "head secret-value-123 tail" \
+        "head <hidden> tail"
+    redact_case "an asterisk password cannot loop and stays out of the log" \
+        45 '*' \
+        'keep * this * text' \
+        "keep <hidden> this <hidden> text"
+}
+
 run_backup_tests() {
     print_header "Remote backup"
     test_backup_compose
@@ -1194,6 +1248,7 @@ run_backup_tests() {
     test_backup_locks
     test_backup_wal_schedule
     test_backup_init
+    test_redact_literal
     test_prepare_repository_username
     test_backup_image
 }
