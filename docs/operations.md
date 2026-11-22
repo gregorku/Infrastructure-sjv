@@ -107,10 +107,10 @@ Limit `json-file` v Compose omezuje jen stdout kontejneru. Soubory `traefik.log`
 
 ## Vzdálená záloha
 
-Služba `sjv-backup` je v `compose/30-backup.yml`. První `deploy.sh` ji nespouští a její obraz nesestavuje. Současný vzdálený repozitář zakládá až `sudo ./scripts/init-backup.sh`. Trvalý plánovač a jeho nasazení na VPS zůstávají samostatný krok. Obnova po kompromitaci zakládá nový repozitář a nové klíče.
+Služba `sjv-backup` je v `compose/30-backup.yml`. První `deploy.sh` ji nespouští a její obraz nesestavuje. Současný vzdálený repozitář zakládá až `sudo ./scripts/init-backup.sh`. Trvalý plánovač a jeho nasazení na VPS zůstávají samostatný krok. `restic init` založí jeden klíč ze souboru `restic-key-password`. Pojmenované klíče `vps`, `recovery` a `maintenance` a účet `sjv-recovery` jsou NEIMPLEMENTOVANÉ. Obnova po kompromitaci zakládá nový repozitář a nové šifrovací heslo.
 
 1. `sudo ./scripts/init.sh` založí `postgresql/`, `pgbackrest/`, `pgbackrest/archive/`, `dumps/`, `files/` a `backup-locks/`. Adresáře, do kterých zapisuje uživatel image PostgreSQL, mají mód 2770 a při běhu `init.sh` jako root skupinu 999.
-2. Do runtime `.env` zapiš obě proměnné. Heslo v URL být nesmí.
+2. Do runtime `.env` zapiš obě proměnné. Heslo v URL být nesmí. `RESTIC_REST_PASSWORD` je HTTP heslo REST serveru. Šifrovací heslo je až soubor v dalším kroku. `RESTIC_REST_USERNAME` a `RESTIC_PASSWORD` se do `.env` nezapisují. Rozdíl a změna HTTP hesla jsou v [INSTALLATION.md](../INSTALLATION.md#změna-hesla-rest-serveru) a [backup-strategy.md](backup-strategy.md#hesla-a-přístupové-údaje).
 
 ```bash
 RESTIC_REPOSITORY=rest:https://infrastructure-sjv@10.100.101.12:8000/infrastructure-sjv/
@@ -164,6 +164,6 @@ PITR na zvolený čas, `pgbackrest verify`, obnova ze vzdáleného Restic snapsh
 ## Mimo rozsah B1b
 
 - Produkční spuštění `sjv-backup` a `sjv-postgresql` přes `deploy.sh`, `backup.sh`, `restore.sh`, `pg_dump`, Mosquitto, FastAPI, React, wmbusmeters a firmware. `deploy.sh` v první fázi startuje jen Traefik a CrowdSec.
-- Trvalý plánovač `sjv-backup` a jeho nasazení na VPS. Prvotní `init-backup.sh` současného repozitáře je součást instalace. Obnova po kompromitaci dál zakládá nový repozitář a nové klíče.
+- Trvalý plánovač `sjv-backup` a jeho nasazení na VPS. Prvotní `init-backup.sh` současného repozitáře je součást instalace. Obnova po kompromitaci zakládá nový repozitář a nové šifrovací heslo. `restic init` z něj založí jeden klíč ze souboru `restic-key-password`. Pojmenované klíče nejsou implementované.
 - Instalace systemd jednotek. Návrh timeru pro access log v repozitáři není nasazení.
 - Jakékoli změny NixOS, Incus, HAProxy, MikroTik, DNS nebo WireGuard (viz [external-changes.md](external-changes.md)).

@@ -124,6 +124,7 @@ services.restic.server = {
 - `dataDir` je konfigurační cesta repozitáře na domácím serveru. Souborový systém se nepředepisuje.
 - Port 8000 je výchozí port `rest-server`. Jiný port lze zvolit podle obsazenosti na `domaPcServer`.
 - Uživatel `infrastructure-sjv` má přístup jen k repozitáři `infrastructure-sjv/`. S `--private-repos` musí jméno uživatele odpovídat první části cesty.
+- Tento repozitář soubor `.htpasswd` REST serveru nezakládá ani nemění. Hostitel `restic-sjv` v něm není. `create-dashboard-user.sh` zapisuje jen dashboard Traefiku. Klient čte heslo z `RESTIC_REST_PASSWORD` v runtime `.env`.
 - Vlastní certifikát pro TLS. Jeho otisk se pinuje na VPS přes `--cacert`. Na LAN úseku za MikroTikem by jinak heslo `rest-server` šlo nešifrovaně.
 - Firewall `domaPcServer`: port 8000 jen ze zdroje, který po DNAT na MikroTiku přichází (`<VPS-WG-IP>` nebo adresa MikroTiku podle NAT). Ověří se pozorováním.
 
@@ -134,7 +135,7 @@ services.restic.server = {
 - Druhý proces `rest-server` se stejným `--path`, s `--append-only`, **bez** `--private-repos`, s vlastním htpasswd (jen uživatel `sjv-recovery`), vlastním certifikátem a portem `<P2>`.
 - Modul `services.restic.server` v NixOS spravuje jen jednu instanci. Druhá proto bude vlastní systemd unit (`wantedBy` prázdné, takže se sama nespustí). Konkrétní zápis se připraví po ověření verze nixpkgs na `domaPcServer`.
 - Firewall: port `<P2>` jen ze zdroje po DNAT, stejně jako u hlavní instance.
-- Uživatel `sjv-recovery` a jeho heslo se založí předem a heslo se uloží jen do obnovovací sady. Funkčnost se ověří při prvním DR testu.
+- Uživatel `sjv-recovery`, jeho heslo, tato instance a klíče `recovery` a `maintenance` jsou NEIMPLEMENTOVANÉ. Skripty repozitáře je nezakládají. Návrh ukládá heslo `sjv-recovery` jen do obnovovací sady a funkčnost ověří při prvním DR testu.
 
 ### Prune a kontrola
 
@@ -147,7 +148,7 @@ services.restic.server = {
   ```
 
 - Timer `sjv-restic-watch` (15 min): alarm, když nejnovější snapshot `wal` je starší než 20 minut, `daily` starší než 26 hodin, nebo objem neobvykle naroste.
-- Klíče restic: `vps` (zapisuje VPS), `recovery` (jen obnovovací sada), `maintenance` (jen domácí server).
+- Návrh klíčů restic: `vps` (zapisuje VPS), `recovery` (jen obnovovací sada), `maintenance` (jen domácí server). Jsou NEIMPLEMENTOVANÉ. `restic init` v tomto repozitáři založí jeden nepojmenovaný klíč ze souboru `restic-key-password`.
 
 Rollback: vypnout služby. Data restic repozitáře se nemažou bez samostatného rozhodnutí.
 

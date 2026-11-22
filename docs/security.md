@@ -152,7 +152,7 @@ Platí pro ACRIOS a pro každý další koncentrátor. Metoda autentizace se vyb
   - změny zařízení a klíčů (bez hodnot), exporty,
   - retenční mazání,
   - odmítnuté obálky v `ingest_rejections` a chybové stavy příjmů. Jednotlivé neúspěchy autentizace se do `audit_logs` neřadí po jednom, aby hash řetězec nezahltil proud pokusů. Dohledatelný záznam je řádek odmítnutí.
-- **Integrita auditu:** hash řetězec. Výslovný INSERT do `audit_logs` mají v tabulce rolí `sjv_api` a `sjv_maintenance`. Žádná aplikační role nemá `UPDATE` ani `DELETE`. `meter_replacement_events` a `meter_verifications` smějí být aktualizovány jen podle R31. Každý takový `UPDATE` má `before`, `after` a povinný důvod a odpovídající `INSERT` do `audit_logs` v jedné transakci. Oprava odečtu tím nepřechází na přepis hodnoty, času ani měřidla. Na původním řádku se při ní smí změnit pouze `receipt_count`, `capture_device_ids` a `superseded_at` (R8). Ověřuje se při `backup-verify.sh` a `restore-test.sh`.
+- **Integrita auditu:** hash řetězec. Výslovný INSERT do `audit_logs` mají v tabulce rolí `sjv_api` a `sjv_maintenance`. Žádná aplikační role nemá `UPDATE` ani `DELETE`. `meter_replacement_events` a `meter_verifications` smějí být aktualizovány jen podle R31. Každý takový `UPDATE` má `before`, `after` a povinný důvod a odpovídající `INSERT` do `audit_logs` v jedné transakci. Oprava odečtu tím nepřechází na přepis hodnoty, času ani měřidla. Na původním řádku se při ní smí změnit pouze `receipt_count`, `capture_device_ids` a `superseded_at` (R8). Návrh je ověřit hash řetězec při `backup-verify.sh` a `restore-test.sh`. Oba skripty jsou NEIMPLEMENTOVANÉ.
 
 ## Ochrana osobních údajů
 
@@ -170,5 +170,5 @@ Správcem je SJV. Projekt dodává technická opatření, ale ne právní dokume
 | --- | --- |
 | Kompromitace zařízení | odvolat, revize odečtů, nové údaje. Výměna SIM sama o sobě odvolání není: mění se externí identifikátor, `device_id` zůstává |
 | Kompromitace účtu admin | zablokovat, zrušit sezení, revize auditu, reset MFA |
-| Kompromitace VPS | odpojit, na domácím serveru odebrat klíč restic `vps` a heslo uživatele `infrastructure-sjv` v `rest-server`, úplná obnova podle [backup-strategy.md](backup-strategy.md#úplná-obnova-na-novém-vps) s obnovovací sadou, rotace všech secrets a údajů zařízení |
+| Kompromitace VPS | odpojit, na domácím serveru zneplatnit heslo uživatele `infrastructure-sjv`. Odebrání šifrovacího klíče, účet `sjv-recovery` a klíče `recovery` a `maintenance` jsou NEIMPLEMENTOVANÉ. Dnes dešifruje jen `restic-key-password`. Po zneplatnění účtu `infrastructure-sjv` náhradní HTTP účet není. Zbývající návrh je přímý přístup k úložišti na domácím serveru. Úplná obnova podle [backup-strategy.md](backup-strategy.md#úplná-obnova-na-novém-vps), rotace všech secrets a údajů zařízení |
 | Únik databáze | posoudit dopad, rotace KEK a hesel, oznámení podle povinností správce |

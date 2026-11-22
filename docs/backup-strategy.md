@@ -63,19 +63,65 @@ Kopie do `…/files/`:
 - runtime `.env`,
 - `dynamic-security.json` Mosquitta,
 - `acme.json` (kvůli rate limitům Let's Encrypt při obnově),
-- KEK, `htpasswd`, bouncer klíč CrowdSec,
+- KEK, `dashboard.htpasswd` Traefiku, bouncer klíč CrowdSec,
 - `state/`.
+
+Kopii těchto souborů má dělat `backup.sh`. Ten v repozitáři není, takže KEK ani ostatní položky seznamu nejsou ověřená součást zálohy. Do tohoto návrhu `restic-key-password` nepatří. Kopie uvnitř zálohy by ji nedešifrovala, protože stejné heslo zálohu zamyká. Skripty soubor do `files/` nekopírují.
 
 Adresář má práva `700` a šifruje se až v resticu. Git repozitář se nezálohuje, je na GitHubu.
 
 ### Restic (vzdálená kopie)
 
-- Repozitář `rest:https://infrastructure-sjv@10.100.101.12:8000/infrastructure-sjv/`. Při `--private-repos` musí cesta začínat jménem uživatele `rest-server`. Heslo do `rest-server` je `RESTIC_REST_PASSWORD` v runtime `.env`. Heslo klíče restic `vps` je samostatný soubor `/docker-data/infrastructure-sjv/secrets/restic-key-password` s právy `600`. Do kontejneru jde jen jako `RESTIC_PASSWORD_FILE`. Obě hesla se nezaměňují a do logů se nepíšou.
+- Repozitář `rest:https://infrastructure-sjv@10.100.101.12:8000/infrastructure-sjv/`. Při `--private-repos` musí cesta začínat jménem uživatele `rest-server`. HTTP heslo a šifrovací heslo jsou dva různé údaje. Rozdíl je v [Hesla a přístupové údaje](#hesla-a-přístupové-údaje). Do logů se nepíšou.
 - Certifikát `rest-server` je `/docker-data/infrastructure-sjv/secrets/restic-rest-server.crt`, v kontejneru jen pro čtení. Restic 0.19.1 má `--cacert` jako globální volbu, takže ho služba předává před `backup` i před `snapshots`. Ověření TLS se nevypíná.
 - Bez neprázdného `RESTIC_REST_PASSWORD` plánovač zůstane nečinný a Restic nespustí. Chybějící heslo se do logu ani do stavového JSON nezapisuje.
 - Restic 0.19.1 běží jako trvalá služba `sjv-backup` (`compose/30-backup.yml`) na síti `sjv-egress`, bez publikovaného portu. Oficiální image je jen jednorázová binárka, proto má služba vlastní image se stejným binárním souborem a plánovačem. Zálohované adresáře jsou připojené jen pro čtení. Na hostitele se Restic neinstaluje.
 - Restic 0.19.1 při uživateli v URL ignoruje `RESTIC_REST_PASSWORD` (issue 22035). Když URL uživatelské jméno obsahuje, služba ho pro proces klienta oddělí a nastaví `RESTIC_REST_USERNAME`. Když ho URL neobsahuje, ponechá `RESTIC_REST_USERNAME` z prostředí. Prázdné zůstane jen tehdy, když není ani v URL, ani v prostředí. Hodnota v `.env` se nemění, heslo REST zůstává v `RESTIC_REST_PASSWORD` a heslo klíče jde dál jen přes `RESTIC_PASSWORD_FILE`. Heslo se do URL ani do logu nedává.
-- Prvotní založení tohoto repozitáře je `sudo ./scripts/init-backup.sh`, po `deploy.sh` a před `post-deploy.sh`. V kontejneru běží jen `init-repository`: nejdřív přečte konfiguraci, existující repozitář znovu nezakládá a plánovač nespouští. Chyba připojení, TLS, HTTP 401 nebo hesla klíče `init` nespustí. Obnova po kompromitaci je krok 11 níže: nový repozitář a nové klíče.
+- Prvotní založení tohoto repozitáře je `sudo ./scripts/init-backup.sh`, po `deploy.sh` a před `post-deploy.sh`. V kontejneru běží jen `init-repository`: nejdřív přečte konfiguraci, existující repozitář znovu nezakládá a plánovač nespouští. `restic init` se spustí jen při kódu 10 a přesně třech řádcích diagnostiky chybějícího repozitáře. Chyba připojení, TLS, HTTP 401 nebo šifrovacího hesla `init` nespustí. `restic init` založí jeden klíč z obsahu `restic-key-password`. Jméno klíče nepředává a `restic key add` nevolá. Obnova po kompromitaci je krok 11 níže.
+
+### Hesla a přístupové údaje
+
+| Proměnná / soubor | Účel | Umístění | Kdo a kdy jej používá |
+| --- | --- | --- | --- |
+| `RESTIC_REPOSITORY` | Adresa repozitáře. Validátor vyžaduje `rest:https://infrastructure-sjv@HOST:PORT/infrastructure-sjv/` a heslo v URL odmítne. | Runtime `.env` v `/docker-data/stacks/infrastructure-sjv/.env`, politika `user`. | Compose ji předá do `sjv-backup`. `prepare_repository()` z ní před každým voláním Resticu uživatelské jméno vyjme. |
+| `RESTIC_REST_USERNAME` | Uživatelské jméno HTTP Basic autentizace k REST serveru. | V `.env` není. Compose ji nepředává. Proces ji nastaví z uživatelského jména v URL. Když URL jméno nemá, ponechá hodnotu, která už v procesu je. | `cat config`, `init`, `backup` a kontrola posledního snapshotu. Do `.env` se nepřidává: validátor neznámou proměnnou odmítne. |
+| `RESTIC_REST_PASSWORD` | Heslo téže HTTP Basic autentizace. Obsah repozitáře nešifruje. Nejméně 16 znaků, když je adresa vyplněná. | Runtime `.env`, politika `user`. | Compose ho předá do kontejneru. Restic 0.19.1 ho načte jen tehdy, když URL neobsahuje ani jméno, ani heslo. |
+| `RESTIC_PASSWORD` | Proměnná, ze které Restic umí číst šifrovací heslo. Projekt ji nepoužívá a před Resticem ji maže. | V `.env` ani v Compose není. | `prepare_repository()` provede `unset`. Do `.env` se nepřidává. |
+| `RESTIC_PASSWORD_FILE` | Cesta k souboru se šifrovacím heslem. | Compose nastaví `/run/secrets/restic-key-password`. | `prepare_repository()` ji exportuje před `cat config`, `init`, `backup` i kontrolou snapshotu. |
+| `secrets/restic-key-password` | Obsah souboru je šifrovací heslo repozitáře. `restic init` z něj založí jeden klíč. | `/docker-data/infrastructure-sjv/secrets/restic-key-password`, běžný neprázdný soubor, mód 600 nebo 400. Skript ho negeneruje. | `init-backup.sh` kontroluje soubor a obsah nečte. Kontejner ho má jen pro čtení. |
+| `secrets/restic-rest-server.crt` | Certifikát pro `--cacert`. Heslo to není. | `/docker-data/infrastructure-sjv/secrets/restic-rest-server.crt`. Mód smí být 644. | Před každým podpříkazem Resticu. Ověření TLS se nevypíná. |
+| `.htpasswd` REST serveru | Databáze HTTP jména a hesla, proti které se přihlášení ověřuje. | Na domácím serveru, mimo tento repozitář. Návrh E6 uvádí `--htpasswd-file`. | Jen REST server. Klient soubor nečte. `dashboard.htpasswd` Traefiku a `create-dashboard-user.sh` jsou jiný soubor a jiný účel. |
+
+### Přihlášení k REST serveru
+
+1. Uživatelské jméno je součást `RESTIC_REPOSITORY`. Provozní tvar je `rest:https://infrastructure-sjv@10.100.101.12:8000/infrastructure-sjv/`.
+2. `prepare_repository()` jméno z URL vyjme a nastaví `RESTIC_REST_USERNAME`. Adresa předaná Resticu je `rest:https://10.100.101.12:8000/infrastructure-sjv/`. Soubor `.env` se při tom nemění.
+3. `RESTIC_REST_PASSWORD` se načte z runtime `.env` a Compose ho předá do kontejneru.
+4. Restic 0.19.1 v `internal/backend/rest/config.go` vezme obě proměnné jen tehdy, když URL neobsahuje ani jméno, ani heslo. Když jméno v URL zůstane, heslo z prostředí ignoruje. Proto se jméno z URL odděluje dřív, než se zavolá `restic`.
+5. Stejná dvojice se použije při `cat config`, `init`, `backup` i při kontrole posledního snapshotu. Všechny tyto operace jdou přes `prepare_repository()` a `run_restic()`. Obnovu žádný skript v repozitáři neprovádí.
+
+### Šifrování záloh
+
+`restic init` přečte obsah `RESTIC_PASSWORD_FILE` a založí jím jeden klíč repozitáře. Skript mu nepředává jméno. Označení `vps` v této dokumentaci je návrh, ne jméno zapsané příkazem.
+
+Toto heslo není `RESTIC_REST_PASSWORD`. HTTP přihlášení otevře přístup k souborům na REST serveru. Bez šifrovacího hesla z nich Restic zálohu nepřečte. Šifrovací heslo bez HTTP účtu, nebo bez přímého čtení disku na domácím serveru, k těm souborům nedosáhne.
+
+Kopie obsahu `restic-key-password` musí být mimo VPS a mimo zálohu `files/`. Záloha je tímto heslem zamčená, takže kopie uvnitř ní při ztrátě VPS nepomůže. Skripty soubor do `files/` nekopírují.
+
+### Co obnova potřebuje
+
+Běžná obnova se současnými přihlašovacími údaji potřebuje adresu s uživatelem `infrastructure-sjv`, `RESTIC_REST_PASSWORD`, certifikát a obsah `restic-key-password`. Dešifrování je heslo z tohoto souboru, protože `restic init` zakládá jeden klíč a `restic key add` v repozitáři není. Skript `restore.sh` ani `restore-test.sh` tuto obnovu neprovádí.
+
+Obnova po kompromitaci heslo účtu `infrastructure-sjv` zneplatní. Náhradní HTTP účet v současné implementaci není. Zbývá návrh přímého čtení úložiště na disku domácího serveru a dešifrování stejným heslem z `restic-key-password`.
+
+NEIMPLEMENTOVANÉ, jen návrh:
+
+- účet `sjv-recovery` a jeho heslo,
+- druhá instance `rest-server-sjv-recovery`,
+- klíče se jmény `recovery` a `maintenance`,
+- `restic key add`, `restic key remove`, `restore.sh` a `restore-test.sh`.
+
+Mimo VPS a mimo plánovanou zálohu `files/` se uchovává kopie šifrovacího hesla, certifikát REST serveru a postup k domácímu serveru. Heslo `infrastructure-sjv` leží na VPS v runtime `.env`. Po jeho zneplatnění se pro obnovu nepoužije.
 
 | Tag | Kdy | Obsah | Spouští |
 | --- | --- | --- | --- |
@@ -112,11 +158,13 @@ Restic čte soubory postupně. pgBackRest během zálohy zapisuje soubory záloh
 
 ### Ověření
 
-- `backup-verify.sh` (týdně):
+Návrh. `backup-verify.sh` a `restore-test.sh` v repozitáři nejsou.
+
+- `backup-verify.sh` (týdně), NEIMPLEMENTOVANÉ:
   - `restic check --read-data-subset=5%`,
   - porovná nejnovější segment WAL v lokálním `archive/` s nejnovějším v posledním snapshotu `wal`,
   - `pgbackrest verify` a `pgbackrest info` nad lokálním repo1.
-- `restore-test.sh` (měsíčně) ověří celý postup obnovy z resticu včetně `pgbackrest verify` nad obnoveným repozitářem a PITR. `pgbackrest verify` hlásí chybějící rozsahy WAL. Přesný formát výstupu pro automatickou kontrolu se ověří ve fázi 3.
+- `restore-test.sh` (měsíčně), NEIMPLEMENTOVANÉ, má ověřit celý postup obnovy z resticu včetně `pgbackrest verify` nad obnoveným repozitářem a PITR. `pgbackrest verify` hlásí chybějící rozsahy WAL. Přesný formát výstupu pro automatickou kontrolu se ověří ve fázi 3.
 
 ## Append-only a oddělení oprávnění
 
@@ -145,25 +193,25 @@ Výsledky se zapíšou do `docs/operations.md`.
 
 | Operace | Kdo | Jak |
 | --- | --- | --- |
-| Zápis | VPS | uživatel `rest-server` `infrastructure-sjv`, klíč restic `vps` |
-| Čtení | VPS a domácí server | Append-only čtení nebrání. VPS své zálohy přečíst může, data zná i tak |
-| Obnova | obnovovací prostředí | klíč restic `recovery` jen v obnovovací sadě. Přístup přes obnovovací instanci `rest-server`, nebo přímo na disku domácího serveru |
-| Mazání a prune | jen domácí server | lokální přístup k úložišti `rest-server` a klíč restic `maintenance`. VPS na domácí server SSH nemá |
+| Zápis | VPS | HTTP uživatel `infrastructure-sjv` a jeden klíč založený souborem `restic-key-password`. Skript klíč nepojmenovává |
+| Čtení | VPS a domácí server | Append-only čtení nebrání. VPS své zálohy přečíst může, data zná i tak. Dešifrování stále potřebuje šifrovací heslo |
+| Obnova | běžný klient, po kompromitaci domácí server | NEIMPLEMENTOVANÉ jako skript. Běžná obnova používá účet `infrastructure-sjv` a heslo z `restic-key-password`. Po zneplatnění tohoto účtu náhradní HTTP účet není. Návrh po kompromitaci je přímé čtení disku domácího serveru se stejným šifrovacím heslem |
+| Mazání a prune | jen domácí server | NEIMPLEMENTOVANÉ v tomto repozitáři. Návrh: lokální přístup k úložišti a klíč `maintenance`. VPS na domácí server SSH nemá |
 
-**Obnovovací instance `rest-server`.** S volbou `--private-repos` vidí uživatel jen cestu se svým jménem. Druhý uživatel ve stejné instanci by se k repozitáři `infrastructure-sjv/` nedostal. Proto:
+**Obnovovací instance `rest-server`.** S volbou `--private-repos` vidí uživatel jen cestu se svým jménem. Druhý uživatel ve stejné instanci by se k repozitáři `infrastructure-sjv/` nedostal. Návrh, který skripty tohoto repozitáře nezakládají:
 
-- na domácím serveru je předem připravená druhá instance `rest-server-sjv-recovery` se stejným datovým adresářem, `--append-only`, **bez** `--private-repos`, s vlastním htpasswd obsahujícím jen uživatele `sjv-recovery`, na vlastním portu a s vlastním TLS,
-- v běžném provozu je vypnutá. Zapne ji správce domácího serveru při obnově a DNAT na MikroTiku pro její port se povolí jen pro adresu nového VPS,
-- heslo `sjv-recovery` je jen v obnovovací sadě.
+- druhá instance `rest-server-sjv-recovery` se stejným datovým adresářem, `--append-only`, **bez** `--private-repos`, s vlastním htpasswd obsahujícím jen uživatele `sjv-recovery`, na vlastním portu a s vlastním TLS,
+- v běžném provozu vypnutá. Při obnově ji zapne správce domácího serveru a DNAT na MikroTiku pro její port se povolí jen pro adresu nového VPS,
+- heslo `sjv-recovery` jen v obnovovací sadě.
 
-Tím obnova nezávisí na heslu uživatele `infrastructure-sjv`, které je po kompromitaci VPS nutné zneplatnit. Přesné volby pro NixOS (dvě instance `rest-server`) se ověří při návrhu externí změny, viz [external-changes.md](external-changes.md).
+Běžná obnova používá účet `infrastructure-sjv` a obsah `restic-key-password`. Po zneplatnění tohoto účtu náhradní HTTP účet v implementaci není. Návrh obnovy po kompromitaci je přímé čtení úložiště na domácím serveru se stejným šifrovacím heslem. Účet `sjv-recovery`, instance i klíče `recovery` a `maintenance` jsou NEIMPLEMENTOVANÉ. Přesné volby pro NixOS jsou v [external-changes.md](external-changes.md) a v tomto repozitáři se nespouštějí.
 
 ### Kompromitovaný VPS
 
 - Může dál přidávat nové snapshoty, i nesmyslné, ale nesmaže ani nepřepíše existující data.
 - Kontrola na domácím serveru hlásí neobvyklý nárůst objemu vzdálené restic kopie a chybějící snapshoty `wal` a `daily`.
-- Po incidentu se na domácím serveru odebere klíč restic `vps` (`restic key remove`) a zneplatní heslo `infrastructure-sjv`.
-- Útočník s klíčem `vps` mohl získat hlavní klíč repozitáře, a tím schopnost dešifrovat data. Po incidentu se proto založí nový repozitář. Starý zůstane jen pro čtení do vypršení retence.
+- Po incidentu se na domácím serveru má odebrat klíč, kterým VPS šifroval, a zneplatnit heslo `infrastructure-sjv`. Příkaz `restic key remove` v tomto repozitáři není. Dnes je v repozitáři jeden klíč z `restic init` a skript ho neumí odebrat.
+- Kdo má šifrovací heslo tohoto klíče, umí data dešifrovat. Po incidentu se proto založí nový repozitář a nové heslo. Starý zůstane jen pro čtení do vypršení retence. Klíče `recovery` a `maintenance` tímto krokem samy nevzniknou.
 
 ## Retence vzdálených záloh
 
@@ -188,19 +236,24 @@ Uložení:
 
 **Nesmí být jen ve Vaultwardenu**, protože ten běží na stejném VPS.
 
-Obsah:
+Dnes se mimo VPS uchovává:
 
-1. heslo klíče restic `recovery`, URL repozitáře přes obnovovací instanci a cesta k úložišti `rest-server` na domácím serveru,
-2. heslo `sjv-recovery` a otisk TLS certifikátu obnovovací instance,
-3. přístup k domácímu serveru, nebo postup pro jeho správce,
-4. KEK aplikace (kopie, je i v záloze),
-5. odkaz na repozitář `Infrastructure-sjv` na GitHubu a commit poslední nasazené verze,
-6. tištěný runbook obnovy (tento dokument a `operations.md`),
-7. datum poslední kontroly sady. Kontroluje se při každém DR testu.
+1. kopie obsahu `restic-key-password`, tedy šifrovací heslo jediného klíče založeného `restic init`,
+2. certifikát `restic-rest-server.crt` domácího REST serveru,
+3. přístup k domácímu serveru, nebo postup pro jeho správce, a cesta k úložišti na jeho disku,
+4. odkaz na repozitář `Infrastructure-sjv` na GitHubu a commit poslední nasazené verze,
+5. tištěný runbook obnovy (tento dokument a `operations.md`),
+6. datum poslední kontroly sady. Skript té kontroly v repozitáři není.
+
+Návrh, který závisí na neimplementovaném `backup.sh` a v záloze ověřený není: kopie KEK, runtime `.env`, `dynamic-security.json`, `acme.json`, `dashboard.htpasswd` Traefiku a bouncer klíč CrowdSec. `backup.sh` je do `files/` nekopíruje.
+
+Heslo `infrastructure-sjv` je na VPS v runtime `.env`. Do obnovovací sady nepatří jako jediná cesta k datům: po kompromitaci se má zneplatnit a samo zálohu nedešifruje. Náhradní HTTP účet tím nevznikne.
+
+Až budou založené, a dnes jsou NEIMPLEMENTOVANÉ: heslo klíče `recovery`, heslo účtu `sjv-recovery`, certifikát obnovovací instance a heslo klíče `maintenance` na domácím serveru.
 
 ## Skripty
 
-Všechny skripty mají `set -Eeuo pipefail`, drží svůj `flock` a zapisují stav do `state/<skript>.json`.
+V repozitáři je z tabulky jen `backup/sjv-backup.sh` a `scripts/init-backup.sh`. `backup.sh`, `backup-verify.sh`, `backup-status.sh`, `restore.sh` a `restore-test.sh` jsou NEIMPLEMENTOVANÉ. Návrh počítá s `set -Eeuo pipefail`, vlastním `flock` a stavem v `state/<skript>.json`.
 
 | Skript | Zámky | Účel |
 | --- | --- | --- |
@@ -212,6 +265,8 @@ Všechny skripty mají `set -Eeuo pipefail`, drží svůj `flock` a zapisují st
 | `restore-test.sh` | `restore-test.lock` | izolovaná testovací obnova, nikdy nesahá na produkční DB |
 
 ### `restore.sh` (produkce)
+
+NEIMPLEMENTOVANÉ. Návrh:
 
 1. Parametry: `--source local|remote`, `--target-time` (PITR) nebo `--latest`, a `--confirm infrastructure-sjv`.
 2. Bez `--replace-data` ověří dostupnost záloh a okno PITR a skončí kódem 2. Princip je z reference.
@@ -226,9 +281,11 @@ Všechny skripty mají `set -Eeuo pipefail`, drží svůj `flock` a zapisují st
 
 ### `restore-test.sh` (izolovaný test)
 
+NEIMPLEMENTOVANÉ. Návrh:
+
 1. Vytvoří dočasný kontejner `sjv-restore-test-<stamp>` se sítí `none` a vlastním dočasným adresářem. S produkčními sítěmi ani daty nic nesdílí. Restic běží v samostatném kroku na `sjv-egress` a zapisuje jen do dočasného adresáře.
 2. Vzdálený zdroj (výchozí, měsíčně):
-   - `restic restore` posledního `daily` a přes něj `archive/` z posledního `wal`, přes klíč `vps`,
+   - NEIMPLEMENTOVANÉ. Návrh: `restic restore` posledního `daily` a přes něj `archive/` z posledního `wal`, dešifrované heslem existujícího klíče. Pojmenovaný klíč `vps` skript nezakládá,
    - `pgbackrest verify` nad obnoveným repozitářem,
    - `pgbackrest restore` s PITR na čas o 10 minut starší než poslední WAL v obnoveném `archive/`.
 
@@ -249,22 +306,22 @@ Postup pro ztrátu nebo kompromitaci VPS. Předpoklad: dostupný domácí server
 
 | Krok | Činnost | Kdo |
 | --- | --- | --- |
-| 0 | Rozhodnutí o obnově a zápis času začátku. Při kompromitaci: zneplatnit heslo `infrastructure-sjv`, odebrat klíč restic `vps`, odvolat údaje zařízení v evidenci | Gregor, správce domácího serveru |
+| 0 | Rozhodnutí o obnově a zápis času začátku. Při kompromitaci: zneplatnit heslo `infrastructure-sjv` a odvolat údaje zařízení. Odebrání šifrovacího klíče je návrh na domácím serveru. `restic key remove` v tomto repozitáři není | Gregor, správce domácího serveru |
 | 1 | Nový hostitel: VPS, Incus kontejner s `security.nesting`, Docker, `/docker-data` jako připojený disk | Gregor |
 | 2 | Síť: WireGuard k MikroTiku pro nového hostitele, HAProxy (nebo přímé porty 80, 443, 8883), DNS na novou adresu | Gregor, mimo tento projekt |
-| 3 | Na domácím serveru zapnout `rest-server-sjv-recovery` a povolit jeho port jen pro adresu nového hostitele | správce domácího serveru |
+| 3 | NEIMPLEMENTOVANÉ. Návrh: na domácím serveru zapnout `rest-server-sjv-recovery` a povolit jeho port jen pro adresu nového hostitele | správce domácího serveru |
 | 4 | Checkout `Infrastructure-sjv` na commit z obnovovací sady, `init.sh` | Gregor |
-| 5 | `restic restore` posledního `daily` (`files/`, `dumps/`, `pgbackrest/`) přes `sjv-recovery` a klíč `recovery` do `/docker-data/backups/infrastructure-sjv/`, potom `archive/` z posledního `wal` | Gregor |
-| 6 | Obnova souborů stacku z `files/`: `.env`, KEK, dynsec, `acme.json`, htpasswd. `update-env.sh` doplní jen chybějící hodnoty | Gregor |
+| 5 | NEIMPLEMENTOVANÉ jako skript. Návrh: `restic restore` posledního `daily` (`files/`, `dumps/`, `pgbackrest/`) a přes něj `archive/` z posledního `wal` do `/docker-data/backups/infrastructure-sjv/`. Účet `sjv-recovery` a klíč `recovery` v repozitáři nevznikají. Dnes dešifruje jen heslo z `restic-key-password` | Gregor |
+| 6 | NEIMPLEMENTOVANÉ. Návrh počítá s obnovou `.env`, KEK, dynsec, `acme.json` a `dashboard.htpasswd` Traefiku ze `files/`. `backup.sh`, který by je tam zkopíroval, v repozitáři není. `update-env.sh` existuje a existující hesla nepřepíše. `restic-key-password` v `files/` není | Gregor |
 | 7 | Při kompromitaci rotace: hesla DB rolí, hesla zařízení v dynsec, API tokeny, bouncer klíč CrowdSec. KEK se rotuje až po spuštění (krok 11) | Gregor |
 | 8 | `pgbackrest verify`, `pgbackrest info` a kontrola kontinuity WAL | Gregor |
-| 9 | `restore.sh --source local --latest --replace-data --confirm infrastructure-sjv` | Gregor |
+| 9 | NEIMPLEMENTOVANÉ. Návrh: `restore.sh --source local --latest --replace-data --confirm infrastructure-sjv` | Gregor |
 | 10 | `deploy.sh` (build image, spuštění), `post-deploy.sh`, kontroly zdraví | Gregor |
-| 11 | Po kompromitaci nový repozitář a nové klíče `vps`, `recovery`, `maintenance`, nový uživatel `rest-server`. Rotace KEK. Nová obnovovací sada. Není to `init-backup.sh` současného repozitáře | Gregor, správce domácího serveru |
+| 11 | Po kompromitaci nový repozitář a nové šifrovací heslo. Není to `init-backup.sh` současného repozitáře. Klíče pojmenované `vps`, `recovery` a `maintenance` a nový uživatel REST serveru jsou NEIMPLEMENTOVANÉ. Rotace KEK a nová obnovovací sada | Gregor, správce domácího serveru |
 | 12 | Zařízení: nové údaje (při kompromitaci), `replay_since` na čas posledního obnoveného WAL, kontrola příjmu | Gregor |
-| 13 | Vypnout `rest-server-sjv-recovery`, okamžitý `backup.sh`, `restore-test.sh`, zápis naměřených časů do `docs/operations.md` | Gregor, správce domácího serveru |
+| 13 | NEIMPLEMENTOVANÉ. Návrh: vypnout `rest-server-sjv-recovery`, okamžitý `backup.sh`, `restore-test.sh`, zápis naměřených časů do `docs/operations.md` | Gregor, správce domácího serveru |
 
-Bez kompromitace (například porucha hostitele) se kroky 7 a 11 zjednoduší: rotace není nutná a pokračuje se do stávajícího repozitáře s klíčem `vps`.
+Bez kompromitace (například porucha hostitele) se kroky 7 a 11 zjednoduší: rotace není nutná a pokračuje se do stávajícího repozitáře se šifrovacím heslem z `restic-key-password`.
 
 ## RPO: výpočet
 
@@ -295,7 +352,7 @@ Odhady časů jsou předběžné. Ilustrační výpočet přenosu, ne údaj o sk
 - poprvé před ostrým provozem, potom dvakrát ročně,
 - výsledek se zapíše do `docs/operations.md` s naměřenými časy.
 
-Měsíční `restore-test.sh` ověřuje obnovitelnost dat a měří dobu obnovy DB. Celé RTO neověřuje.
+Návrh měsíčního `restore-test.sh` má ověřovat obnovitelnost dat a měřit dobu obnovy DB. Skript je NEIMPLEMENTOVANÝ a celé RTO neověřuje.
 
 ## Pravidelné úlohy a kontroly
 
@@ -303,8 +360,8 @@ Měsíční `restore-test.sh` ověřuje obnovitelnost dat a měří dobu obnovy 
 | --- | --- | --- |
 | WAL archivace | průběžně | poslední WAL starší než 5 min |
 | `sjv-backup` tag `wal` | běžně 300 s; po obsazeném zámku 60 s | poslední snapshot `wal` starší než 15 min. Dlouhá denní úloha práh může překročit, souběžný Restic se nespouští |
-| `backup.sh` | denně | poslední full starší než 8 dní, diff starší než 26 h, nebo snapshot `daily` starší než 26 h |
-| `backup-verify.sh` | týdně | jakákoli chyba |
-| `restore-test.sh` | měsíčně | neúspěch, nebo poslední úspěch starší než 31 dní |
+| `backup.sh`, NEIMPLEMENTOVANÉ | denně | poslední full starší než 8 dní, diff starší než 26 h, nebo snapshot `daily` starší než 26 h |
+| `backup-verify.sh`, NEIMPLEMENTOVANÉ | týdně | jakákoli chyba |
+| `restore-test.sh`, NEIMPLEMENTOVANÉ | měsíčně | neúspěch, nebo poslední úspěch starší než 31 dní |
 | DR test | 2× ročně | naměřené RTO nad 4 h |
 | Kontrola na domácím serveru | 15 min | nejnovější snapshot `wal` starší než 20 min, `daily` starší než 26 h, neobvyklý nárůst |

@@ -83,7 +83,7 @@ Skupiny v `.env.example`:
 | Role PostgreSQL | `PG_DB`, `PG_BOOTSTRAP_USER`, `PG_*_USER`, `PG_*_PASSWORD` | hesla v šabloně jsou `set_*`. Skript je vygeneruje a nevypíše |
 | MQTT | `MQTT_*_USER`, `MQTT_*_PASSWORD` | služba MQTT zatím není nasazená. Hesla se přesto generují |
 | Příjem | `INGEST_MAX_MESSAGE_AGE_DAYS`, `INGEST_KEY_RETENTION_DAYS` | v šabloně 30 a 60. Věk zprávy musí být kratší než retence klíčů |
-| Vzdálená záloha | `RESTIC_REPOSITORY`, `RESTIC_REST_PASSWORD` | prázdné je varování, ne tvrdá chyba. Heslo v URL být nesmí |
+| Vzdálená záloha | `RESTIC_REPOSITORY`, `RESTIC_REST_PASSWORD` | prázdné je varování, ne tvrdá chyba. Heslo v URL být nesmí. `RESTIC_REST_PASSWORD` je jen HTTP heslo. Šifrovací heslo je soubor, ne proměnná. `RESTIC_REST_USERNAME` a `RESTIC_PASSWORD` do `.env` nepatří |
 | Pošta | `SMTP_*`, `MAIL_FROM` | prázdný `SMTP_HOST` nechá notifikace ve frontě |
 | Logy Compose | `LOG_MAX_SIZE`, `LOG_MAX_FILES` | stdout kontejnerů, ne soubor `access.log` |
 
@@ -175,7 +175,7 @@ Chybějící část, prázdný klíč, symlink nebo jiná práva klíče jsou ch
 
 Nejdřív se přečte konfigurace repozitáře. Když už existuje, `init` se nezavolá. `init` se spustí jen když `cat config` skončí kódem 10 a neprázdné řádky jsou přesně tři: diagnostika chybějícího `<config/>`, otázka `Is there a repository at the following location?` a adresa repozitáře po oddělení uživatele z URL. Potom se repozitář založí a konfigurace se přečte znovu. Oba úspěchy končí patičkou `Remote backup repository is ready. Next: ./scripts/post-deploy.sh`.
 
-HTTP 401, chyba TLS, chyba sítě, chybné heslo klíče a každá jiná diagnostika `init` nespustí. Text té diagnostiky se zapíše do logu až po vynechání hesel, cesty k souboru klíče a jeho obsahu. Skript skončí nenulovým kódem a patičku o připraveném repozitáři nevypíše. Obsazený `repo.lock` také skončí chybou bez `init`. V testovacím režimu vyplněný repozitář skončí před Dockerem. Opakování existujícího repozitáře je bezpečné. Obnova po kompromitaci je jiná operace: nový repozitář a nové klíče, jak je popisuje [docs/backup-strategy.md](docs/backup-strategy.md).
+HTTP 401, chyba TLS, chyba sítě, chybné heslo klíče a každá jiná diagnostika `init` nespustí. Text té diagnostiky se zapíše do logu až po vynechání hesel, cesty k souboru klíče a jeho obsahu. Skript skončí nenulovým kódem a patičku o připraveném repozitáři nevypíše. Obsazený `repo.lock` také skončí chybou bez `init`. V testovacím režimu vyplněný repozitář skončí před Dockerem. Opakování existujícího repozitáře je bezpečné. Obnova po kompromitaci je jiná operace: nový repozitář a nové šifrovací heslo. `restic init` z něj založí jeden klíč ze souboru `restic-key-password`. Pojmenované klíče nejsou implementované. Postup je v [docs/backup-strategy.md](docs/backup-strategy.md#úplná-obnova-na-novém-vps).
 
 ### `post-deploy.sh`
 
@@ -286,9 +286,32 @@ Když `deploy.sh` selže uprostřed, sítě a cizí kontejnery nemaže. Opakovan
 
 ## H. Zálohování a obnova
 
-Produkční `backup.sh` a `restore.sh` nejsou. Služba `sjv-backup` zůstává v `compose/30-backup.yml`. `deploy.sh` ji nespouští a její obraz nesestavuje. Současný vzdálený repozitář zakládá `sudo ./scripts/init-backup.sh` jednorázovým kontejnerem. Trvalá služba `sjv-backup` po tomto kroku neběží. Chyba připojení nebo autentizace repozitář nezaloží. Obnova po kompromitaci dál zakládá nový repozitář a nové klíče.
+Produkční `backup.sh` a `restore.sh` nejsou. Služba `sjv-backup` zůstává v `compose/30-backup.yml`. `deploy.sh` ji nespouští a její obraz nesestavuje. Současný vzdálený repozitář zakládá `sudo ./scripts/init-backup.sh` jednorázovým kontejnerem. Trvalá služba `sjv-backup` po tomto kroku neběží. Chyba připojení nebo autentizace repozitář nezaloží. Obnova po kompromitaci zakládá nový repozitář a nové šifrovací heslo. `restic init` z něj založí jeden klíč ze souboru `restic-key-password`. Pojmenované klíče nejsou implementované.
 
-Příprava vzdálené zálohy je v [docs/operations.md](docs/operations.md#vzdálená-záloha). První `deploy.sh` klienta nespustí. `init-backup.sh` po sobě kontejner nenechá, takže `docker logs sjv-backup` platí až po samostatném spuštění trvalé služby. Heslo šifrovacího klíče je soubor `/docker-data/infrastructure-sjv/secrets/restic-key-password` s právy 600, ne proměnná. Certifikát je `restic-rest-server.crt` a smí mít práva 644.
+Příprava vzdálené zálohy je v [docs/operations.md](docs/operations.md#vzdálená-záloha). Úplný význam jednotlivých údajů je v [docs/backup-strategy.md](docs/backup-strategy.md#hesla-a-přístupové-údaje). První `deploy.sh` klienta nespustí. `init-backup.sh` po sobě kontejner nenechá, takže `docker logs sjv-backup` platí až po samostatném spuštění trvalé služby.
+
+Na `sjv-monitoring` leží údaje takto:
+
+- `RESTIC_REPOSITORY` a `RESTIC_REST_PASSWORD` v `/docker-data/stacks/infrastructure-sjv/.env`. Adresa obsahuje uživatelské jméno `infrastructure-sjv` a neobsahuje heslo. `RESTIC_REST_PASSWORD` je heslo HTTP Basic autentizace, nejméně 16 znaků, když je adresa vyplněná.
+- `RESTIC_REST_USERNAME` se do `.env` nezapisuje. `prepare_repository()` ji nastaví z uživatelského jména v adrese. Neznámou proměnnou `check-env.sh` odmítne.
+- `RESTIC_PASSWORD` se nepoužívá. Před Resticem se maže. Do `.env` nepatří.
+- `/docker-data/infrastructure-sjv/secrets/restic-key-password` je šifrovací heslo, mód 600 nebo 400. Compose ho připojí jako `RESTIC_PASSWORD_FILE` na `/run/secrets/restic-key-password`.
+- `/docker-data/infrastructure-sjv/secrets/restic-rest-server.crt` je certifikát pro TLS, ne heslo. Mód 644 je přípustný.
+- `.htpasswd` REST serveru je na domácím serveru. `create-dashboard-user.sh` zapisuje jen `/docker-data/infrastructure-sjv/traefik/users/dashboard.htpasswd`.
+
+Kopie obsahu `restic-key-password` se ukládá mimo VPS. V záloze `files/` není a záloha je tímto heslem zamčená.
+
+### Změna hesla REST serveru
+
+Změna HTTP hesla uživatele `infrastructure-sjv` nemění obsah `restic-key-password` ani data už uložených záloh.
+
+Tento repozitář heslo na REST serveru nemění. Hostitel `restic-sjv` v něm není. Návrh domácího serveru v [docs/external-changes.md](docs/external-changes.md) předává rest-serveru `--htpasswd-file`. Příkaz, který by ten soubor upravil, tu není. `create-dashboard-user.sh` se pro REST server nepoužívá.
+
+Na `sjv-monitoring` se potom upraví jen řádek `RESTIC_REST_PASSWORD` v `/docker-data/stacks/infrastructure-sjv/.env`. Soubor se nenahrazuje šablonou `.env.example` a ostatní řádky se nemění. Hodnota se nezapisuje do dokumentace ani do výstupu příkazů. Práva zůstávají 600. `update-env.sh` má tuto proměnnou jako `user`, takže existující hodnotu zachová a nové heslo z prázdné šablony nedoplní. Změna se proto píše přímo do runtime souboru.
+
+`sudo ./scripts/check-env.sh` ověří tvar adresy a délku hesla. Shodu se serverem neověřuje.
+
+Server volá až `sudo ./scripts/init-backup.sh`. U repozitáře, který už existuje, úspěch na terminálu obsahuje `init-repository: repository already exists` a `init` se nespustí. Špatné HTTP heslo skončí bez `init`. Když repozitář ještě neexistuje a diagnostika je přesně ta s kódem 10, stejný příkaz ho založí. Trvalý plánovač tento příkaz nespouští. Novou hodnotu čte při svém běhu.
 
 Lokální pgBackRest má stanza `sjv`, archivaci přes `archive-push` a vypnuté `expire-auto`. Izolovaný test 20. 11. 2026 provedl `stanza-create`, `check` a plnou zálohu. Neběžel na `/docker-data` a nespustil `backup.sh`. Obnova do jiného prázdného adresáře, s repozitářem jen pro čtení a s `archive_mode=off`, je popsaná v [docs/operations.md](docs/operations.md#obnova-do-samostatného-clusteru). Přepnutí obnoveného clusteru zpět do provozního datového adresáře ověřené není. PITR, `pgbackrest verify` a obnova ze snapshotu Restic součástí toho testu nebyly.
 

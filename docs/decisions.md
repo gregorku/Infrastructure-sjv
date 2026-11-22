@@ -76,7 +76,7 @@ Změny proti dokumentaci z kola 2. Všech devět dokumentů je s nimi sladěnýc
 | R10 | REST API | Rozptýlené po dokumentech | Jeden katalog v [architecture.md](architecture.md) |
 | R11 | Neověřené hodnoty | CPU a RAM kontejneru, kapacita fronty firmware a rychlosti linky byly uvedené konkrétně | `<CPU>`, `<RAM>`, kapacita jen jako vzorec, rychlost linky jen jako ilustrační výpočet |
 | R12 | Denní hodnoty | Nebylo určeno, ze kterých streamů a v jakém časovém pásmu | Jen z efektivní řady (přiřazené streamy), den v `Europe/Prague` |
-| R13 | Obnovovací přístup | Uživatel `sjv-vps` neodpovídal cestě `infrastructure-sjv/` při `--private-repos`. Druhý uživatel ve stejné instanci by k repozitáři neměl přístup | Uživatel VPS se jmenuje `infrastructure-sjv`. Pro obnovu je předem připravená vypnutá instance `rest-server-sjv-recovery` bez `--private-repos` s uživatelem `sjv-recovery` |
+| R13 | Obnovovací přístup | Uživatel `sjv-vps` neodpovídal cestě `infrastructure-sjv/` při `--private-repos`. Druhý uživatel ve stejné instanci by k repozitáři neměl přístup | Uživatel VPS se jmenuje `infrastructure-sjv`. Návrh obnovy je vypnutá instance `rest-server-sjv-recovery` bez `--private-repos` s uživatelem `sjv-recovery`. Skripty ji nezakládají |
 | R14 | Heartbeat a broker | Heartbeat nenesl časovou referenci. Broker mohl hromadit QoS 0 | `queue_qos0_messages false`. Heartbeat nese `instance`, `boot`, `uptime_ms`, `at` |
 | R15 | Aktuální stav pro člena | Nebylo určeno | Schváleno. Člen vidí aktuální kumulativní stav měřidla, označený jako celkový stav počítadla, ne jako osobní spotřebu. Historické odečty a vypočítanou spotřebu vidí jen za období svého členství. Administrátor má kompletní historii |
 | R16 | Retence odečtů | „dlouhodobě“ | „trvale“, podle zadání |

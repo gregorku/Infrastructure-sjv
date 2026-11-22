@@ -50,7 +50,7 @@ Stav: čeká na schválení. Cílový termín zahájení ostrého sběru skuteč
   - **append-only** podle [backup-strategy.md](backup-strategy.md#chování-rest-server---append-only): `backup`, `check`, `restore` a `unlock` projdou, `forget`, `prune`, `DELETE` a přepis selžou, cizí cesta je nedostupná,
   - **konzistence:** snapshot `wal` během běžící plné zálohy a během expire. Obnova z `daily` + `wal` musí projít `pgbackrest verify` a PITR na poslední WAL,
   - atomičnost zápisu WAL segmentů v archive-push,
-  - obnovovací přístup přes instanci bez `--private-repos` s uživatelem `sjv-recovery`.
+  - obnovovací přístup přes instanci bez `--private-repos` s uživatelem `sjv-recovery`. Účet, instance i klíče `recovery` a `maintenance` jsou NEIMPLEMENTOVANÉ.
 - Hotovo, když:
   - všechny testy projdou,
   - `restore-test.sh` ze vzdáleného zdroje projde,
