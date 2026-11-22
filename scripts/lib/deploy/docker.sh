@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The only file allowed to invoke docker. Every call is a fixed subcommand
 # against this project's networks and the containers sjv-traefik,
-# sjv-crowdsec and sjv-backup. Nothing here removes a network, a volume
-# or another project.
+# sjv-crowdsec and sjv-backup. PostgreSQL is not on that allow-list.
+# backup.sh reaches it only through the fixed commands below.
+# Nothing here removes a network, a volume or another project.
 
 docker_require_managed_name() {
     case "$1" in
@@ -157,6 +158,66 @@ docker_compose_init_backup() {
         --project-directory "${STACK_DIR}" \
         -f "${STACK_DIR}/compose.yml" \
         run --build --rm --no-deps sjv-backup init-repository
+}
+
+# One daily snapshot after the local backup files are in place. The arguments
+# are fixed. The scheduler is not started. Old snapshots are not removed and
+# pgBackRest expire is not called from here.
+docker_compose_backup_daily() {
+    local address
+    [[ "${SJV_TEST_MODE}" -eq 0 ]] || fail "Test mode cannot run docker compose."
+    address="$(docker_read_proxy_address)"
+    TRAEFIK_PROXY_ADDRESS="${address}" docker compose \
+        --project-name "${STACK_NAME}" \
+        --project-directory "${STACK_DIR}" \
+        -f "${STACK_DIR}/compose.yml" \
+        run --rm --no-deps sjv-backup run daily
+}
+
+# Fixed commands in the already running PostgreSQL container. Passwords are
+# not accepted as arguments. pg_dump uses the local postgres user and peer
+# authentication. The general allow-list still refuses restart and arbitrary
+# exec against this container.
+docker_postgres_exec() {
+    [[ "${SJV_TEST_MODE}" -eq 0 ]] || fail "Test mode cannot run docker."
+    case "$1" in
+        pg_isready)
+            [[ $# -eq 1 ]] || fail "Refusing pg_isready arguments."
+            docker exec -u postgres -e LC_ALL=C "${POSTGRES_CONTAINER}" pg_isready -d sjv -q
+            ;;
+        pgbackrest)
+            case "${2:-}" in
+                info)
+                    [[ $# -eq 3 && "${3:-}" == "--output=json" ]] || fail "Refusing pgbackrest info arguments."
+                    ;;
+                stanza-create|check)
+                    [[ $# -eq 2 ]] || fail "Refusing pgbackrest arguments."
+                    ;;
+                backup)
+                    [[ $# -eq 3 && ( "${3:-}" == "--type=full" || "${3:-}" == "--type=diff" ) ]] \
+                        || fail "Refusing pgbackrest backup arguments."
+                    ;;
+                *) fail "Refusing pgbackrest command." ;;
+            esac
+            shift
+            docker exec -u postgres -e LC_ALL=C "${POSTGRES_CONTAINER}" pgbackrest --stanza=sjv "$@"
+            ;;
+        pg_dump)
+            [[ $# -eq 4 && "${2:-}" == "-Fc" && "${3:-}" == "--no-password" && "${4:-}" == "--dbname=sjv" ]] \
+                || fail "Refusing pg_dump arguments."
+            docker exec -u postgres -e LC_ALL=C "${POSTGRES_CONTAINER}" \
+                pg_dump -Fc --no-password --dbname=sjv
+            ;;
+        psql)
+            [[ $# -eq 1 ]] || fail "Refusing psql arguments."
+            docker exec -u postgres -e LC_ALL=C "${POSTGRES_CONTAINER}" \
+                psql -d sjv -v ON_ERROR_STOP=1 -Atqc \
+                "SELECT CASE WHEN to_regclass('public.meters') IS NULL THEN 'absent' WHEN EXISTS (SELECT 1 FROM meters WHERE aes_key_enc IS NOT NULL) THEN 'present' ELSE 'none' END"
+            ;;
+        *)
+            fail "Refusing postgres command."
+            ;;
+    esac
 }
 
 # Read-only resolution. It does not create containers or networks.

@@ -42,17 +42,17 @@ Zálohování je kritická část projektu. Projekt nelze označit za dokončen�
 - `archive_mode = on`, `archive_command = 'pgbackrest --stanza=sjv archive-push %p'`, `archive-async = y`, `archive_timeout = 60s`.
 - Plná záloha v neděli, rozdílová v ostatní dny (`backup.sh`).
 - `repo1-retention-full = 2`, takže okno PITR je nejméně 7 a obvykle až 14 dní. Pro garantovaných 14 dní lze retenci zvýšit na 3. Rozhodne se podle velikosti DB.
-- **Automatické expire je vypnuté** (`expire-auto = n`) a `pgbackrest expire` spouští `backup.sh` samostatně, až po denním vzdáleném snapshotu ([Konzistence](#konzistence-vzdálené-kopie)). Název a chování volby se ověří pro zafixovanou verzi pgBackRest ve fázi 1.
+- **Automatické expire je vypnuté** (`expire-auto = n`). `scripts/backup.sh` `pgbackrest expire` nevolá, takže WAL potřebné k obnově nemaže. Expire až po potvrzeném vzdáleném snapshotu zůstává samostatný krok ([Konzistence](#konzistence-vzdálené-kopie)).
 - Lokální repozitář není šifrovaný pgBackRestem. Leží na stejném disku jako DB a mimo VPS ho šifruje restic. Obnova pak nepotřebuje další heslo.
 - PostgreSQL běží s `--data-checksums` (převzato z reference).
-- Verze je pgBackRest 2.60.1 nad PostgreSQL 19.0 (R33). `PG_CONTROL_VERSION` 1905 a `XLOG_PAGE_MAGIC` 0xD122 se shodují s vydáním 19.0. Poznámky k 2.60.1 jmenují 19rc2. Konstanta katalogu v nástroji je 202605131 a vydání 19.0 má 202610061. Běh čte číslo katalogu z `pg_control`. Izolovaný test 20. 11. 2026 dokončil `stanza-create`, `check`, plnou zálohu 30,3 MB (1 273 souborů), archivaci WAL a obnovu do samostatného clusteru s `archive_mode=off` a repozitářem jen pro čtení. `pgbackrest expire`, PITR na zvolený čas, `pg_dump`, `backup.sh`, `restore.sh` a vzdálená obnova ověřené nejsou. Postup je v [operations.md](operations.md#záloha-a-obnova-postgresql).
+- Verze je pgBackRest 2.60.1 nad PostgreSQL 19.0 (R33). `PG_CONTROL_VERSION` 1905 a `XLOG_PAGE_MAGIC` 0xD122 se shodují s vydáním 19.0. Poznámky k 2.60.1 jmenují 19rc2. Konstanta katalogu v nástroji je 202605131 a vydání 19.0 má 202610061. Běh čte číslo katalogu z `pg_control`. Izolovaný test 20. 11. 2026 dokončil `stanza-create`, `check`, plnou zálohu 30,3 MB (1 273 souborů), archivaci WAL a obnovu do samostatného clusteru s `archive_mode=off` a repozitářem jen pro čtení. `scripts/backup.sh` umí stejné kroky spustit v kontejneru a v offline testech je zastupují jen náhradní příkazy. Produkční běh, `pgbackrest expire`, PITR na zvolený čas, `restore.sh` a vzdálená obnova ověřené nejsou. Postup je v [operations.md](operations.md#záloha-a-obnova-postgresql).
 
 ### Denní logický dump
 
 `pg_dump -Fc` do `…/dumps/sjv-<UTC>.dump`:
 
-- kontrola hlavičky `PGDMP` (převzato z reference) a `sha256`,
-- lokálně se drží 7 dumpů.
+- `scripts/backup.sh` kontroluje hlavičku `PGDMP` a soubor bez ní smaže. `sha256` zatím nezapisuje.
+- Návrh drží lokálně 7 dumpů. Skript staré dumpy nemaže, aby nespouštěl retenci.
 
 Slouží k obnově nezávislé na verzi PostgreSQL a pgBackRest a k ročním zálohám.
 
@@ -66,7 +66,7 @@ Kopie do `…/files/`:
 - KEK, `dashboard.htpasswd` Traefiku, bouncer klíč CrowdSec,
 - `state/`.
 
-Kopii těchto souborů má dělat `backup.sh`. Ten v repozitáři není, takže KEK ani ostatní položky seznamu nejsou ověřená součást zálohy. Do tohoto návrhu `restic-key-password` nepatří. Kopie uvnitř zálohy by ji nedešifrovala, protože stejné heslo zálohu zamyká. Skripty soubor do `files/` nekopírují.
+`scripts/backup.sh` do `files/` kopíruje runtime `.env` a, když už existují, `acme.json`, `dashboard.htpasswd` a bouncer klíč CrowdSec. `app-kek` kopíruje jen tehdy, když soubor už existuje, a jen když má 32 bajtů. Chybí-li a v `meters.aes_key_enc` už nějaký záznam je, výsledek je neúplný. Soubor sám nezakládá. `dynamic-security.json` v repozitáři není, protože Mosquitto v Compose není, a `backup.sh` ho proto nekopíruje. `restic-key-password` do `files/` nepatří a skript ho nekopíruje. Kopie uvnitř zálohy by ji nedešifrovala, protože stejné heslo zálohu zamyká.
 
 Adresář má práva `700` a šifruje se až v resticu. Git repozitář se nezálohuje, je na GitHubu.
 
@@ -108,6 +108,8 @@ Toto heslo není `RESTIC_REST_PASSWORD`. HTTP přihlášení otevře přístup k
 
 Kopie obsahu `restic-key-password` musí být mimo VPS a mimo zálohu `files/`. Záloha je tímto heslem zamčená, takže kopie uvnitř ní při ztrátě VPS nepomůže. Skripty soubor do `files/` nekopírují.
 
+`app-kek` je jiné tajemství. Rozbaluje jen `meters.aes_key_enc`. Odečty jím šifrované nejsou a heslo Restic je nerozbalí. Soubor je `/docker-data/infrastructure-sjv/secrets/app-kek`. `scripts/backup.sh` ho do `files/` zkopíruje, jen když už existuje. Kopie v Restic snapshotu nenahrazuje kopii mimo VPS: bez ní se po ztrátě VPS i snapshotu ke klíčům měřidel nedá dostat. Skript produkční soubor nezakládá.
+
 ### Co obnova potřebuje
 
 Běžná obnova se současnými přihlašovacími údaji potřebuje adresu s uživatelem `infrastructure-sjv`, `RESTIC_REST_PASSWORD`, certifikát a obsah `restic-key-password`. Dešifrování je heslo z tohoto souboru, protože `restic init` zakládá jeden klíč a `restic key add` v repozitáři není. Skript `restore.sh` ani `restore-test.sh` tuto obnovu neprovádí.
@@ -144,11 +146,11 @@ Restic čte soubory postupně. pgBackRest během zálohy zapisuje soubory záloh
 
 ### Řešení
 
-1. **`daily` jen v klidovém stavu.** Budoucí lokální záloha drží exkluzivní `backup.lock` po dobu `pgbackrest backup`, `pg_dump` a kopie souborů stacku a exkluzivní `repo.lock` po dobu `pgbackrest expire`. `sjv-backup` denní úlohu spustí, jen když oba zámky hned sdíleně získá. Obsazený zámek denní běh přeskočí a nečeká na něj, takže plánovač může pokračovat k `wal`. Pořadí tím zůstává:
-   1. `pgbackrest backup` (s `archive-check`, takže WAL potřebné pro konzistenci zálohy jsou v `archive/` před jejím dokončením),
-   2. `pg_dump` a kopie souborů stacku,
+1. **`daily` jen v klidovém stavu.** `scripts/backup.sh` drží exkluzivní `backup.lock` po dobu `pgbackrest backup`, `pg_dump` a kopie souborů. Zámek pak pustí a spustí jeden `sjv-backup run daily`. `repo.lock` nebere a `pgbackrest expire` nevolá. `sjv-backup` denní úlohu spustí, jen když `backup.lock` a `repo.lock` hned sdíleně získá. Obsazený zámek denní běh přeskočí a nečeká na něj, takže plánovač může pokračovat k `wal`. Pořadí tím zůstává:
+   1. `pgbackrest check` a `pgbackrest backup` (check ověří archivaci WAL; záloha sama vyžaduje WAL potřebné pro svou konzistenci),
+   2. `pg_dump` a kopie souborů,
    3. `restic backup --tag daily`,
-   4. `pgbackrest expire` pod exkluzivním `repo.lock`.
+   4. `pgbackrest expire` se v této etapě nespouští. WAL v repozitáři zůstávají.
 
    Při snapshotu `daily` neběží v repozitáři žádná záloha ani expire. Mění se jen `archive/`, kam přibývají nové WAL. PostgreSQL ani pgBackRest tato služba nespouští.
 2. **WAL soubory se nemění.** archive-push zapisuje každý segment pod konečným názvem atomicky (dočasný soubor a přejmenování). Restic tedy vidí buď celý segment, nebo žádný. Dočasné soubory (`*.pgbackrest.tmp`) se vylučují. Atomičnost zápisu se ověří ve fázi 3 pro zafixovanou verzi.
@@ -245,7 +247,7 @@ Dnes se mimo VPS uchovává:
 5. tištěný runbook obnovy (tento dokument a `operations.md`),
 6. datum poslední kontroly sady. Skript té kontroly v repozitáři není.
 
-Návrh, který závisí na neimplementovaném `backup.sh` a v záloze ověřený není: kopie KEK, runtime `.env`, `dynamic-security.json`, `acme.json`, `dashboard.htpasswd` Traefiku a bouncer klíč CrowdSec. `backup.sh` je do `files/` nekopíruje.
+`scripts/backup.sh` do `files/` dává runtime `.env`, existující `app-kek`, a když jsou na disku, také `acme.json`, `dashboard.htpasswd` a bouncer klíč CrowdSec. `dynamic-security.json` nekopíruje, protože Mosquitto v repozitáři není. `restic-key-password` v `files/` není. Produkční běh této kopie se na tomto stroji nespouštěl.
 
 Heslo `infrastructure-sjv` je na VPS v runtime `.env`. Do obnovovací sady nepatří jako jediná cesta k datům: po kompromitaci se má zneplatnit a samo zálohu nedešifruje. Náhradní HTTP účet tím nevznikne.
 
@@ -253,12 +255,12 @@ Až budou založené, a dnes jsou NEIMPLEMENTOVANÉ: heslo klíče `recovery`, h
 
 ## Skripty
 
-V repozitáři je z tabulky jen `backup/sjv-backup.sh` a `scripts/init-backup.sh`. `backup.sh`, `backup-verify.sh`, `backup-status.sh`, `restore.sh` a `restore-test.sh` jsou NEIMPLEMENTOVANÉ. Návrh počítá s `set -Eeuo pipefail`, vlastním `flock` a stavem v `state/<skript>.json`.
+V repozitáři je `backup/sjv-backup.sh`, `scripts/init-backup.sh` a `scripts/backup.sh`. `backup-verify.sh`, `backup-status.sh`, `restore.sh` a `restore-test.sh` jsou NEIMPLEMENTOVANÉ. `backup.sh` má `set -Eeuo pipefail`, vlastní `flock` a stav v `state/backup.json`.
 
 | Skript | Zámky | Účel |
 | --- | --- | --- |
 | `sjv-backup` | `restic-job.lock` exkluzivně. `daily` bere `backup.lock` a `repo.lock` sdíleně bez čekání. `wal` bere `repo.lock` sdíleně bez čekání a při obsazeném zámku se přeskočí. `backup.lock` nebere | `restic backup` a ověření posledního snapshotu. Tagy `daily` a `wal`. `forget` a `prune` nevolá |
-| `backup.sh` (až s PostgreSQL) | `backup.lock` exkluzivně, při expire `repo.lock` exkluzivně | `pgbackrest backup` (full nebo diff), `pg_dump`, kopie souborů stacku, lokální retence dumpů, `pgbackrest expire`. Restic nespouští |
+| `scripts/backup.sh` | `backup.lock` exkluzivně po dobu lokální zálohy, před Resticem ho pouští. `repo.lock` nebere | `pgbackrest` stanza, `check` a backup (v neděli full, jinak diff; bez předchozího full vždy full), `pg_dump -Fc`, kopie do `files/`, pak jeden `sjv-backup run daily`. Staré dumpy nemaže. `pgbackrest expire`, `restic forget` a `restic prune` nevolá |
 | `backup-verify.sh` | `verify.lock` | viz [Ověření](#ověření), plus `sha256` dumpů a hash řetězec auditu v živé DB |
 | `backup-status.sh` | žádný | stáří posledního WAL v repo1, posledního full a diff, posledních snapshotů `daily` a `wal`, posledního testu obnovy, platnost certifikátu MQTT. `--alert` vrací nenulový kód a vloží notifikaci |
 | `restore.sh` | `backup.lock`, `repo.lock` exkluzivně | obnova produkce. Dvoufázová: bez `--replace-data` jen ověří. S `--confirm infrastructure-sjv` obnoví do nového datového adresáře a teprve po kontrole přepne |
@@ -312,7 +314,7 @@ Postup pro ztrátu nebo kompromitaci VPS. Předpoklad: dostupný domácí server
 | 3 | NEIMPLEMENTOVANÉ. Návrh: na domácím serveru zapnout `rest-server-sjv-recovery` a povolit jeho port jen pro adresu nového hostitele | správce domácího serveru |
 | 4 | Checkout `Infrastructure-sjv` na commit z obnovovací sady, `init.sh` | Gregor |
 | 5 | NEIMPLEMENTOVANÉ jako skript. Návrh: `restic restore` posledního `daily` (`files/`, `dumps/`, `pgbackrest/`) a přes něj `archive/` z posledního `wal` do `/docker-data/backups/infrastructure-sjv/`. Účet `sjv-recovery` a klíč `recovery` v repozitáři nevznikají. Dnes dešifruje jen heslo z `restic-key-password` | Gregor |
-| 6 | NEIMPLEMENTOVANÉ. Návrh počítá s obnovou `.env`, KEK, dynsec, `acme.json` a `dashboard.htpasswd` Traefiku ze `files/`. `backup.sh`, který by je tam zkopíroval, v repozitáři není. `update-env.sh` existuje a existující hesla nepřepíše. `restic-key-password` v `files/` není | Gregor |
+| 6 | Obnova souborů ze `files/` je pořád ruční. Snapshot po `scripts/backup.sh` může obsahovat runtime `.env`, existující `app-kek`, `acme.json`, `dashboard.htpasswd` a bouncer klíč. `dynamic-security.json` v něm není. `update-env.sh` existuje a existující hesla nepřepíše. `restic-key-password` v `files/` není | Gregor |
 | 7 | Při kompromitaci rotace: hesla DB rolí, hesla zařízení v dynsec, API tokeny, bouncer klíč CrowdSec. KEK se rotuje až po spuštění (krok 11) | Gregor |
 | 8 | `pgbackrest verify`, `pgbackrest info` a kontrola kontinuity WAL | Gregor |
 | 9 | NEIMPLEMENTOVANÉ. Návrh: `restore.sh --source local --latest --replace-data --confirm infrastructure-sjv` | Gregor |

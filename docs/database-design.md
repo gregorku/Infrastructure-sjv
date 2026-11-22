@@ -103,6 +103,10 @@ Pravidlo vynucuje repozitářová vrstva backendu jedním společným predikáte
 
 `id`, `manufacturer_code char(3)`, `wmbus_id char(8)`, `wmbus_version smallint`, `wmbus_type smallint`, `meter_key bytea UNIQUE` (M + A pole, 8 B), `driver`, `medium` (`cold_water`, `hot_water`, `heat`, `heat_cost_allocator`), `primary_register`, `unit`, `aes_key_enc bytea NULL`, `aes_key_fingerprint NULL`, `dedup_window interval NULL`, `max_flow_per_hour numeric NULL`, `status` (`active`, `retired`), `note`
 
+- `aes_key_enc` je obálka AES klíče měřidla, ne odečet. Formát verze `0x01` je jeden bajt verze, 12 bajtů nonce, ciphertext a 16bajtový tag AES-256-GCM z knihovny `cryptography`. AAD je bajt verze. Klíč měřidla má 16 nebo 32 bajtů. Formát se nemění.
+- `aes_key_fingerprint` ve schématu zůstává a aplikace do něj nezapisuje. Obyčejný hash klíče by umožnil slovníkové ověření. HMAC by potřeboval další tajemství, jeho zálohu a pravidlo rotace. Sloupec se proto neplní a schéma se kvůli tomu nemění.
+- Odečty v `meter_readings` ani ostatní provozní sloupce se tímto KEK nešifrují. Zálohu šifruje Restic heslem `restic-key-password`. To je jiné tajemství než `app-kek`. Bez `app-kek` obálku klíče nerozbalí ani obnovená databáze.
+
 ### `meter_external_ids`
 
 `id`, `meter_id`, `source_stream_id`, `external_id`

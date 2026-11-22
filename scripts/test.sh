@@ -37,6 +37,8 @@ source "${SCRIPT_DIR}/lib/deploy/logs.sh"
 source "${SCRIPT_DIR}/lib/tests/test-infra.sh"
 # shellcheck source=scripts/lib/tests/test-backup.sh
 source "${SCRIPT_DIR}/lib/tests/test-backup.sh"
+# shellcheck source=scripts/lib/tests/test-backup-local.sh
+source "${SCRIPT_DIR}/lib/tests/test-backup-local.sh"
 
 T_RUN_DIR=""
 
@@ -58,6 +60,26 @@ run_ingest_contract_tests() {
     t_expect_ok "ingest contract unit tests" \
         env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${REPO_ROOT}/app/backend" \
         python3 "${REPO_ROOT}/app/backend/tests/test_ingest_contract.py"
+}
+
+run_meter_key_tests() {
+    print_header "Meter key encryption"
+    if ! command -v python3 >/dev/null 2>&1; then
+        t_fail "python3 is required for the meter key tests. Install the python3 package: apt-get install python3 shellcheck"
+        return
+    fi
+    # cryptography comes from app/backend/uv.lock. The checkout venv is used when present.
+    local python="${REPO_ROOT}/.venv/bin/python"
+    if [[ ! -x "${python}" ]]; then
+        python="python3"
+    fi
+    if ! "${python}" -c 'import cryptography' >/dev/null 2>&1; then
+        t_fail "meter key tests need cryptography from app/backend/uv.lock. Install with: uv sync --frozen --project ${REPO_ROOT}/app/backend. No container was started."
+        return
+    fi
+    t_expect_ok "meter key encryption tests" \
+        env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${REPO_ROOT}/app/backend" \
+        "${python}" "${REPO_ROOT}/app/backend/tests/test_meter_keys.py"
 }
 
 run_shellcheck_step() {
@@ -87,7 +109,9 @@ main() {
     run_script_tests
     run_infra_tests
     run_backup_tests
+    run_backup_local_tests
     run_ingest_contract_tests
+    run_meter_key_tests
     run_shellcheck_step
 
     print_footer "No container, network, ZFS or host configuration was touched."
@@ -98,7 +122,7 @@ case "${1:---static}" in
     --static) main ;;
     --help)
         printf '%s\n' "Usage: ./scripts/test.sh [--static]" \
-            "Runs syntax, static, environment-library, script and ingest-contract tests offline." \
+            "Runs syntax, static, environment-library, script, ingest-contract and meter-key tests offline." \
             "A complete run on Debian 13 needs the python3 and shellcheck packages: apt-get install python3 shellcheck." \
             "Those packages are not required to operate the stack."
         ;;

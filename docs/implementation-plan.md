@@ -32,9 +32,9 @@ Stav: čeká na schválení. Cílový termín zahájení ostrého sběru skuteč
 
 ### 2. PostgreSQL a lokální zálohy
 
-- Vlastní image z připnutého `postgres:19.0` a pgBackRest 2.60.1, `--data-checksums`, archivace WAL, `expire-auto = n`. Soubory image a `compose/40-postgresql.yml` jsou v repozitáři. Izolovaný test dokončil `stanza-create`, `check`, plnou zálohu a obnovu aktuálního clusteru. PITR na zvolený čas, `backup.sh` a `restore.sh` se nespustily, takže kritéria hotovo této fáze splněná nejsou.
+- Vlastní image z připnutého `postgres:19.0` a pgBackRest 2.60.1, `--data-checksums`, archivace WAL, `expire-auto = n`. Soubory image a `compose/40-postgresql.yml` jsou v repozitáři. Izolovaný test dokončil `stanza-create`, `check`, plnou zálohu a obnovu aktuálního clusteru. PITR na zvolený čas a `restore.sh` se nespustily, takže kritéria hotovo této fáze splněná nejsou.
 - Role DB přes `\getenv`, pořadí deploye „nejdřív DB“.
-- `backup.sh` (bez restic kroku), `backup-verify.sh`, `backup-status.sh`, `restore.sh` (lokální zdroj), systemd timery se zámky.
+- `scripts/backup.sh` vytvoří lokální podklady a jeden denní Restic snapshot. `backup-verify.sh`, `backup-status.sh`, `restore.sh` (lokální zdroj) a systemd timery se zámky zatím nejsou. Expire a mazání dumpů skript nedělá.
 - Hotovo, když:
   - proběhne PITR obnova do izolovaného kontejneru na zvolený čas,
   - `backup-status.sh` hlásí stáří WAL do 2 minut.

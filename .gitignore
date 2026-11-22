@@ -21,5 +21,6 @@ dynamic-security.json
 
 # Local test runs (scripts/test.sh).
 .test-tmp/
+.venv/
 __pycache__/
 *.pyc

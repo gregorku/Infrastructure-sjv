@@ -1,6 +1,6 @@
 # Provoz: instalace a konfigurace
 
-Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Traefiku, postup pro CrowdSec, rotaci souborových logů Traefiku, přípravu vzdálené zálohy, službu PostgreSQL 19.0 a postup obnovy ověřený izolovaným testem. MQTT, aplikace, `pg_dump`, `backup.sh` a `restore.sh` zatím nejsou. `deploy.sh` PostgreSQL nespouští. Návrh systemd timeru pro logy je v repozitáři a není nainstalovaný.
+Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Traefiku, postup pro CrowdSec, rotaci souborových logů Traefiku, přípravu vzdálené zálohy, službu PostgreSQL 19.0 a postup obnovy ověřený izolovaným testem. `scripts/backup.sh` připraví podklady zálohy a jeden denní snapshot. Proti produkční databázi se nespouští. MQTT, aplikace a `restore.sh` zatím nejsou. `deploy.sh` PostgreSQL nespouští. Návrh systemd timeru pro logy je v repozitáři a není nainstalovaný.
 
 ## Předpoklady
 
@@ -163,7 +163,7 @@ PITR na zvolený čas, `pgbackrest verify`, obnova ze vzdáleného Restic snapsh
 
 ## Mimo rozsah B1b
 
-- Produkční spuštění `sjv-backup` a `sjv-postgresql` přes `deploy.sh`, `backup.sh`, `restore.sh`, `pg_dump`, Mosquitto, FastAPI, React, wmbusmeters a firmware. `deploy.sh` v první fázi startuje jen Traefik a CrowdSec.
+- Produkční spuštění `sjv-backup` a `sjv-postgresql` přes `deploy.sh` a produkční běh `scripts/backup.sh`. Skript v repozitáři je a v offline testech používá jen náhradní příkazy. `restore.sh`, Mosquitto, FastAPI, React, wmbusmeters a firmware zatím nejsou. `deploy.sh` v první fázi startuje jen Traefik a CrowdSec.
 - Trvalý plánovač `sjv-backup` a jeho nasazení na VPS. Prvotní `init-backup.sh` současného repozitáře je součást instalace. Obnova po kompromitaci zakládá nový repozitář a nové šifrovací heslo. `restic init` z něj založí jeden klíč ze souboru `restic-key-password`. Pojmenované klíče nejsou implementované.
 - Instalace systemd jednotek. Návrh timeru pro access log v repozitáři není nasazení.
 - Jakékoli změny NixOS, Incus, HAProxy, MikroTik, DNS nebo WireGuard (viz [external-changes.md](external-changes.md)).

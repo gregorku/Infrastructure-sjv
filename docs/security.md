@@ -103,11 +103,15 @@ Platí pro ACRIOS a pro každý další koncentrátor. Metoda autentizace se vyb
 
 ## AES klíče měřidel
 
-- **Obálkové šifrování:** klíč měřidla se šifruje AES-256-GCM hlavním klíčem aplikace (KEK). KEK je v souboru `/docker-data/infrastructure-sjv/secrets/app-kek` s právy `600`, mimo DB i Git. Kontejner ho dostane jako Docker secret jen do backendu a workeru.
-- **Zápis:** `PUT /admin/meters/{id}/key`. Hodnota se už nikdy nezobrazí, UI ukazuje jen otisk. Zápis i změna jdou do auditu bez hodnoty klíče.
-- **Použití:** klíč se dešifruje jen ve workeru v okamžiku dekódování. Nikdy se nedostane do argumentu procesu, do logu ani do zařízení.
-- **Rotace KEK:** skript přešifruje všechny záznamy v jedné transakci a starý KEK ponechá do ověření zálohy.
-- **Záloha KEK:** bez KEK jsou zálohované klíče AES a tajemství TOTP nepoužitelné. KEK je proto v zálohách restic i samostatně v obnovovací sadě.
+Aplikační KEK šifruje jen AES klíč měřidla. Odečty, telegramy a ostatní data v PostgreSQL tímto mechanismem šifrované nejsou. Zálohu šifruje Restic samostatným heslem.
+
+- **Implementace.** `app/backend/sjv_keys` volá AES-256-GCM z knihovny Python `cryptography`. Vlastní AES ani GCM v modulu není. KEK má 32 bajtů, nonce je pro každé šifrování nových 12 bajtů a tag má 16 bajtů. `meters.aes_key_enc` zůstává ve verzi `0x01`: bajt verze, nonce, ciphertext a tag. AAD je bajt verze. Formát se nemění a uložené záznamy se nepřepisují. Otevřený klíč měřidla se do sloupce ani do logu nezapisuje.
+- **Závislost.** Backendový image v repozitáři není a `deploy.sh` ho nestaví. Jediná Python závislost je zamčená v `app/backend/pyproject.toml` a `app/backend/uv.lock`. Budoucí image ji nainstaluje příkazem `uv sync --frozen --project app/backend`. Tento krok ji do běžícího kontejneru nedává.
+- **Soubor KEK.** Cesta je `/docker-data/infrastructure-sjv/secrets/app-kek`, v `config.sh` jako `APP_KEK_FILE`. Soubor má mít přesně 32 bajtů a mód `600` nebo `400`. Načtení při chybějícím, jinak dlouhém nebo cizím čitelném souboru selže. Běžný start soubor nezakládá a existující nepřepisuje. `scripts/create-app-kek.sh` zapíše nový soubor jen na výslovnou cestu a jen když tam ještě není. Produkční soubor se tímto krokem nezakládá.
+- **Otisk.** Sloupec `aes_key_fingerprint` zůstává a aplikace ho neplní. SHA-256 klíče by čtenáři sloupce dovolil ověřit uhodnutý klíč. Samostatný HMAC klíč by byl třetí tajemství vedle `app-kek` a hesla Restic, musel by mít vlastní zálohu a při rotaci by změnil všechny otisky. Dokud otisk nikdo nečte, takový klíč se nezavádí.
+- **Kdo KEK nemá.** `sjv_collector` v migraci `aes_key_enc` ani `aes_key_fingerprint` nečte. Modul KEK collectorovi nepředává. Dešifrování telegramů a worker zatím nejsou.
+- **Ještě není.** `PUT /admin/meters/{id}/key`, zápis do auditu a skript rotace KEK zůstávají návrh.
+- **Obnova.** Bez souboru `app-kek` uložené `aes_key_enc` nejdou rozšifrovat. Heslo Restic v `restic-key-password` šifruje zálohu a klíč měřidla nerozbalí. Jsou to dvě různá tajemství. `scripts/backup.sh` zkopíruje existující `app-kek` do `files/` pro Restic. Soubor nezakládá a `restic-key-password` nekopíruje. Kopie v záloze nenahrazuje kopii mimo VPS.
 
 ## Secrets a konfigurace
 
