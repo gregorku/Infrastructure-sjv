@@ -1010,7 +1010,16 @@ test_backup_init() {
     print_section "Repository initialization"
     local root secret="fixture-rest-password-0123" keytext="fixture-restic-key-not-logged"
     local absent="repository does not exist: unable to open config file: <config/> does not exist"
+    local hint="Is there a repository at the following location?"
+    local cleaned="rest:https://10.100.101.12:8000/infrastructure-sjv/"
     local script cacert
+    probe_lines() {
+        local line out=""
+        for line in "$@"; do
+            out+="${line}"$'\n'
+        done
+        printf '%s' "${out}"
+    }
     root="${T_RUN_DIR}/backup-init"
     script="$(backup_script)"
     if [[ -d "${root}" ]]; then
@@ -1034,24 +1043,27 @@ test_backup_init() {
         _ "${root}/stub.log" "${secret}" "${keytext}" "${T_OUT}"
 
     rm -f "${root}/stub.log" "${root}/cat.count"
-    t_run env "${BACKUP_ENV[@]}" STUB_MODE=absent STUB_EXIT=11 \
-        STUB_CAT_COUNT="${root}/cat.count" STUB_STDERR="${absent}" \
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=absent STUB_EXIT=10 \
+        STUB_CAT_COUNT="${root}/cat.count" \
+        STUB_STDERR="$(probe_lines "${absent}" "${hint}" "${cleaned}")" \
         bash "${script}" init-repository
     t_check "a missing repository is initialized once and read back" \
         bash -c '(( $1 == 0 )) && [[ "$2" == *"repository is ready"* ]] && [[ "$2" != *"scheduler started"* ]] && [[ "$2" != *"fixture-config"* ]] && [[ "$(grep -c -E " cat config$" "$3")" -eq 2 ]] && [[ "$(grep -c -E " init$" "$3")" -eq 1 ]] && grep -F -q -- "--cacert $4 cat config" "$3" && grep -F -q -- "--cacert $4 init" "$3"' \
         _ "${T_RC}" "${T_OUT}" "${root}/stub.log" "${cacert}"
 
     rm -f "${root}/stub.log" "${root}/cat.count"
-    t_run env "${BACKUP_ENV[@]}" STUB_MODE=absent STUB_EXIT=17 \
-        STUB_CAT_COUNT="${root}/cat.count" STUB_STDERR="Fatal: ${absent}" \
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=absent STUB_EXIT=10 \
+        STUB_CAT_COUNT="${root}/cat.count" \
+        STUB_STDERR="$(probe_lines "Fatal: ${absent}" "${hint}" "${cleaned}")" \
         bash "${script}" init-repository
     t_check "a Fatal prefix on the missing-repository diagnosis still initializes once" \
         bash -c '(( $1 == 0 )) && [[ "$(grep -c -E " init$" "$2")" -eq 1 ]] && [[ "$(grep -c -E " cat config$" "$2")" -eq 2 ]]' \
         _ "${T_RC}" "${root}/stub.log"
 
     rm -f "${root}/stub.log" "${root}/cat.count"
-    t_run env "${BACKUP_ENV[@]}" STUB_MODE=absent STUB_EXIT=11 STUB_SECOND_EXIT=31 \
-        STUB_CAT_COUNT="${root}/cat.count" STUB_STDERR="${absent}" \
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=absent STUB_EXIT=10 STUB_SECOND_EXIT=31 \
+        STUB_CAT_COUNT="${root}/cat.count" \
+        STUB_STDERR="$(probe_lines "${absent}" "${hint}" "${cleaned}")" \
         bash "${script}" init-repository
     t_check "initialization is accepted only when the new configuration can be read" \
         bash -c '(( $1 == 31 )) && [[ "$2" == *"not readable after initialization"* ]] && [[ "$(grep -c -E " init$" "$3")" -eq 1 ]]' \
@@ -1072,6 +1084,31 @@ a network error|23|Fatal: dial tcp 10.100.101.12:8000: connect: connection refus
 a key password error|24|Fatal: wrong password or no key found
 another missing-repository diagnosis|25|repository does not exist: config file is missing
 EOF
+
+    reject_absent() {
+        local name="$1" code="$2"
+        shift 2
+        rm -f "${root}/stub.log" "${root}/cat.count"
+        t_run env "${BACKUP_ENV[@]}" STUB_MODE=reject STUB_EXIT="${code}" \
+            STUB_STDERR="$(probe_lines "$@")" \
+            bash "${script}" init-repository
+        t_check "${name}" \
+            bash -c '(( $1 == $2 )) && [[ "$3" == *"repository probe failed"* ]] && [[ "$(grep -c -E " init$" "$4")" -eq 0 ]] && ! grep -F -q unexpected-init "$4"' \
+            _ "${T_RC}" "${code}" "${T_OUT}" "${root}/stub.log"
+    }
+    reject_absent "the standard missing-repository diagnosis with exit 1 does not initialize" \
+        1 "${absent}" "${hint}" "${cleaned}"
+    reject_absent "a different repository URL does not initialize" \
+        10 "${absent}" "${hint}" "rest:https://10.100.101.12:8000/other/"
+    reject_absent "a repository URL that still contains the username does not initialize" \
+        10 "${absent}" "${hint}" "rest:https://infrastructure-sjv@10.100.101.12:8000/infrastructure-sjv/"
+    reject_absent "a missing location question does not initialize" \
+        10 "${absent}" "${cleaned}"
+    reject_absent "a missing repository URL line does not initialize" \
+        10 "${absent}" "${hint}"
+    reject_absent "an extra diagnostic line does not initialize" \
+        10 "${absent}" "${hint}" "${cleaned}" "unexpected extra line"
+
     rm -f "${root}/stub.log" "${root}/cat.count"
     t_run env "${BACKUP_ENV[@]}" STUB_MODE=reject STUB_EXIT=26 STUB_STDERR= \
         bash "${script}" init-repository

@@ -173,7 +173,7 @@ Chybějící část, prázdný klíč, symlink nebo jiná práva klíče jsou ch
 
 Úplná konfigurace spustí jednorázový kontejner s příkazem `init-repository`. Obraz se sestaví ze synchronizovaného `/docker-data/stacks/infrastructure-sjv/backup`, kontejner se po skončení smaže a služby `traefik` a `crowdsec` se nerestartují. Plánovač `supervise` se nespustí, takže `sjv-backup` po tomto kroku neběží.
 
-Nejdřív se přečte konfigurace repozitáře. Když už existuje, `init` se nezavolá. Když repozitář prokazatelně neexistuje, založí se a konfigurace se přečte znovu. Oba úspěchy končí patičkou `Remote backup repository is ready. Next: ./scripts/post-deploy.sh`.
+Nejdřív se přečte konfigurace repozitáře. Když už existuje, `init` se nezavolá. `init` se spustí jen když `cat config` skončí kódem 10 a neprázdné řádky jsou přesně tři: diagnostika chybějícího `<config/>`, otázka `Is there a repository at the following location?` a adresa repozitáře po oddělení uživatele z URL. Potom se repozitář založí a konfigurace se přečte znovu. Oba úspěchy končí patičkou `Remote backup repository is ready. Next: ./scripts/post-deploy.sh`.
 
 HTTP 401, chyba TLS, chyba sítě, chybné heslo klíče a každá jiná diagnostika `init` nespustí. Text té diagnostiky se zapíše do logu až po vynechání hesel, cesty k souboru klíče a jeho obsahu. Skript skončí nenulovým kódem a patičku o připraveném repozitáři nevypíše. Obsazený `repo.lock` také skončí chybou bez `init`. V testovacím režimu vyplněný repozitář skončí před Dockerem. Opakování existujícího repozitáře je bezpečné. Obnova po kompromitaci je jiná operace: nový repozitář a nové klíče, jak je popisuje [docs/backup-strategy.md](docs/backup-strategy.md).
 

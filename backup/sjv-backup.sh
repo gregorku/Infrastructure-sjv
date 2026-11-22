@@ -113,23 +113,29 @@ init_repository_ready() {
     [[ "${mode_bits}" == 600 || "${mode_bits}" == 400 ]]
 }
 
-# True only for the one observed missing-repository diagnosis. A Fatal: prefix
-# is accepted. Any other line, including a shorter "does not exist", is not.
+# True only for the Restic 0.19.1 missing-repository result. The command must
+# exit 10 and the non-empty lines must be exactly three: the missing config
+# file, with an optional Fatal: prefix; the location question; and the
+# repository URL left by prepare_repository. Any other status or line is not.
 repository_probe_is_absent() {
-    local errfile="$1" line bare saw=0
+    local errfile="$1" status="$2" line bare
     local exact="repository does not exist: unable to open config file: <config/> does not exist"
-    [[ -s "${errfile}" && ! -L "${errfile}" ]] || return 1
+    local -a lines=()
+    [[ "${status}" == "10" ]] || return 1
+    [[ -f "${errfile}" && ! -L "${errfile}" ]] || return 1
     while IFS= read -r line || [[ -n "${line}" ]]; do
         line="${line%$'\r'}"
         [[ -n "${line}" ]] || continue
-        bare="${line}"
-        if [[ "${bare}" == "Fatal: ${exact}" ]]; then
-            bare="${exact}"
-        fi
-        [[ "${bare}" == "${exact}" ]] || return 1
-        saw=1
+        lines+=("${line}")
     done < "${errfile}"
-    [[ "${saw}" -eq 1 ]]
+    (( ${#lines[@]} == 3 )) || return 1
+    bare="${lines[0]}"
+    if [[ "${bare}" == "Fatal: ${exact}" ]]; then
+        bare="${exact}"
+    fi
+    [[ "${bare}" == "${exact}" ]] || return 1
+    [[ "${lines[1]}" == "Is there a repository at the following location?" ]] || return 1
+    [[ -n "${RESTIC_REPOSITORY:-}" && "${lines[2]}" == "${RESTIC_REPOSITORY}" ]] || return 1
 }
 
 INIT_ERRFILE=""
@@ -226,7 +232,7 @@ init_repository() {
         log_msg "init-repository: repository already exists"
         return 0
     fi
-    if ! repository_probe_is_absent "${INIT_ERRFILE}"; then
+    if ! repository_probe_is_absent "${INIT_ERRFILE}" "${rc}"; then
         log_probe_diagnostic "${INIT_ERRFILE}" \
             "${saved_rest_password}" "${saved_password}" \
             "${RESTIC_PASSWORD_FILE:-}" "${PASSWORD_FILE}"
