@@ -198,17 +198,18 @@ init_repository() {
 }
 
 # Restic 0.19.1 ignores RESTIC_REST_PASSWORD when the URL already contains a
-# username (restic issue 22035). The project URL keeps the username. This
-# process strips it and sets RESTIC_REST_USERNAME. The password is not logged.
+# username (restic issue 22035). A username in the URL is removed and exported
+# as RESTIC_REST_USERNAME. A URL without one keeps the value already in the
+# environment. The password stays in RESTIC_REST_PASSWORD and is not logged.
 prepare_repository() {
     local repo="${RESTIC_REPOSITORY}"
-    RESTIC_REST_USERNAME=""
+    local username="${RESTIC_REST_USERNAME:-}"
     if [[ "${repo}" =~ ^rest:https://([^/:@]+)@([^/:@]+):([0-9]+)/(.*)$ ]]; then
-        RESTIC_REST_USERNAME="${BASH_REMATCH[1]}"
+        username="${BASH_REMATCH[1]}"
         repo="rest:https://${BASH_REMATCH[2]}:${BASH_REMATCH[3]}/${BASH_REMATCH[4]}"
     fi
     export RESTIC_REPOSITORY="${repo}"
-    export RESTIC_REST_USERNAME
+    export RESTIC_REST_USERNAME="${username}"
     export RESTIC_PASSWORD_FILE="${PASSWORD_FILE}"
     unset RESTIC_PASSWORD
 }

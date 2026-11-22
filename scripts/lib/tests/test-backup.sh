@@ -1150,6 +1150,43 @@ EOF
         bash -c '! grep -E -q "(^|[[:space:]])(forget|prune|--insecure-tls)([[:space:]]|$)" "$1"' _ "${script}"
 }
 
+test_prepare_repository_username() {
+    print_section "Repository username"
+    local root secret="fixture-rest-password-0123" keytext="fixture-restic-key-not-logged"
+    local script bare="rest:https://10.100.101.12:8000/infrastructure-sjv/"
+    root="${T_RUN_DIR}/backup-username"
+    script="$(backup_script)"
+    if [[ -d "${root}" ]]; then
+        find "${root}" -mindepth 1 -delete
+    fi
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+
+    rm -f "${root}/stub.log"
+    t_run env -u RESTIC_REST_USERNAME "${BACKUP_ENV[@]}" \
+        RESTIC_REPOSITORY="${bare}" RESTIC_REST_USERNAME=infrastructure-sjv \
+        bash "${script}" init-repository
+    t_check "a URL without a user keeps RESTIC_REST_USERNAME" \
+        bash -c '(( $1 == 0 )) && grep -F -q "rest-username=infrastructure-sjv" "$2" && ! grep -F -q repository-url-still-has-user "$2" && grep -F -q rest-password-present "$2" && grep -F -q key-file-present "$2"' \
+        _ "${T_RC}" "${root}/stub.log"
+    t_check "the preserved username run does not log either password" \
+        bash -c '! grep -F -q -e "$2" -e "$3" "$1" && ! printf "%s\n" "$4" | grep -F -q -e "$2" -e "$3"' \
+        _ "${root}/stub.log" "${secret}" "${keytext}" "${T_OUT}"
+
+    rm -f "${root}/stub.log"
+    t_run env -u RESTIC_REST_USERNAME "${BACKUP_ENV[@]}" bash "${script}" init-repository
+    t_check "a username in the URL is extracted and removed" \
+        bash -c '(( $1 == 0 )) && grep -F -q "rest-username=infrastructure-sjv" "$2" && ! grep -F -q repository-url-still-has-user "$2"' \
+        _ "${T_RC}" "${root}/stub.log"
+
+    rm -f "${root}/stub.log"
+    t_run env -u RESTIC_REST_USERNAME "${BACKUP_ENV[@]}" \
+        RESTIC_REPOSITORY="${bare}" bash "${script}" init-repository
+    t_check "a URL without a user and without a username stays empty" \
+        bash -c '(( $1 == 0 )) && ! grep -F -q "rest-username=" "$2" && ! grep -F -q repository-url-still-has-user "$2" && grep -F -q rest-password-present "$2" && grep -F -q key-file-present "$2" && ! grep -F -q -e "$3" -e "$4" "$2"' \
+        _ "${T_RC}" "${root}/stub.log" "${secret}" "${keytext}"
+}
+
 run_backup_tests() {
     print_header "Remote backup"
     test_backup_compose
@@ -1157,5 +1194,6 @@ run_backup_tests() {
     test_backup_locks
     test_backup_wal_schedule
     test_backup_init
+    test_prepare_repository_username
     test_backup_image
 }
