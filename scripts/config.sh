@@ -85,13 +85,14 @@ else
 fi
 
 # Only files without secrets are copied from Git into the stack directory.
-# postgresql/ is the image build context. Database files stay in DATA_DIR.
+# postgresql/ and backup/ are image build contexts. Database files stay in DATA_DIR.
 readonly DEPLOY_ITEMS=(
     .env.example
     compose.yml
     compose
     configs
     postgresql
+    backup
 )
 
 # Public hostnames are user-managed. The Git template only carries the

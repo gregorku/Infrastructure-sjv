@@ -597,6 +597,94 @@ pgbackrest_execute_grants() {
     ' "${file}"
 }
 
+backup_in_deploy_items() {
+    local item found=0
+    for item in "${DEPLOY_ITEMS[@]}"; do
+        [[ "${item}" == "backup" ]] && found=1
+    done
+    [[ "${found}" -eq 1 ]]
+}
+
+# Every regular file under Git backup/ matches the stack copy.
+backup_tree_matches_git() {
+    local src="${REPO_ROOT}/backup"
+    local stack="${T_BASE}/stacks/infrastructure-sjv/backup"
+    local rel copied expected
+    [[ -d "${stack}" && ! -L "${stack}" ]] || return 1
+    expected="$(cd -- "${src}" && find . -type f -print | sed 's|^\./||' | sort)"
+    copied="$(cd -- "${stack}" && find . -type f -print | sed 's|^\./||' | sort)"
+    [[ -n "${expected}" && "${copied}" == "${expected}" ]] || return 1
+    while IFS= read -r rel; do
+        [[ -n "${rel}" ]] || continue
+        [[ -f "${stack}/${rel}" && ! -L "${stack}/${rel}" ]] || return 1
+        cmp -s "${src}/${rel}" "${stack}/${rel}" || return 1
+        [[ "$(stat -c %a "${stack}/${rel}")" == "644" ]] || return 1
+    done <<< "${expected}"
+}
+
+backup_named_files_match() {
+    local src="${REPO_ROOT}/backup"
+    local stack="${T_BASE}/stacks/infrastructure-sjv/backup"
+    local rel
+    for rel in Dockerfile sjv-backup.sh; do
+        [[ -f "${src}/${rel}" && -f "${stack}/${rel}" && ! -L "${stack}/${rel}" ]] || return 1
+        cmp -s "${src}/${rel}" "${stack}/${rel}" || return 1
+    done
+}
+
+# context: ../backup from the synced compose file is the stack copy.
+# In production that directory is /docker-data/stacks/infrastructure-sjv/backup.
+backup_build_context_is_stack_copy() {
+    local stack="${T_BASE}/stacks/infrastructure-sjv"
+    local compose="${stack}/compose/30-backup.yml"
+    local context resolved production
+    production="/docker-data/stacks/infrastructure-sjv/backup"
+    [[ -f "${compose}" && ! -L "${compose}" ]] || return 1
+    context="$(awk '$1 == "context:" { print $2; found = 1; exit } END { exit !found }' "${compose}")" || return 1
+    [[ "${context}" == "../backup" ]] || return 1
+    resolved="$(cd -- "${stack}/compose/${context}" && pwd -P)" || return 1
+    [[ "${resolved}" == "$(cd -- "${stack}/backup" && pwd -P)" ]] || return 1
+    [[ "${resolved}" != "$(cd -- "${T_BASE}/backups/infrastructure-sjv" && pwd -P)" ]] || return 1
+    [[ "${PRODUCTION_BASE_DIR}/stacks/${STACK_NAME}/backup" == "${production}" ]] || return 1
+    [[ ! -e "${T_BASE}/backups/infrastructure-sjv/Dockerfile" ]] || return 1
+    [[ ! -e "${T_BASE}/infrastructure-sjv/backup-locks/Dockerfile" ]]
+}
+
+backup_repeat_leaves_files() {
+    local stack="${T_BASE}/stacks/infrastructure-sjv/backup"
+    local before after
+    before="$(cd -- "${stack}" && find . -type f -printf '%P %i %T@\n' | sort)"
+    sleep 1
+    run_script init.sh
+    [[ "${T_RC}" -eq 0 ]] || return 1
+    after="$(cd -- "${stack}" && find . -type f -printf '%P %i %T@\n' | sort)"
+    [[ "${before}" == "${after}" ]] || return 1
+    [[ "${T_OUT}" == *"Unchanged backup/Dockerfile"* ]] \
+        && [[ "${T_OUT}" == *"Unchanged backup/sjv-backup.sh"* ]]
+}
+
+test_backup_build_context() {
+    print_section "Backup build context"
+    local docker_data_before
+    docker_data_before="$(docker_data_snapshot)"
+    t_check "backup is a deployment item" backup_in_deploy_items
+    infra_reset_base
+    run_script init.sh
+    t_check "init.sh copies the backup build context" test "${T_RC}" -eq 0
+    t_check "the first copy reports the backup Dockerfile" \
+        t_contains "${T_OUT}" "Synchronized backup/Dockerfile"
+    t_check "the first copy reports the backup scheduler" \
+        t_contains "${T_OUT}" "Synchronized backup/sjv-backup.sh"
+    t_check "Dockerfile and sjv-backup.sh match Git" backup_named_files_match
+    t_check "the copied backup tree matches Git" backup_tree_matches_git
+    t_check "the compose build context is the stack backup directory" \
+        backup_build_context_is_stack_copy
+    t_check "a repeated sync leaves identical backup files unchanged" \
+        backup_repeat_leaves_files
+    t_check "synchronizing backup does not touch /docker-data" \
+        bash -c '[[ "$1" == "$2" ]]' _ "${docker_data_before}" "$(docker_data_snapshot)"
+}
+
 postgresql_in_deploy_items() {
     local item found=0
     for item in "${DEPLOY_ITEMS[@]}"; do
@@ -825,6 +913,7 @@ run_infra_tests() {
     test_infra_key_and_compose
     test_infra_access_log_prepare
     test_infra_log_rotation
+    test_backup_build_context
     test_postgresql_build_context
     test_postgresql_service
     test_ingest_migration
