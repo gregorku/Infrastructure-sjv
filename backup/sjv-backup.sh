@@ -101,7 +101,100 @@ write_epoch() {
 }
 
 configured() {
-    [[ -n "${RESTIC_REPOSITORY:-}" && -n "${RESTIC_REST_PASSWORD:-}" && -f "${PASSWORD_FILE}" && ! -L "${PASSWORD_FILE}" && -s "${PASSWORD_FILE}" && -f "${CACERT}" && ! -L "${CACERT}" ]]
+    [[ -n "${RESTIC_REPOSITORY:-}" && -n "${RESTIC_REST_PASSWORD:-}" && -f "${PASSWORD_FILE}" && ! -L "${PASSWORD_FILE}" && -s "${PASSWORD_FILE}" && -f "${CACERT}" && ! -L "${CACERT}" && -s "${CACERT}" ]]
+}
+
+# A filled repository is incomplete unless the key file and certificate pass
+# the same checks as a backup. An empty repository is handled by the caller.
+init_repository_ready() {
+    local mode_bits
+    configured || return 1
+    mode_bits="$(stat -c '%a' "${PASSWORD_FILE}")"
+    [[ "${mode_bits}" == 600 || "${mode_bits}" == 400 ]]
+}
+
+# True only for the one observed missing-repository diagnosis. A Fatal: prefix
+# is accepted. Any other line, including a shorter "does not exist", is not.
+repository_probe_is_absent() {
+    local errfile="$1" line bare saw=0
+    local exact="repository does not exist: unable to open config file: <config/> does not exist"
+    [[ -s "${errfile}" && ! -L "${errfile}" ]] || return 1
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line%$'\r'}"
+        [[ -n "${line}" ]] || continue
+        bare="${line}"
+        if [[ "${bare}" == "Fatal: ${exact}" ]]; then
+            bare="${exact}"
+        fi
+        [[ "${bare}" == "${exact}" ]] || return 1
+        saw=1
+    done < "${errfile}"
+    [[ "${saw}" -eq 1 ]]
+}
+
+INIT_ERRFILE=""
+
+# shellcheck disable=SC2317,SC2329
+init_cleanup() {
+    local status=$?
+    release_locks
+    if [[ -n "${INIT_ERRFILE}" && -f "${INIT_ERRFILE}" && ! -L "${INIT_ERRFILE}" ]]; then
+        rm -f -- "${INIT_ERRFILE}"
+    fi
+    exit "${status}"
+}
+
+# shellcheck disable=SC2317,SC2329
+init_on_signal() {
+    log_msg "init-repository interrupted"
+    stop_child
+    exit 1
+}
+
+init_repository() {
+    local rc=0
+    if [[ -z "${RESTIC_REPOSITORY:-}" ]]; then
+        log_msg "init-repository: remote backup is not configured"
+        return 0
+    fi
+    if ! init_repository_ready; then
+        log_msg "init-repository refused: remote backup configuration is incomplete"
+        return 1
+    fi
+    trap init_cleanup EXIT
+    trap init_on_signal INT TERM
+    mkdir -p "${LOCK_DIR}"
+    exec 8>"${REPO_LOCK}"
+    if ! flock -x -n 8; then
+        log_msg "init-repository refused: repository lock was not free"
+        return 1
+    fi
+    INIT_ERRFILE="$(mktemp)"
+    prepare_repository
+    run_restic --cacert "${CACERT}" cat config >/dev/null 2>"${INIT_ERRFILE}" || rc=$?
+    if [[ "${rc}" -eq 0 ]]; then
+        log_msg "init-repository: repository already exists"
+        return 0
+    fi
+    if ! repository_probe_is_absent "${INIT_ERRFILE}"; then
+        log_msg "init-repository refused: repository probe failed"
+        return "${rc}"
+    fi
+    log_msg "init-repository: repository is absent"
+    rc=0
+    run_restic --cacert "${CACERT}" init >/dev/null 2>"${INIT_ERRFILE}" || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        log_msg "init-repository refused: repository initialization failed"
+        return "${rc}"
+    fi
+    rc=0
+    run_restic --cacert "${CACERT}" cat config >/dev/null 2>"${INIT_ERRFILE}" || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        log_msg "init-repository refused: repository configuration was not readable after initialization"
+        return "${rc}"
+    fi
+    log_msg "init-repository: repository is ready"
+    return 0
 }
 
 # Restic 0.19.1 ignores RESTIC_REST_PASSWORD when the URL already contains a
@@ -381,8 +474,9 @@ case "${1:-}" in
         backup_run "${2:-}"
         ;;
     health) health ;;
+    init-repository) init_repository ;;
     *)
-        log_msg "usage: sjv-backup supervise | run daily|wal | health"
+        log_msg "usage: sjv-backup supervise | run daily|wal | health | init-repository"
         exit 2
         ;;
 esac

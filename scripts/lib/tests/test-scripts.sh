@@ -181,7 +181,7 @@ test_scripts_guard() {
     local script docker_data_before ns_err=""
     docker_data_before="$(docker_data_snapshot)"
     if prepare_unprivileged_launch; then
-        for script in init.sh update-env.sh check-env.sh deploy.sh post-deploy.sh reload.sh create-dashboard-user.sh rotate-traefik-logs.sh; do
+        for script in init.sh update-env.sh check-env.sh deploy.sh init-backup.sh post-deploy.sh reload.sh create-dashboard-user.sh rotate-traefik-logs.sh; do
             run_unprivileged env -u SJV_TEST_BASE_DIR NO_COLOR=1 "${REPO_ROOT}/scripts/${script}"
             t_check "${script} without root is refused" \
                 bash -c '(( $1 != 0 )) && [[ "$2" == *"must be run as root"* ]]' _ "${T_RC}" "${T_OUT}"
@@ -203,7 +203,7 @@ test_scripts_guard() {
     elif ! ns_err="$(unshare --map-root-user true 2>&1)"; then
         t_skip "missing /docker-data mount (user namespace is not available: ${ns_err})"
     else
-        for script in update-env.sh check-env.sh init.sh deploy.sh post-deploy.sh reload.sh create-dashboard-user.sh rotate-traefik-logs.sh; do
+        for script in update-env.sh check-env.sh init.sh deploy.sh init-backup.sh post-deploy.sh reload.sh create-dashboard-user.sh rotate-traefik-logs.sh; do
             t_run unshare --map-root-user env -u SJV_TEST_BASE_DIR NO_COLOR=1 "${REPO_ROOT}/scripts/${script}"
             t_check "${script} refuses a missing /docker-data mount" \
                 bash -c '(( $1 != 0 )) && [[ "$2" == *"/docker-data does not exist"* ]]' _ "${T_RC}" "${T_OUT}"

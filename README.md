@@ -29,6 +29,7 @@ sudo ./scripts/update-env.sh            # vytvoří nebo doplní runtime .env
 sudo ./scripts/check-env.sh             # ověří .env, nic nemění
 sudo ./scripts/create-dashboard-user.sh # heslo dashboardu, mimo Git
 sudo ./scripts/deploy.sh                # sítě, Traefik a CrowdSec
+sudo ./scripts/init-backup.sh           # jednorázové založení současného repozitáře, bez plánovače
 sudo ./scripts/post-deploy.sh           # registrace bouncer klíče, klíč se nevypíše
 sudo ./scripts/rotate-traefik-logs.sh   # copytruncate access.log, bez Dockeru
 ./scripts/test.sh                       # offline testy, bez rootu a bez Docker démona

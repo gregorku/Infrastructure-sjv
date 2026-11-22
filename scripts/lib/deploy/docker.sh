@@ -143,6 +143,22 @@ docker_compose() {
         "$@"
 }
 
+# One-shot repository initialization. The arguments are fixed: callers cannot
+# choose a service, a command, or extra Docker options. Compose reads the
+# stack directory, so the backup image builds from the synced context
+# ${STACK_DIR}/backup and not from the Git checkout. The service command
+# replaces the image default. The permanent scheduler is not started.
+docker_compose_init_backup() {
+    local address
+    [[ "${SJV_TEST_MODE}" -eq 0 ]] || fail "Test mode cannot run docker compose."
+    address="$(docker_read_proxy_address)"
+    TRAEFIK_PROXY_ADDRESS="${address}" docker compose \
+        --project-name "${STACK_NAME}" \
+        --project-directory "${STACK_DIR}" \
+        -f "${STACK_DIR}/compose.yml" \
+        run --build --rm --no-deps sjv-backup init-repository
+}
+
 # Read-only resolution. It does not create containers or networks.
 docker_compose_config() {
     local address

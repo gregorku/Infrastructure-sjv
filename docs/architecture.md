@@ -84,7 +84,7 @@ Rozdíly proti referenci:
 
 ### Implementace B1b
 
-V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefik.yml`, `compose/15-traefik-admin-port.yml`, `compose/20-crowdsec.yml`, `compose/30-backup.yml`, `compose/40-postgresql.yml`, `backup/`, `postgresql/`, `configs/traefik/dynamic/` a `configs/crowdsec/`. Služby aplikace a Mosquitto v Compose ještě nejsou. `sjv-postgresql` je v Compose a tyto testy ho nespouštějí. `deploy.sh` ho také nespouští. `sjv-backup` v Compose zůstává a vzdálenou kopii plánuje. `deploy.sh` ho v první fázi nespouští. `init.sh` a `deploy.sh` kopírují `postgresql/` do `/docker-data/stacks/infrastructure-sjv/postgresql`. To je build context z `context: ../postgresql`. Datový adresář `/docker-data/infrastructure-sjv/postgresql` se tím nemění a `deploy.sh` službu nespouští. Izolovaný test spustil `stanza-create`, `pgbackrest check`, plnou zálohu a obnovu do samostatného clusteru. `pg_dump`, `backup.sh` a `restore.sh` v repozitáři nejsou.
+V repozitáři jsou `compose.yml`, `compose/00-networks.yml`, `compose/10-traefik.yml`, `compose/15-traefik-admin-port.yml`, `compose/20-crowdsec.yml`, `compose/30-backup.yml`, `compose/40-postgresql.yml`, `backup/`, `postgresql/`, `configs/traefik/dynamic/` a `configs/crowdsec/`. Služby aplikace a Mosquitto v Compose ještě nejsou. `sjv-postgresql` je v Compose a tyto testy ho nespouštějí. `deploy.sh` ho také nespouští. `sjv-backup` v Compose zůstává. `deploy.sh` ho v první fázi nespouští. Současný vzdálený repozitář zakládá jednorázový `init-backup.sh` a trvalý plánovač nespouští. `init.sh` a `deploy.sh` kopírují `postgresql/` do `/docker-data/stacks/infrastructure-sjv/postgresql` a `backup/` do `/docker-data/stacks/infrastructure-sjv/backup`. To jsou build contexty z `context: ../postgresql` a `context: ../backup`. Datový adresář `/docker-data/infrastructure-sjv/postgresql` se tím nemění a `deploy.sh` službu nespouští. Izolovaný test spustil `stanza-create`, `pgbackrest check`, plnou zálohu a obnovu do samostatného clusteru. `pg_dump`, `backup.sh` a `restore.sh` v repozitáři nejsou.
 
 - Sítě jsou `external`. Zakládá je `deploy.sh` a označí je `com.infrastructure-sjv.managed=true`. Cizí síť se stejným jménem skript nemění ani nemaže. `sjv-internal` vzniká s `--internal`.
 - Pevná adresa Traefiku na `sjv-proxy` je první adresa za branou této sítě. Počítá ji `deploy.sh` a předá ji Compose jako `TRAEFIK_PROXY_ADDRESS`. V `.env` tato hodnota není.
@@ -276,7 +276,7 @@ Cesty výše jsou kontrakt vlastního ESP a ručního importu přes administraci
 
 Pořadí ručních kroků:
 
-`init.sh` → `update-env.sh` → doplnit `set_` → `create-dashboard-user.sh` → `check-env.sh` → `deploy.sh` → `post-deploy.sh`
+`init.sh` → `update-env.sh` → úprava runtime `.env` → `check-env.sh` → `create-dashboard-user.sh` → `deploy.sh` → `init-backup.sh` → `post-deploy.sh`
 
 `create-admin.sh` přibude s backendem. `reload.sh` zopakuje `deploy.sh` a sítě nemaže. `deploy.sh --render-only` jen vykreslí runtime a Docker nezavolá.
 
@@ -318,7 +318,7 @@ Infrastructure-sjv/
 │              60-worker.yml 70-web.yml
 ├── configs/   traefik/ crowdsec/ mosquitto/ postgres/ systemd/
 ├── app/       backend/ collector/ frontend/
-├── scripts/   config.sh init.sh update-env.sh check-env.sh deploy.sh post-deploy.sh
+├── scripts/   config.sh init.sh update-env.sh check-env.sh deploy.sh init-backup.sh post-deploy.sh
 │              upgrade.sh reload.sh test.sh shellcheck.sh create-dashboard-user.sh
 │              create-admin.sh cert-sync.sh maintenance.sh
 │              backup.sh backup-verify.sh backup-remote.sh backup-status.sh

@@ -904,6 +904,82 @@ test_ingest_migration() {
         grep -q 'forward-only' "${revision}"
 }
 
+test_init_backup_host() {
+    print_section "Remote repository initialization"
+    local docker_sh="${REPO_ROOT}/scripts/lib/deploy/docker.sh"
+    local body hits stack env_file secrets key cert before
+    body="$(awk '/^docker_compose_init_backup\(\)/,/^}/' "${docker_sh}")"
+    t_check "only sjv-backup init-repository may be started once" \
+        bash -c '[[ "$(printf "%s\n" "$1" | grep -c "sjv-backup init-repository")" -eq 1 ]] && [[ "$1" == *"run --build --rm --no-deps sjv-backup init-repository"* ]] && ! printf "%s\n" "$1" | grep -Eq "down| rm |\\\$@"' \
+        _ "${body}"
+    t_check "another service or command is not accepted by the helper" \
+        bash -c '! printf "%s\n" "$1" | grep -Eq "sjv-traefik|sjv-crowdsec|sjv-postgresql|supervise"' _ "${body}"
+    hits="$(grep -nE '^[[:space:]]*docker[[:space:]]+run([[:space:]]|$)' "${docker_sh}" || true)"
+    t_check "an unrestricted run command stays unavailable" test -z "${hits}"
+    t_check "deploy.sh still starts only Traefik and CrowdSec" deploy_first_phase_compose_line
+    hits="$(grep -nE '(^|[[:space:]])(--insecure-tls|forget|prune)([[:space:]]|$)' \
+        "${REPO_ROOT}/scripts/init-backup.sh" "${docker_sh}" "${REPO_ROOT}/backup/sjv-backup.sh" || true)"
+    t_check "initialization does not forget, prune or disable TLS" test -z "${hits}"
+
+    infra_reset_base
+    stack="${T_BASE}/stacks/infrastructure-sjv"
+    env_file="${stack}/.env"
+    secrets="${T_BASE}/infrastructure-sjv/secrets"
+    key="${secrets}/restic-key-password"
+    cert="${secrets}/restic-rest-server.crt"
+    run_script init.sh
+    t_check "init.sh prepares the isolated base" test "${T_RC}" -eq 0
+    run_script update-env.sh
+    t_check "update-env.sh prepares runtime configuration" test "${T_RC}" -eq 0
+    fill_fixture_values "${env_file}"
+    before="$(docker_data_snapshot)"
+    run_script init-backup.sh
+    t_check "an empty repository skips initialization" \
+        bash -c '(( $1 == 0 )) && [[ "$2" == *"Remote backup is not configured"* ]] && [[ "$2" != *"docker compose"* ]]' \
+        _ "${T_RC}" "${T_OUT}"
+    t_check "an empty repository does not touch /docker-data" \
+        bash -c '[[ "$1" == "$2" ]]' _ "${before}" "$(docker_data_snapshot)"
+
+    set_env_value "${env_file}" RESTIC_REPOSITORY "rest:https://infrastructure-sjv@10.100.101.100:8000/infrastructure-sjv/"
+    set_env_value "${env_file}" RESTIC_REST_PASSWORD "fixture-rest-password-0123"
+    before="$(docker_data_snapshot)"
+    run_script init-backup.sh
+    t_check "a repository without its key and certificate is refused" \
+        bash -c '(( $1 != 0 )) && [[ "$2" == *"configuration is incomplete"* ]] && [[ "$2" != *"fixture-rest-password-0123"* ]]' \
+        _ "${T_RC}" "${T_OUT}"
+    t_check "a refused initialization does not touch /docker-data" \
+        bash -c '[[ "$1" == "$2" ]]' _ "${before}" "$(docker_data_snapshot)"
+
+    printf '%s\n' "fixture-restic-key-not-logged" > "${key}"
+    chmod 600 "${key}"
+    before="$(docker_data_snapshot)"
+    run_script init-backup.sh
+    t_check "a repository without its certificate is refused" \
+        bash -c '(( $1 != 0 )) && [[ "$2" == *"configuration is incomplete"* ]]' _ "${T_RC}" "${T_OUT}"
+
+    : > "${cert}"
+    chmod 644 "${cert}"
+    before="$(docker_data_snapshot)"
+    run_script init-backup.sh
+    t_check "an empty certificate is refused before Docker" \
+        bash -c '(( $1 != 0 )) && [[ "$2" == *"configuration is incomplete"* ]] && [[ "$2" != *"docker compose"* ]]' \
+        _ "${T_RC}" "${T_OUT}"
+    t_check "an empty certificate does not touch /docker-data" \
+        bash -c '[[ "$1" == "$2" ]]' _ "${before}" "$(docker_data_snapshot)"
+
+    printf '%s\n' "fixture-certificate" > "${cert}"
+    chmod 644 "${cert}"
+    before="$(docker_data_snapshot)"
+    run_script init-backup.sh
+    t_check "test mode stops before Docker when the repository is configured" \
+        bash -c '(( $1 != 0 )) && [[ "$2" == *"Test mode cannot initialize the remote backup repository"* ]] && [[ "$2" != *"docker compose"* ]] && [[ "$2" != *"fixture-rest-password-0123"* ]] && [[ "$2" != *"fixture-restic-key-not-logged"* ]]' \
+        _ "${T_RC}" "${T_OUT}"
+    t_check "test mode does not touch /docker-data" \
+        bash -c '[[ "$1" == "$2" ]]' _ "${before}" "$(docker_data_snapshot)"
+    t_check "the isolated stack was not used as a Docker project directory" \
+        test ! -e "${stack}/runtime"
+}
+
 run_infra_tests() {
     print_header "Traefik and CrowdSec"
     test_infra_repository
@@ -917,4 +993,5 @@ run_infra_tests() {
     test_postgresql_build_context
     test_postgresql_service
     test_ingest_migration
+    test_init_backup_host
 }

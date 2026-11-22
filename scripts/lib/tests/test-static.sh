@@ -264,6 +264,29 @@ static_test_tool_packages() {
         bash -c '! grep -Eq "python3|shellcheck" "$1"' _ "${common_sh}"
 }
 
+static_test_backup_init() {
+    print_section "Backup repository initialization"
+    local docker_sh="${REPO_ROOT}/scripts/lib/deploy/docker.sh"
+    local init_sh="${REPO_ROOT}/scripts/init-backup.sh"
+    local deploy_sh="${REPO_ROOT}/scripts/deploy.sh"
+    local body hits
+    body="$(awk '/^docker_compose_init_backup\(\)/,/^}/' "${docker_sh}")"
+    t_check "repository initialization is one fixed compose run" \
+        bash -c '[[ "$1" == *"run --build --rm --no-deps sjv-backup init-repository"* ]] && [[ "$(printf "%s\n" "$1" | grep -c "sjv-backup init-repository")" -eq 1 ]]' _ "${body}"
+    t_check "the initialization helper accepts no caller arguments" \
+        bash -c '! printf "%s\n" "$1" | grep -Eq "\\\$[@*]|\\\$\\{?[0-9]"' _ "${body}"
+    t_check "compose up remains the only general compose operation" \
+        bash -c 'awk "/^docker_compose\\(\\)/,/^}/" "$1" | grep -q "up) ;;" && ! awk "/^docker_compose\\(\\)/,/^}/" "$1" | grep -q "run)"' _ "${docker_sh}"
+    hits="$(grep -nE '^[[:space:]]*docker[[:space:]]+run([[:space:]]|$)' "${docker_sh}" || true)"
+    t_check "docker.sh does not gain a general docker run" test -z "${hits}"
+    t_check "init-backup.sh calls only the fixed helper" \
+        bash -c 'grep -q "^docker_compose_init_backup$" "$1" && ! grep -Eq "^[[:space:]]*docker([[:space:]]|$)" "$1"' _ "${init_sh}"
+    t_check "deploy.sh still starts only Traefik and CrowdSec" \
+        bash -c '[[ "$(grep -c "^docker_compose " "$1")" -eq 1 ]] && grep -qx "docker_compose up -d traefik crowdsec" "$1"' _ "${deploy_sh}"
+    hits="$(grep -nE '(^|[[:space:]])(forget|prune|--insecure-tls)([[:space:]]|$)' "${init_sh}" "${docker_sh}" || true)"
+    t_check "initialization does not forget, prune or disable TLS" test -z "${hits}"
+}
+
 run_static_tests() {
     print_header "Static checks"
     static_test_syntax
@@ -272,4 +295,5 @@ run_static_tests() {
     static_test_repository
     static_test_env_example
     static_test_tool_packages
+    static_test_backup_init
 }

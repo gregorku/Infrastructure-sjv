@@ -922,11 +922,240 @@ test_backup_image() {
     ${runtime} image rm "${tag}" >/dev/null 2>&1 || true
 }
 
+# Replaces the one-exit stub for init-repository. cat config and init are
+# different calls. The missing-repository text is supplied by the test.
+backup_write_init_stub() {
+    local root="$1"
+    cat > "${root}/bin/restic-stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${STUB_LOG}"
+if [[ "${1:-}" == forget || "${1:-}" == prune ]]; then
+    printf '%s\n' "forbidden-subcommand" >> "${STUB_LOG}"
+    exit 99
+fi
+if [[ "${RESTIC_REPOSITORY:-}" == *@* ]]; then
+    printf '%s\n' "repository-url-still-has-user" >> "${STUB_LOG}"
+fi
+if [[ -n "${RESTIC_REST_USERNAME:-}" ]]; then
+    printf '%s\n' "rest-username=${RESTIC_REST_USERNAME}" >> "${STUB_LOG}"
+fi
+if [[ -n "${RESTIC_REST_PASSWORD:-}" ]]; then
+    printf '%s\n' "rest-password-present" >> "${STUB_LOG}"
+fi
+if [[ -n "${RESTIC_PASSWORD_FILE:-}" && -f "${RESTIC_PASSWORD_FILE}" ]]; then
+    printf '%s\n' "key-file-present" >> "${STUB_LOG}"
+fi
+joined="$*"
+action=""
+if [[ "${joined}" == *" cat config" ]]; then
+    action=cat
+elif [[ "${joined}" == *" init" ]]; then
+    action=init
+else
+    printf '%s\n' "unexpected-command" >> "${STUB_LOG}"
+    exit 97
+fi
+case "${STUB_MODE:-}" in
+    exists)
+        if [[ "${action}" == init ]]; then
+            printf '%s\n' "unexpected-init" >> "${STUB_LOG}"
+            exit 99
+        fi
+        printf '%s\n' '{"id":"fixture-config"}'
+        exit 0
+        ;;
+    absent)
+        if [[ "${action}" == init ]]; then
+            exit 0
+        fi
+        count=0
+        [[ -f "${STUB_CAT_COUNT}" ]] && count="$(cat "${STUB_CAT_COUNT}")"
+        count=$((count + 1))
+        printf '%s\n' "${count}" > "${STUB_CAT_COUNT}"
+        if [[ "${count}" -eq 1 ]]; then
+            [[ -z "${STUB_STDERR:-}" ]] || printf '%s\n' "${STUB_STDERR}" >&2
+            exit "${STUB_EXIT:-1}"
+        fi
+        printf '%s\n' '{"id":"fixture-config"}'
+        exit "${STUB_SECOND_EXIT:-0}"
+        ;;
+    reject)
+        if [[ "${action}" == init ]]; then
+            printf '%s\n' "unexpected-init" >> "${STUB_LOG}"
+            exit 99
+        fi
+        [[ -z "${STUB_STDERR:-}" ]] || printf '%s\n' "${STUB_STDERR}" >&2
+        exit "${STUB_EXIT:-1}"
+        ;;
+    *)
+        printf '%s\n' "unexpected-mode" >> "${STUB_LOG}"
+        exit 96
+        ;;
+esac
+EOF
+    chmod 755 "${root}/bin/restic-stub"
+}
+
+backup_restore_secrets() {
+    local root="$1"
+    rm -f "${root}/key" "${root}/certs/rest-server.crt"
+    printf '%s\n' "fixture-restic-key-not-logged" > "${root}/key"
+    chmod 600 "${root}/key"
+    printf '%s\n' "fixture-certificate" > "${root}/certs/rest-server.crt"
+    chmod 644 "${root}/certs/rest-server.crt"
+}
+
+test_backup_init() {
+    print_section "Repository initialization"
+    local root secret="fixture-rest-password-0123" keytext="fixture-restic-key-not-logged"
+    local absent="repository does not exist: unable to open config file: <config/> does not exist"
+    local script cacert
+    root="${T_RUN_DIR}/backup-init"
+    script="$(backup_script)"
+    if [[ -d "${root}" ]]; then
+        find "${root}" -mindepth 1 -delete
+    fi
+    backup_prepare_tree "${root}"
+    backup_write_init_stub "${root}"
+    backup_env "${root}" 0 0
+    cacert="${root}/certs/rest-server.crt"
+
+    rm -f "${root}/stub.log" "${root}/cat.count"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=exists bash "${script}" init-repository
+    t_check "an existing repository is left in place" \
+        bash -c '(( $1 == 0 )) && [[ "$2" == *"repository already exists"* ]] && [[ "$2" != *"scheduler started"* ]] && [[ "$2" != *"fixture-config"* ]] && grep -F -q -- "--cacert $3 cat config" "$4" && ! grep -E -q " init$" "$4" && ! grep -F -q unexpected-init "$4"' \
+        _ "${T_RC}" "${T_OUT}" "${cacert}" "${root}/stub.log"
+    t_check "the repository URL passed to Restic has no username" \
+        bash -c 'grep -F -q "rest-username=infrastructure-sjv" "$1" && ! grep -F -q repository-url-still-has-user "$1"' \
+        _ "${root}/stub.log"
+    t_check "the rest password and key file stay out of arguments and the log" \
+        bash -c '! grep -F -q -e "$2" -e "$3" "$1" && ! printf "%s\n" "$4" | grep -F -q -e "$2" -e "$3"' \
+        _ "${root}/stub.log" "${secret}" "${keytext}" "${T_OUT}"
+
+    rm -f "${root}/stub.log" "${root}/cat.count"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=absent STUB_EXIT=11 \
+        STUB_CAT_COUNT="${root}/cat.count" STUB_STDERR="${absent}" \
+        bash "${script}" init-repository
+    t_check "a missing repository is initialized once and read back" \
+        bash -c '(( $1 == 0 )) && [[ "$2" == *"repository is ready"* ]] && [[ "$2" != *"scheduler started"* ]] && [[ "$2" != *"fixture-config"* ]] && [[ "$(grep -c -E " cat config$" "$3")" -eq 2 ]] && [[ "$(grep -c -E " init$" "$3")" -eq 1 ]] && grep -F -q -- "--cacert $4 cat config" "$3" && grep -F -q -- "--cacert $4 init" "$3"' \
+        _ "${T_RC}" "${T_OUT}" "${root}/stub.log" "${cacert}"
+
+    rm -f "${root}/stub.log" "${root}/cat.count"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=absent STUB_EXIT=17 \
+        STUB_CAT_COUNT="${root}/cat.count" STUB_STDERR="Fatal: ${absent}" \
+        bash "${script}" init-repository
+    t_check "a Fatal prefix on the missing-repository diagnosis still initializes once" \
+        bash -c '(( $1 == 0 )) && [[ "$(grep -c -E " init$" "$2")" -eq 1 ]] && [[ "$(grep -c -E " cat config$" "$2")" -eq 2 ]]' \
+        _ "${T_RC}" "${root}/stub.log"
+
+    rm -f "${root}/stub.log" "${root}/cat.count"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=absent STUB_EXIT=11 STUB_SECOND_EXIT=31 \
+        STUB_CAT_COUNT="${root}/cat.count" STUB_STDERR="${absent}" \
+        bash "${script}" init-repository
+    t_check "initialization is accepted only when the new configuration can be read" \
+        bash -c '(( $1 == 31 )) && [[ "$2" == *"not readable after initialization"* ]] && [[ "$(grep -c -E " init$" "$3")" -eq 1 ]]' \
+        _ "${T_RC}" "${T_OUT}" "${root}/stub.log"
+
+    local mode code diagnosis
+    while IFS='|' read -r mode code diagnosis <&3; do
+        rm -f "${root}/stub.log" "${root}/cat.count"
+        t_run env "${BACKUP_ENV[@]}" STUB_MODE=reject STUB_EXIT="${code}" STUB_STDERR="${diagnosis}" \
+            bash "${script}" init-repository
+        t_check "${mode} does not initialize the repository" \
+            bash -c '(( $1 == $2 )) && [[ "$3" == *"repository probe failed"* ]] && [[ ! -e "$4" || "$(grep -c -E " init$" "$4")" -eq 0 ]] && ! grep -F -q unexpected-init "$4"' \
+            _ "${T_RC}" "${code}" "${T_OUT}" "${root}/stub.log"
+    done 3<<EOF
+HTTP 401|21|Fatal: unexpected HTTP response (401): 401 Unauthorized
+a certificate error|22|Fatal: tls: failed to verify certificate: x509: certificate signed by unknown authority
+a network error|23|Fatal: dial tcp 10.100.101.12:8000: connect: connection refused
+a key password error|24|Fatal: wrong password or no key found
+another missing-repository diagnosis|25|repository does not exist: config file is missing
+EOF
+    rm -f "${root}/stub.log" "${root}/cat.count"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=reject STUB_EXIT=26 STUB_STDERR= \
+        bash "${script}" init-repository
+    t_check "empty probe output does not initialize the repository" \
+        bash -c '(( $1 == 26 )) && [[ "$2" == *"repository probe failed"* ]] && [[ "$(grep -c -E " init$" "$3")" -eq 0 ]]' \
+        _ "${T_RC}" "${T_OUT}" "${root}/stub.log"
+
+    rm -f "${root}/stub.log"
+    t_run env "${BACKUP_ENV[@]}" RESTIC_REST_PASSWORD= STUB_MODE=exists bash "${script}" init-repository
+    t_check "a missing rest password does not start Restic" \
+        bash -c '(( $1 != 0 )) && [[ "$2" == *"configuration is incomplete"* ]] && [[ ! -e "$3" ]]' \
+        _ "${T_RC}" "${T_OUT}" "${root}/stub.log"
+    rm -f "${root}/key" "${root}/stub.log"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=exists bash "${script}" init-repository
+    t_check "a missing key file does not start Restic" \
+        bash -c '(( $1 != 0 )) && [[ ! -e "$2" ]]' _ "${T_RC}" "${root}/stub.log"
+    backup_restore_secrets "${root}"
+    : > "${root}/key"
+    chmod 600 "${root}/key"
+    rm -f "${root}/stub.log"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=exists bash "${script}" init-repository
+    t_check "an empty key file does not start Restic" \
+        bash -c '(( $1 != 0 )) && [[ ! -e "$2" ]]' _ "${T_RC}" "${root}/stub.log"
+    backup_restore_secrets "${root}"
+    rm -f "${root}/certs/rest-server.crt" "${root}/stub.log"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=exists bash "${script}" init-repository
+    t_check "a missing certificate does not start Restic" \
+        bash -c '(( $1 != 0 )) && [[ ! -e "$2" ]]' _ "${T_RC}" "${root}/stub.log"
+    backup_restore_secrets "${root}"
+    : > "${root}/certs/rest-server.crt"
+    chmod 644 "${root}/certs/rest-server.crt"
+    rm -f "${root}/stub.log"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=exists bash "${script}" init-repository
+    t_check "an empty certificate does not start Restic" \
+        bash -c '(( $1 != 0 )) && [[ "$2" == *"configuration is incomplete"* ]] && [[ ! -e "$3" ]]' \
+        _ "${T_RC}" "${T_OUT}" "${root}/stub.log"
+    backup_restore_secrets "${root}"
+    rm -f "${root}/key"
+    ln -s "${root}/certs/rest-server.crt" "${root}/key"
+    rm -f "${root}/stub.log"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=exists bash "${script}" init-repository
+    t_check "a symlinked key file does not start Restic" \
+        bash -c '(( $1 != 0 )) && [[ ! -e "$2" ]]' _ "${T_RC}" "${root}/stub.log"
+    backup_restore_secrets "${root}"
+    rm -f "${root}/certs/rest-server.crt"
+    ln -s "${root}/key" "${root}/certs/rest-server.crt"
+    rm -f "${root}/stub.log"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=exists bash "${script}" init-repository
+    t_check "a symlinked certificate does not start Restic" \
+        bash -c '(( $1 != 0 )) && [[ ! -e "$2" ]]' _ "${T_RC}" "${root}/stub.log"
+    backup_restore_secrets "${root}"
+    chmod 644 "${root}/key"
+    rm -f "${root}/stub.log"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=exists bash "${script}" init-repository
+    t_check "a key file without mode 600 or 400 does not start Restic" \
+        bash -c '(( $1 != 0 )) && [[ ! -e "$2" ]]' _ "${T_RC}" "${root}/stub.log"
+    backup_restore_secrets "${root}"
+    rm -f "${root}/stub.log"
+    t_run env "${BACKUP_ENV[@]}" RESTIC_REPOSITORY= STUB_MODE=exists bash "${script}" init-repository
+    t_check "an empty repository does not start Restic" \
+        bash -c '(( $1 == 0 )) && [[ "$2" == *"remote backup is not configured"* ]] && [[ ! -e "$3" ]]' \
+        _ "${T_RC}" "${T_OUT}" "${root}/stub.log"
+
+    backup_restore_secrets "${root}"
+    rm -f "${root}/stub.log"
+    backup_hold_exclusive "${root}/locks/repo.lock"
+    t_run env "${BACKUP_ENV[@]}" STUB_MODE=absent STUB_EXIT=11 \
+        STUB_CAT_COUNT="${root}/cat.count" STUB_STDERR="${absent}" \
+        bash "${script}" init-repository
+    backup_stop_group "${BACKUP_HOLDER}"
+    BACKUP_HOLDER=""
+    t_check "a second initialization cannot take a busy repository lock" \
+        bash -c '(( $1 != 0 )) && [[ "$2" == *"repository lock was not free"* ]] && [[ ! -e "$3" ]]' \
+        _ "${T_RC}" "${T_OUT}" "${root}/stub.log"
+    t_check "initialization does not forget, prune or disable TLS" \
+        bash -c '! grep -E -q "(^|[[:space:]])(forget|prune|--insecure-tls)([[:space:]]|$)" "$1"' _ "${script}"
+}
+
 run_backup_tests() {
     print_header "Remote backup"
     test_backup_compose
     test_backup_run
     test_backup_locks
     test_backup_wal_schedule
+    test_backup_init
     test_backup_image
 }

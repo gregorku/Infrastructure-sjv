@@ -75,6 +75,7 @@ Adresář má práva `700` a šifruje se až v resticu. Git repozitář se nezá
 - Bez neprázdného `RESTIC_REST_PASSWORD` plánovač zůstane nečinný a Restic nespustí. Chybějící heslo se do logu ani do stavového JSON nezapisuje.
 - Restic 0.19.1 běží jako trvalá služba `sjv-backup` (`compose/30-backup.yml`) na síti `sjv-egress`, bez publikovaného portu. Oficiální image je jen jednorázová binárka, proto má služba vlastní image se stejným binárním souborem a plánovačem. Zálohované adresáře jsou připojené jen pro čtení. Na hostitele se Restic neinstaluje.
 - Restic 0.19.1 při uživateli v URL ignoruje `RESTIC_REST_PASSWORD` (issue 22035). Služba proto pro proces klienta uživatelské jméno z URL oddělí a nastaví `RESTIC_REST_USERNAME`. Hodnota v `.env` se nemění a heslo se do URL nedává.
+- Prvotní založení tohoto repozitáře je `sudo ./scripts/init-backup.sh`, po `deploy.sh` a před `post-deploy.sh`. V kontejneru běží jen `init-repository`: nejdřív přečte konfiguraci, existující repozitář znovu nezakládá a plánovač nespouští. Chyba připojení, TLS, HTTP 401 nebo hesla klíče `init` nespustí. Obnova po kompromitaci je krok 11 níže: nový repozitář a nové klíče.
 
 | Tag | Kdy | Obsah | Spouští |
 | --- | --- | --- | --- |
@@ -259,7 +260,7 @@ Postup pro ztrátu nebo kompromitaci VPS. Předpoklad: dostupný domácí server
 | 8 | `pgbackrest verify`, `pgbackrest info` a kontrola kontinuity WAL | Gregor |
 | 9 | `restore.sh --source local --latest --replace-data --confirm infrastructure-sjv` | Gregor |
 | 10 | `deploy.sh` (build image, spuštění), `post-deploy.sh`, kontroly zdraví | Gregor |
-| 11 | Nový repozitář restic: `restic init`, nové klíče `vps`, `recovery`, `maintenance`, nový uživatel `rest-server`. Rotace KEK. Nová obnovovací sada | Gregor, správce domácího serveru |
+| 11 | Po kompromitaci nový repozitář a nové klíče `vps`, `recovery`, `maintenance`, nový uživatel `rest-server`. Rotace KEK. Nová obnovovací sada. Není to `init-backup.sh` současného repozitáře | Gregor, správce domácího serveru |
 | 12 | Zařízení: nové údaje (při kompromitaci), `replay_since` na čas posledního obnoveného WAL, kontrola příjmu | Gregor |
 | 13 | Vypnout `rest-server-sjv-recovery`, okamžitý `backup.sh`, `restore-test.sh`, zápis naměřených časů do `docs/operations.md` | Gregor, správce domácího serveru |
 

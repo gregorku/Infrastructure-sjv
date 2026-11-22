@@ -8,7 +8,7 @@ Stav repozitáře je etapa B1b. `deploy.sh` spouští Traefik a CrowdSec. `sjv-b
 
 Vývojová kontrola je `./scripts/test.sh`. Nepotřebuje root ani Docker démona a na hostiteli nic nemění. Izolovaná kontrola schématu je `app/backend/tests/isolated-schema-test.sh`. Běží ve vlastním dočasném Podman úložišti, maže jen `/tmp/sjv-alembic-itest` a svou síť a odmítne `/docker-data` i `SJV_DATABASE_URL` z okolí. Ani jeden z těchto běhů není instalace na VPS.
 
-Provozní instalace je ruční postup v Incus kontejneru `sjv-monitoring`. `init.sh`, `update-env.sh`, `check-env.sh`, `deploy.sh`, `post-deploy.sh`, `reload.sh`, `create-dashboard-user.sh` a `rotate-traefik-logs.sh` chtějí root a mountpoint `/docker-data`. `shellcheck.sh` root nechce. Repozitář DNS, HAProxy, Incus ani firewall nemění.
+Provozní instalace je ruční postup v Incus kontejneru `sjv-monitoring`. `init.sh`, `update-env.sh`, `check-env.sh`, `deploy.sh`, `init-backup.sh`, `post-deploy.sh`, `reload.sh`, `create-dashboard-user.sh` a `rotate-traefik-logs.sh` chtějí root a mountpoint `/docker-data`. `shellcheck.sh` root nechce. Repozitář DNS, HAProxy, Incus ani firewall nemění.
 
 Pořadí první instalace, jak ho skripty samy vypisují:
 
@@ -18,7 +18,8 @@ Pořadí první instalace, jak ho skripty samy vypisují:
 4. `sudo ./scripts/check-env.sh`
 5. `sudo ./scripts/create-dashboard-user.sh`
 6. `sudo ./scripts/deploy.sh`
-7. `sudo ./scripts/post-deploy.sh`
+7. `sudo ./scripts/init-backup.sh`
+8. `sudo ./scripts/post-deploy.sh`
 
 Aktualizace konfigurace a znovuspuštění stejných služeb je jiný postup a je v části G. Databázové migrace do tohoto pořadí nepatří, protože je žádný instalační skript nespouští.
 
@@ -39,7 +40,7 @@ Související dokumenty:
 
 ### Provoz
 
-Skripty `init.sh`, `update-env.sh`, `check-env.sh`, `deploy.sh` a `post-deploy.sh` volají `check_environment`. Ta vyžaduje root a příkazy `awk`, `base64`, `cmp`, `cp`, `date`, `find`, `findmnt`, `flock`, `head`, `install`, `mktemp`, `sort`, `stat` a `tr`. `deploy.sh` a `post-deploy.sh` navíc chtějí `docker` a fungující `docker compose`. `create-dashboard-user.sh` chce `htpasswd`. `rotate-traefik-logs.sh` chce root, `gzip`, `truncate`, `sync`, `date`, `find`, `cp` a `mktemp`. `python3` a `shellcheck` mezi těmito příkazy nejsou. Provozní instalace je bez nich spustitelná.
+Skripty `init.sh`, `update-env.sh`, `check-env.sh`, `deploy.sh`, `init-backup.sh` a `post-deploy.sh` volají `check_environment`. Ta vyžaduje root a příkazy `awk`, `base64`, `cmp`, `cp`, `date`, `find`, `findmnt`, `flock`, `head`, `install`, `mktemp`, `sort`, `stat` a `tr`. `deploy.sh` a `post-deploy.sh` navíc chtějí `docker` a fungující `docker compose`. `init-backup.sh` je chce jen tehdy, když je vzdálený repozitář vyplněný a běží mimo testovací režim. `create-dashboard-user.sh` chce `htpasswd`. `rotate-traefik-logs.sh` chce root, `gzip`, `truncate`, `sync`, `date`, `find`, `cp` a `mktemp`. `python3` a `shellcheck` mezi těmito příkazy nejsou. Provozní instalace je bez nich spustitelná.
 
 ### Vývoj a testování
 
@@ -57,7 +58,7 @@ Veřejné HTTP a HTTPS jdou na Traefik, porty 80 a 443. Dashboard je port 8443 a
 
 `/docker-data` musí být samostatný mountpoint. Když není, `init.sh`, `update-env.sh` a `check-env.sh` skončí chybou a adresář ani `.env` nezaloží. Git checkout má být mimo `/docker-data`. Konvence `/incus-dir/git/Infrastructure-sjv` v dokumentaci pořád není potvrzená.
 
-Adresáře, práva a svazky zakládá `init.sh`. Tabulka cest je v [docs/operations.md](docs/operations.md#adresáře). Data PostgreSQL jsou `/docker-data/infrastructure-sjv/postgresql`, v kontejneru `/var/lib/postgresql`, PGDATA podle image `/var/lib/postgresql/19/docker`. Repozitář pgBackRest je `/docker-data/backups/infrastructure-sjv/pgbackrest`. Build context image je jiná cesta: `/docker-data/stacks/infrastructure-sjv/postgresql`. `init.sh` a `deploy.sh` ji plní z adresáře `postgresql/` v Gitu. `compose/40-postgresql.yml` má `context: ../postgresql`, takže z runtime souboru `compose/40-postgresql.yml` tato cesta vyjde. Datový adresář se při tom nepřepisuje.
+Adresáře, práva a svazky zakládá `init.sh`. Tabulka cest je v [docs/operations.md](docs/operations.md#adresáře). Data PostgreSQL jsou `/docker-data/infrastructure-sjv/postgresql`, v kontejneru `/var/lib/postgresql`, PGDATA podle image `/var/lib/postgresql/19/docker`. Repozitář pgBackRest je `/docker-data/backups/infrastructure-sjv/pgbackrest`. Build context image je jiná cesta: `/docker-data/stacks/infrastructure-sjv/postgresql`. `init.sh` a `deploy.sh` ji plní z adresáře `postgresql/` v Gitu. `compose/40-postgresql.yml` má `context: ../postgresql`, takže z runtime souboru `compose/40-postgresql.yml` tato cesta vyjde. Datový adresář se při tom nepřepisuje. Stejně se kopíruje `backup/`. Jeho build context je `/docker-data/stacks/infrastructure-sjv/backup` a používá ho až jednorázový `init-backup.sh`.
 
 Hesla databázových rolí, MQTT a rest-server vznikají až v runtime `.env` nebo v souborech pod `/docker-data`. Do dokumentace nepatří.
 
@@ -98,7 +99,7 @@ Před `deploy.sh` musí `sudo ./scripts/check-env.sh` skončit patičkou `Enviro
 
 ### `init.sh`
 
-Spouští se jako první, na stroji s mountem `/docker-data`. Založí adresáře, zúží příliš otevřená práva, odmítne symlink a adresář jiného vlastníka a zkopíruje soubory stacku bez tajemství: `.env.example`, Compose, `configs/` a `postgresql/` včetně `Dockerfile`, `pgbackrest.conf` a `docker-entrypoint-initdb.d`. Cíl build contextu je `/docker-data/stacks/infrastructure-sjv/postgresql`. Soubor, který už se shoduje, se nepřepíše. Existující `.env` nemění. Kontejnery ani data nemaže.
+Spouští se jako první, na stroji s mountem `/docker-data`. Založí adresáře, zúží příliš otevřená práva, odmítne symlink a adresář jiného vlastníka a zkopíruje soubory stacku bez tajemství: `.env.example`, Compose, `configs/`, `postgresql/` včetně `Dockerfile`, `pgbackrest.conf` a `docker-entrypoint-initdb.d` a `backup/` včetně `Dockerfile` a `sjv-backup.sh`. Cíle build contextu jsou `/docker-data/stacks/infrastructure-sjv/postgresql` a `/docker-data/stacks/infrastructure-sjv/backup`. Soubor, který už se shoduje, se nepřepíše. Existující `.env` nemění. Kontejnery ani data nemaže.
 
 ```bash
 sudo ./scripts/init.sh
@@ -150,7 +151,31 @@ sudo ./scripts/deploy.sh
 
 `--render-only` jen zapíše runtime soubory. Docker nezavolá a `access.log` nezaloží. V testovacím režimu bez této volby skript skončí chybou dřív, než sáhne na log.
 
-Úspěch je patička `Deploy completed. Next: ./scripts/post-deploy.sh`. Opakovaný běh je bezpečný. Když se nic nezměnilo, soubory se nepřepisují. Klient `sjv-backup` v této fázi nevznikne.
+Úspěch je patička `Deploy completed. Next: ./scripts/init-backup.sh`. Opakovaný běh je bezpečný. Když se nic nezměnilo, soubory se nepřepisují. Trvalý klient `sjv-backup` v této fázi nevznikne.
+
+### `init-backup.sh`
+
+Až po `deploy.sh`. Z `deploy.sh` ani z `post-deploy.sh` se nevolá. Zakládá současný vzdálený repozitář a nespouští trvalou službu `sjv-backup`.
+
+```bash
+sudo ./scripts/init-backup.sh
+```
+
+Když je `RESTIC_REPOSITORY` prázdný, Restic ani Docker se nespustí. Úspěch je hláška `Remote backup is not configured. The repository was not initialized.` a patička `Remote backup initialization skipped. Next: ./scripts/post-deploy.sh`.
+
+Vyplněný repozitář vyžaduje:
+
+- `RESTIC_REST_PASSWORD` v runtime `.env`. Do URL nepatří. Neplatná URL nebo krátké heslo skončí validací `.env` a Docker se nespustí.
+- `/docker-data/infrastructure-sjv/secrets/restic-key-password` jako běžný neprázdný soubor, ne symlink, s právy 600 nebo 400.
+- `/docker-data/infrastructure-sjv/secrets/restic-rest-server.crt` jako běžný neprázdný soubor, ne symlink. Práva 644 jsou přípustná.
+
+Chybějící část, prázdný klíč, symlink nebo jiná práva klíče jsou chyba `Remote backup configuration is incomplete. The repository was not initialized.` Docker se nespustí. Obsah hesel se netiskne.
+
+Úplná konfigurace spustí jednorázový kontejner s příkazem `init-repository`. Obraz se sestaví ze synchronizovaného `/docker-data/stacks/infrastructure-sjv/backup`, kontejner se po skončení smaže a služby `traefik` a `crowdsec` se nerestartují. Plánovač `supervise` se nespustí, takže `sjv-backup` po tomto kroku neběží.
+
+Nejdřív se přečte konfigurace repozitáře. Když už existuje, `init` se nezavolá. Když repozitář prokazatelně neexistuje, založí se a konfigurace se přečte znovu. Oba úspěchy končí patičkou `Remote backup repository is ready. Next: ./scripts/post-deploy.sh`.
+
+HTTP 401, chyba TLS, chyba sítě, chybné heslo klíče a každá jiná diagnostika `init` nespustí. Skript skončí nenulovým kódem a patičku o připraveném repozitáři nevypíše. Obsazený `repo.lock` také skončí chybou bez `init`. V testovacím režimu vyplněný repozitář skončí před Dockerem. Opakování existujícího repozitáře je bezpečné. Obnova po kompromitaci je jiná operace: nový repozitář a nové klíče, jak je popisuje [docs/backup-strategy.md](docs/backup-strategy.md).
 
 ### `post-deploy.sh`
 
@@ -220,7 +245,7 @@ Všechny tři revize mají `downgrade`, který vyvolá chybu a označí migraci 
 
 ## F. Ověření instalace
 
-Po `deploy.sh` a `post-deploy.sh` jsou z tohoto repozitáře spuštěné jen `sjv-traefik` a `sjv-crowdsec`. `sjv-backup` a `sjv-postgresql` jsou v `compose.yml` a tento postup je nespouští.
+Po `deploy.sh`, `init-backup.sh` a `post-deploy.sh` zůstávají z tohoto repozitáře spuštěné jen `sjv-traefik` a `sjv-crowdsec`. `init-backup.sh` může jednorázově založit současný vzdálený repozitář a kontejner po sobě nenechá. Trvalý `sjv-backup` a `sjv-postgresql` jsou v `compose.yml` a tento postup je nespouští.
 
 Kontroly, které projekt sám popisuje:
 
@@ -246,11 +271,12 @@ Záloha a obnova produkčním skriptem ověřit nejdou. `backup.sh` a `restore.s
 Aktualizace konfigurace a znovuspuštění Traefiku a CrowdSec:
 
 1. V checkoutu převzít nový Git. Příkaz `git pull` a vzdálený repozitář tu nejsou určené.
-2. `sudo ./scripts/init.sh`, aby se do stacku dostala nová `.env.example`, soubory Compose a build context `postgresql/`.
+2. `sudo ./scripts/init.sh`, aby se do stacku dostala nová `.env.example`, soubory Compose a build context `postgresql/` a `backup/`.
 3. `sudo ./scripts/update-env.sh`. Existující uživatelské hodnoty a vygenerovaná hesla nechá. `framework` hodnoty srovná se šablonou.
 4. `sudo ./scripts/check-env.sh`.
 5. `sudo ./scripts/deploy.sh` nebo `sudo ./scripts/reload.sh`.
-6. `sudo ./scripts/post-deploy.sh`, když se měnil bouncer nebo Traefik middleware.
+6. `sudo ./scripts/init-backup.sh`.
+7. `sudo ./scripts/post-deploy.sh`, když se měnil bouncer nebo Traefik middleware.
 
 To není aktualizace schématu. Alembic se při tom nespustí. Až bude PostgreSQL běžet a má se posunout schéma, jediný popsaný příkaz je ruční `alembic -c alembic.ini upgrade head` s `SJV_DATABASE_URL`. Kdo ho spouští, z jaké sítě a po jaké záloze, repozitář neurčuje. `upgrade.sh` chybí. Návrh v `docs/database-design.md`, že `deploy.sh` před migrací vynutí zálohu pgBackRest, v `scripts/deploy.sh` není.
 
@@ -260,9 +286,9 @@ Když `deploy.sh` selže uprostřed, sítě a cizí kontejnery nemaže. Opakovan
 
 ## H. Zálohování a obnova
 
-Produkční `backup.sh` a `restore.sh` nejsou. Služba `sjv-backup` zůstává v `compose/30-backup.yml`. První fáze ji nespouští a její obraz nesestavuje. `restic init` se z tohoto repozitáře nespouští.
+Produkční `backup.sh` a `restore.sh` nejsou. Služba `sjv-backup` zůstává v `compose/30-backup.yml`. `deploy.sh` ji nespouští a její obraz nesestavuje. Současný vzdálený repozitář zakládá `sudo ./scripts/init-backup.sh` jednorázovým kontejnerem. Trvalá služba `sjv-backup` po tomto kroku neběží. Chyba připojení nebo autentizace repozitář nezaloží. Obnova po kompromitaci dál zakládá nový repozitář a nové klíče.
 
-Příprava vzdálené zálohy je v [docs/operations.md](docs/operations.md#vzdálená-záloha). První `deploy.sh` klienta nespustí. `docker logs sjv-backup` platí až po jeho samostatném spuštění. Heslo šifrovacího klíče je soubor `/docker-data/infrastructure-sjv/secrets/restic-key-password` s právy 600, ne proměnná. Certifikát je `restic-rest-server.crt` a smí mít práva 644.
+Příprava vzdálené zálohy je v [docs/operations.md](docs/operations.md#vzdálená-záloha). První `deploy.sh` klienta nespustí. `init-backup.sh` po sobě kontejner nenechá, takže `docker logs sjv-backup` platí až po samostatném spuštění trvalé služby. Heslo šifrovacího klíče je soubor `/docker-data/infrastructure-sjv/secrets/restic-key-password` s právy 600, ne proměnná. Certifikát je `restic-rest-server.crt` a smí mít práva 644.
 
 Lokální pgBackRest má stanza `sjv`, archivaci přes `archive-push` a vypnuté `expire-auto`. Izolovaný test 20. 11. 2026 provedl `stanza-create`, `check` a plnou zálohu. Neběžel na `/docker-data` a nespustil `backup.sh`. Obnova do jiného prázdného adresáře, s repozitářem jen pro čtení a s `archive_mode=off`, je popsaná v [docs/operations.md](docs/operations.md#obnova-do-samostatného-clusteru). Přepnutí obnoveného clusteru zpět do provozního datového adresáře ověřené není. PITR, `pgbackrest verify` a obnova ze snapshotu Restic součástí toho testu nebyly.
 
@@ -309,6 +335,10 @@ Pořadí mazání, odklady a cizí klíče jsou v [docs/database-design.md](docs
 | `check-env.sh` hlásí `.env.tmp.*` | přerušený zápis. Soubor prohlédnout a odstranit ručně. Skript ho nemaže |
 | Validace `.env` | číslo řádku, bez hodnoty. Nebezpečný znak, `set_*`, dokumentační hostname nebo neznámá proměnná |
 | `deploy.sh` v testu | bez `--render-only` je to záměrná chyba |
+| `init-backup.sh` v testu | vyplněný repozitář skončí před Dockerem. Prázdný repozitář skončí úspěchem |
+| `init-backup.sh` hlásí neúplnou konfiguraci | chybí REST heslo, soubor klíče, jeho práva 600 nebo 400, nebo certifikát. Symlink, prázdný klíč a prázdný certifikát se odmítnou. Docker se nespustí |
+| `init-backup.sh` skončí při ověření repozitáře | HTTP 401, TLS, síť, heslo klíče nebo jiná diagnostika. `init` se nespustí a patička o připraveném repozitáři se nevypíše |
+| po `init-backup.sh` neběží `sjv-backup` | jednorázový kontejner se maže. Trvalý plánovač tento krok nespouští |
 | `post-deploy.sh` v testu | bouncer se v testovacím režimu neregistruje |
 | CrowdSec bouncer | do prvního `post-deploy.sh` middleware klíč nemá. Logy kontejneru `sjv-crowdsec` a soukromý soubor klíče |
 | `sjv-backup` po prvním `deploy.sh` neběží | tato fáze ho nespouští. Definice zůstává v `compose/30-backup.yml` |
@@ -330,7 +360,8 @@ Logy stdout kontejnerů jsou ovladač `json-file`. Soubory Traefiku jsou `/docke
 | `scripts/create-dashboard-user.sh` | heslo dashboardu mimo Git | před publikací dashboardu | ano, ostatní účty nechá |
 | `scripts/deploy.sh` | sítě, Traefik a CrowdSec | první instalace těchto dvou služeb a jejich aktualizace | ano, cizí sítě a kontejnery nemaže |
 | `scripts/deploy.sh --render-only` | jen vykreslení, bez Dockeru | kontrola vykreslení, testovací režim | ano |
-| `scripts/post-deploy.sh` | registrace bouncer klíče | po `deploy.sh`, když běží CrowdSec | ano, klíč netiskne |
+| `scripts/init-backup.sh` | prvotní založení současného vzdáleného repozitáře | po `deploy.sh`, před `post-deploy.sh` | ano, existující repozitář znovu nezakládá a plánovač nespouští |
+| `scripts/post-deploy.sh` | registrace bouncer klíče | po `init-backup.sh`, když běží CrowdSec | ano, klíč netiskne |
 | `scripts/reload.sh` | totéž co `deploy.sh` | místo dalšího `deploy.sh` | ano |
 | `scripts/rotate-traefik-logs.sh` | copytruncate `access.log` | ručně, dokud timer není nasazený | ano, prázdný soubor nerotuje |
 | `scripts/test.sh` | offline testy | vývoj, před změnou, bez VPS | ano, hostitele nemění. Debian 13: `python3` a `shellcheck` |

@@ -72,4 +72,4 @@ layout_prepare_access_log
 docker_compose up -d traefik crowdsec
 ok "Traefik and CrowdSec were reconciled. Other projects were not changed."
 deploy_crowdsec_install_collections
-print_footer "Deploy completed. Next: ./scripts/post-deploy.sh"
+print_footer "Deploy completed. Next: ./scripts/init-backup.sh"
