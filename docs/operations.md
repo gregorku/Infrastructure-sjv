@@ -1,6 +1,6 @@
 # Provoz: instalace a konfigurace
 
-Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Traefiku, postup pro CrowdSec, rotaci souborových logů Traefiku, přípravu vzdálené zálohy, službu PostgreSQL 19.0 a postup obnovy ověřený izolovaným testem. `scripts/backup.sh` připraví podklady zálohy a jeden denní snapshot. Proti produkční databázi se nespouští. MQTT, aplikace a `restore.sh` zatím nejsou. `deploy.sh` PostgreSQL nespouští. Návrh systemd timeru pro logy je v repozitáři a není nainstalovaný.
+Stav: etapa B2. Popisuje přípravu adresářů, runtime `.env`, bezpečné přípravy záloh, trvalý plánovač Resticu, vykreslení Traefiku a postup pro CrowdSec. `scripts/backup.sh` vytváří pouze lokální přípravu; denní Restic snapshot vytváří výhradně `sjv-backup`. PostgreSQL se při deployi nespouští. MQTT, aplikace a `restore.sh` zatím nejsou.
 
 ## Předpoklady
 
@@ -24,7 +24,8 @@ Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Tr
 | `/docker-data/infrastructure-sjv/traefik/crowdsec` | 700 | `BOUNCER_KEY_sjv-traefik`, práva 600, mimo Git i `.env` |
 | `/docker-data/infrastructure-sjv/crowdsec/data` | 700 | data CrowdSec |
 | `/docker-data/infrastructure-sjv/postgresql` | 2770, vlastník root, skupina 999 při instalaci rootem | mount `/var/lib/postgresql`. Data jsou v `19/docker` podle oficiálního image |
-| `/docker-data/backups/infrastructure-sjv` | 700 | lokální zálohy: `pgbackrest/`, `dumps/`, `files/` |
+| `/docker-data/backups/infrastructure-sjv` | 700 | lokální zálohy: `pgbackrest/` a `preparations/` |
+| `/docker-data/backups/infrastructure-sjv/preparations` | 700 | immutable přípravy, marker `current` a manifesty |
 | `/docker-data/backups/infrastructure-sjv/pgbackrest` | 2770, vlastník root, skupina 999 při instalaci rootem | repozitář pgBackRest. Rodičovský adresář záloh zůstává 700 |
 | `/docker-data/infrastructure-sjv/backup-locks` | 700 | zámky `sjv-backup` a budoucí lokální zálohy |
 | `/docker-data/infrastructure-sjv/secrets/restic-key-password` | 600 | heslo klíče restic, až ho správce vytvoří |
@@ -39,7 +40,7 @@ Stav: etapa B1b. Popisuje přípravu adresářů, runtime `.env`, vykreslení Tr
 3. V `/docker-data/stacks/infrastructure-sjv/.env` nahraď `example.com` a `mqtt.example.com` skutečnými jmény a doplň zbylé `set_*`. Hodnoty piš bez uvozovek. Existující domény další běh `update-env.sh` nepřepíše.
 4. `sudo ./scripts/check-env.sh` musí skončit bez chyb. Varování (například chybějící vzdálená záloha) je třeba vědomě přijmout.
 5. `sudo ./scripts/create-dashboard-user.sh` uloží heslo dashboardu. Bez tohoto kroku se dashboard nepublikuje.
-6. `sudo ./scripts/deploy.sh` vykreslí Traefik, založí čtyři sítě projektu, před startem kontejnerů založí prázdný `access.log`, když chybí, a spustí `sjv-traefik` a `sjv-crowdsec`. Příkaz nepoužívá `--build`. Existující log se nezkrátí. `--render-only` tento soubor nezakládá a Docker nezavolá. `sjv-backup` a `sjv-postgresql` v Compose zůstávají a tento krok je nespouští.
+6. `sudo ./scripts/deploy.sh` vykreslí Traefik, založí čtyři sítě projektu, připraví `access.log` a spustí `sjv-traefik`, `sjv-crowdsec` a `sjv-backup`. PostgreSQL se nespouští. Příkaz nepoužívá `--build`; Compose podle definice služby sestaví chybějící backup image. `--render-only` Docker nezavolá.
 7. `sudo ./scripts/init-backup.sh` založí současný vzdálený repozitář, když je v `.env` vyplněný a ještě neexistuje. Prázdný `RESTIC_REPOSITORY` skončí úspěchem a Docker nespustí. Neúplné heslo, klíč nebo certifikát jsou chyba a Docker se nespustí. Chyba připojení, TLS, HTTP 401 nebo hesla klíče repozitář nezaloží a skript skončí chybou. Jednorázový kontejner se smaže. Plánovač se nespustí.
 8. `sudo ./scripts/post-deploy.sh` zaregistruje bouncer klíč u CrowdSec, znovu vykreslí middleware a v případě potřeby restartuje Traefik. Klíč se nevypisuje.
 
@@ -107,9 +108,9 @@ Limit `json-file` v Compose omezuje jen stdout kontejneru. Soubory `traefik.log`
 
 ## Vzdálená záloha
 
-Služba `sjv-backup` je v `compose/30-backup.yml`. První `deploy.sh` ji nespouští a její obraz nesestavuje. Současný vzdálený repozitář zakládá až `sudo ./scripts/init-backup.sh`. Trvalý plánovač a jeho nasazení na VPS zůstávají samostatný krok. `restic init` založí jeden klíč ze souboru `restic-key-password`. Pojmenované klíče `vps`, `recovery` a `maintenance` a účet `sjv-recovery` jsou NEIMPLEMENTOVANÉ. Obnova po kompromitaci zakládá nový repozitář a nové šifrovací heslo.
+Služba `sjv-backup` je v `compose/30-backup.yml`; `deploy.sh` ji spouští bez PostgreSQL a Compose ji při chybějícím image sestaví. `scripts/backup.sh` vytváří lokální přípravu pod `preparations/<preparation_id>`, marker `preparations/current` publikuje atomicky a denní snapshot nespouští. Jediným vlastníkem denního snapshotu je trvalý plánovač. `init-backup.sh` zůstává jednorázové založení repozitáře a plánovač nespouští.
 
-1. `sudo ./scripts/init.sh` založí `postgresql/`, `pgbackrest/`, `pgbackrest/archive/`, `dumps/`, `files/` a `backup-locks/`. Adresáře, do kterých zapisuje uživatel image PostgreSQL, mají mód 2770 a při běhu `init.sh` jako root skupinu 999.
+1. `sudo ./scripts/init.sh` založí `postgresql/`, `pgbackrest/`, `pgbackrest/archive/`, `preparations/` a `backup-locks/`. Adresáře, do kterých zapisuje uživatel image PostgreSQL, mají mód 2770 a při běhu `init.sh` jako root skupinu 999.
 2. Do runtime `.env` zapiš obě proměnné. Heslo v URL být nesmí. `RESTIC_REST_PASSWORD` je HTTP heslo REST serveru. Šifrovací heslo je až soubor v dalším kroku. `RESTIC_REST_USERNAME` a `RESTIC_PASSWORD` se do `.env` nezapisují. Rozdíl a změna HTTP hesla jsou v [INSTALLATION.md](../INSTALLATION.md#změna-hesla-rest-serveru) a [backup-strategy.md](backup-strategy.md#hesla-a-přístupové-údaje).
 
 ```bash
@@ -129,9 +130,9 @@ install -m 600 /dev/null /docker-data/infrastructure-sjv/secrets/restic-key-pass
 install -m 644 /cesta/k/rest-server.crt /docker-data/infrastructure-sjv/secrets/restic-rest-server.crt
 ```
 
-5. `sudo ./scripts/check-env.sh` a teprve potom schválené `sudo ./scripts/deploy.sh`. To spustí Traefik a CrowdSec. Klienta `sjv-backup` nespustí.
+5. `sudo ./scripts/check-env.sh` a teprve potom schválené `sudo ./scripts/deploy.sh`. To spustí Traefik, CrowdSec a `sjv-backup`, ale ne PostgreSQL.
 6. `sudo ./scripts/init-backup.sh` jednorázově ověří současný repozitář a založí ho jen tehdy, když ještě neexistuje. Heslo REST, soubor klíče a certifikát musí být na místě. Chyba připojení, TLS, HTTP 401 nebo hesla klíče `init` nespustí a skript skončí chybou. Příkaz plánovač nespustí a kontejner po sobě nenechá.
-7. Stav plánovače tato fáze neověřuje, protože trvalý kontejner neběží. Až bude služba spuštěná samostatným postupem, stav je `docker logs sjv-backup` a soubory `state/sjv-backup-daily.json` a `state/sjv-backup-wal.json`. Healthcheck je jen živost plánovače.
+7. Po deployi lze stav kontrolovat v `docker logs sjv-backup`, healthcheckem `docker inspect sjv-backup` a soubory `state/sjv-backup-daily.json`, `state/sjv-backup-wal.json`, `state/sjv-backup-last-attempt.json` a `state/sjv-backup-last-restorable.json`. Healthcheck ověřuje heartbeat plánovače, nikoli úspěch snapshotu.
 8. Při `failed` se záloha za úspěšnou nepovažuje. Plánovač pokračuje. Další `wal` je až po 300 s. Přeskočení kvůli obsazenému `restic-job.lock` nebo `repo.lock` má vlastní stav a další pokus po 60 s (`SJV_BACKUP_WAL_RETRY_SECONDS`). Čas posledního pokusu je `state/sjv-backup-wal.epoch`, čas dalšího pokusu `state/sjv-backup-wal.next`. Restart se řídí tím druhým a nespouští sérii pokusů. `wal` na zámky nečeká. Dlouhá denní úloha může interval `wal` překročit; druhý Restic se nespouští. `forget` a `prune` se na VPS nespouštějí.
 
 ## Záloha a obnova PostgreSQL
@@ -163,7 +164,7 @@ PITR na zvolený čas, `pgbackrest verify`, obnova ze vzdáleného Restic snapsh
 
 ## Mimo rozsah B1b
 
-- Produkční spuštění `sjv-backup` a `sjv-postgresql` přes `deploy.sh` a produkční běh `scripts/backup.sh`. Skript v repozitáři je a v offline testech používá jen náhradní příkazy. `restore.sh`, Mosquitto, FastAPI, React, wmbusmeters a firmware zatím nejsou. `deploy.sh` v první fázi startuje jen Traefik a CrowdSec.
+- Produkční data a vzdálené spojení nebyly v této etapě spuštěny. `restore.sh`, Mosquitto, FastAPI, React, wmbusmeters a firmware zatím nejsou. Offline testy používají pouze stuby.
 - Trvalý plánovač `sjv-backup` a jeho nasazení na VPS. Prvotní `init-backup.sh` současného repozitáře je součást instalace. Obnova po kompromitaci zakládá nový repozitář a nové šifrovací heslo. `restic init` z něj založí jeden klíč ze souboru `restic-key-password`. Pojmenované klíče nejsou implementované.
 - Instalace systemd jednotek. Návrh timeru pro access log v repozitáři není nasazení.
 - Jakékoli změny NixOS, Incus, HAProxy, MikroTik, DNS nebo WireGuard (viz [external-changes.md](external-changes.md)).

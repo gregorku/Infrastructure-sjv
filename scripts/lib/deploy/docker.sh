@@ -160,20 +160,6 @@ docker_compose_init_backup() {
         run --build --rm --no-deps sjv-backup init-repository
 }
 
-# One daily snapshot after the local backup files are in place. The arguments
-# are fixed. The scheduler is not started. Old snapshots are not removed and
-# pgBackRest expire is not called from here.
-docker_compose_backup_daily() {
-    local address
-    [[ "${SJV_TEST_MODE}" -eq 0 ]] || fail "Test mode cannot run docker compose."
-    address="$(docker_read_proxy_address)"
-    TRAEFIK_PROXY_ADDRESS="${address}" docker compose \
-        --project-name "${STACK_NAME}" \
-        --project-directory "${STACK_DIR}" \
-        -f "${STACK_DIR}/compose.yml" \
-        run --rm --no-deps sjv-backup run daily
-}
-
 # Fixed commands in the already running PostgreSQL container. Passwords are
 # not accepted as arguments. pg_dump uses the local postgres user and peer
 # authentication. The general allow-list still refuses restart and arbitrary

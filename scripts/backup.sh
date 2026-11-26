@@ -18,8 +18,8 @@ log_install_err_trap
 backup_usage() {
     printf '%s\n' \
         "Usage: ./scripts/backup.sh [run|status]" \
-        "run creates a pgBackRest backup, a pg_dump custom archive, and private copies under files/." \
-        "It then runs one sjv-backup daily snapshot. status prints the last result." \
+        "run creates and publishes one local preparation for the sjv-backup scheduler." \
+        "The scheduler is the only owner of daily Restic snapshots. status prints the last result." \
         "app-kek is copied only when it already exists. restic-key-password is never copied." \
         "pgbackrest expire, restic forget and restic prune are not called."
 }

@@ -13,6 +13,7 @@ local_backup_prepare() {
         "${base}/backups/infrastructure-sjv/pgbackrest" \
         "${base}/backups/infrastructure-sjv/dumps" \
         "${base}/backups/infrastructure-sjv/files" \
+        "${base}/backups/infrastructure-sjv/preparations" \
         "${base}/bin" \
         "${base}/stub"
     chmod 700 \
@@ -20,7 +21,8 @@ local_backup_prepare() {
         "${base}/infrastructure-sjv/secrets" \
         "${base}/infrastructure-sjv/backup-locks" \
         "${base}/backups/infrastructure-sjv/dumps" \
-        "${base}/backups/infrastructure-sjv/files"
+        "${base}/backups/infrastructure-sjv/files" \
+        "${base}/backups/infrastructure-sjv/preparations"
     rm -f -- \
         "${base}/stacks/infrastructure-sjv/.env" \
         "${base}/infrastructure-sjv/secrets/app-kek" \
@@ -33,6 +35,7 @@ local_backup_prepare() {
         "${base}/backups/infrastructure-sjv/files"/* \
         "${base}/infrastructure-sjv/state"/* \
         "${base}/stub"/*
+    find "${base}/backups/infrastructure-sjv/preparations" -mindepth 1 -delete
     printf '%s\n' "PG_DB=sjv" "POSTGRES_PASSWORD=fixture-db-password-not-logged" \
         > "${base}/stacks/infrastructure-sjv/.env"
     chmod 600 "${base}/stacks/infrastructure-sjv/.env"
@@ -115,9 +118,12 @@ printf '{"mode":"daily","status":"%s","exit_code":%s,"finished_at":"2026-11-22T1
 if [[ "${code}" -ne 0 || "${status}" != "ok" ]]; then
     exit "${code}"
 fi
-[[ -f "${STUB_FILES}/runtime.env" ]] || exit 3
+current="$(<"${STUB_PREPARATIONS}/current")"
+files="${STUB_PREPARATIONS}/${current}/files"
+dumps="${STUB_PREPARATIONS}/${current}/dumps"
+[[ -f "${files}/runtime.env" ]] || exit 3
 found=0
-for dump in "${STUB_DUMPS}"/sjv-*.dump; do
+for dump in "${dumps}"/sjv-*.dump; do
     [[ -f "${dump}" ]] || continue
     found=1
 done
@@ -142,8 +148,7 @@ local_backup_run() {
         SJV_BACKUP_RESTIC="${base}/bin/restic-daily" \
         STUB_DIR="${base}/stub" \
         STUB_LOG="${base}/stub/log" \
-        STUB_DUMPS="${base}/backups/infrastructure-sjv/dumps" \
-        STUB_FILES="${base}/backups/infrastructure-sjv/files" \
+        STUB_PREPARATIONS="${base}/backups/infrastructure-sjv/preparations" \
         STUB_STATE="${base}/infrastructure-sjv/state" \
         "$@" \
         "${REPO_ROOT}/scripts/backup.sh" run
@@ -159,42 +164,64 @@ local_outputs_hide_fixtures() {
 }
 
 local_key_not_copied() {
-    local base="$1" secret file
+    local base="$1" secret file current files
     secret="${base}/infrastructure-sjv/secrets/restic-key-password"
-    [[ ! -e "${base}/backups/infrastructure-sjv/files/restic-key-password" ]] || return 1
-    for file in "${base}/backups/infrastructure-sjv/files"/*; do
+    current="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    files="${base}/backups/infrastructure-sjv/preparations/${current}/files"
+    [[ ! -e "${files}/restic-key-password" ]] || return 1
+    for file in "${files}"/*; do
         [[ -e "${file}" ]] || continue
         cmp -s -- "${secret}" "${file}" && return 1
     done
     return 0
 }
 
+local_current_preparation() {
+    local base="$1" id
+    [[ -f "${base}/backups/infrastructure-sjv/preparations/current" ]] || return 1
+    id="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    [[ "${id}" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+    printf '%s\n' "${base}/backups/infrastructure-sjv/preparations/${id}"
+}
+
 test_backup_local_success() {
     print_section "Local backup materials"
-    local base status files dumps dow full_count diff_count
+    local base status files dumps current dow full_count diff_count
     base="$(local_backup_prepare bl1)"
     local_backup_run "${base}"
     status="${base}/infrastructure-sjv/state/backup.json"
-    files="${base}/backups/infrastructure-sjv/files"
-    dumps="${base}/backups/infrastructure-sjv/dumps"
+    current="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    files="${base}/backups/infrastructure-sjv/preparations/${current}/files"
+    dumps="${base}/backups/infrastructure-sjv/preparations/${current}/dumps"
     t_check "a complete backup exits 0" test "${T_RC}" -eq 0
-    t_check "status records pgBackRest, the dump, files and Restic" \
-        grep -q '"status":"ok".*"pgbackrest":"ok".*"wal_archive":"ok".*"dump":"ok".*"files":"ok".*"app_kek":"copied".*"restic":"ok".*"error":""' "${status}"
+    t_check "status records local preparation without running Restic" \
+        grep -q '"status":"ok".*"pgbackrest":"ok".*"wal_archive":"ok".*"dump":"ok".*"files":"ok".*"app_kek":"copied".*"restic":"not_run".*"error":""' "${status}"
     t_check "the copied environment matches the source and is mode 600" \
         bash -c 'cmp -s "$1" "$2" && [[ "$(stat -c %a "$2")" == 600 ]]' _ \
             "${base}/stacks/infrastructure-sjv/.env" "${files}/runtime.env"
     t_check "the copied app-kek matches the source and is mode 600" \
         bash -c 'cmp -s "$1" "$2" && [[ "$(stat -c %a "$2")" == 600 && "$(stat -c %s "$2")" == 32 ]]' _ \
             "${base}/infrastructure-sjv/secrets/app-kek" "${files}/app-kek"
+    t_check "the preparation marker points to the complete preparation" \
+        bash -c '[[ "$1" == "$2" ]] && grep -q "\"status\":\"ready\"" "$1/backup-manifest.json" && [[ "$(stat -c %a "$1/backup-manifest.json")" == 600 ]]' _ \
+            "${base}/backups/infrastructure-sjv/preparations/${current}" "${files%/files}"
+    t_check "the manifest contains no secret fixture" \
+        bash -c '! grep -Eq "fixture-|POSTGRES_PASSWORD|RESTIC_REST_PASSWORD" "$1"' _ \
+            "${files%/files}/backup-manifest.json"
+    t_check "the published preparation has no temporary manifest" \
+        test ! -e "${files%/files}/backup-manifest.json.tmp"
     t_check "the logical dump has the PGDMP header and mode 600" \
         bash -c 'h="$(head -c 5 "$1"/sjv-*.dump)"; [[ "${h}" == PGDMP && "$(stat -c %a "$1"/sjv-*.dump)" == 600 ]]' _ "${dumps}"
     t_check "stdout and status hide fixtures" local_outputs_hide_fixtures "${status}"
     t_check "restic-key-password is not in files" local_key_not_copied "${base}"
-    t_check "the first run creates the stanza before the backup" \
+    t_check "the first run creates the stanza before the local backup" \
         bash -c 'log="$1"; stanza=$(grep -n "^stanza-create$" "${log}" | head -n 1 | cut -d: -f1); backup=$(grep -n "^backup --type=" "${log}" | head -n 1 | cut -d: -f1); [[ -n "${stanza}" && -n "${backup}" && "${stanza}" -lt "${backup}" ]]' _ \
             "${base}/stub/log"
     dow="$(date -u +%u)"
     local_backup_run "${base}"
+    current="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    files="${base}/backups/infrastructure-sjv/preparations/${current}/files"
+    dumps="${base}/backups/infrastructure-sjv/preparations/${current}/dumps"
     t_check "a repeated run exits 0" test "${T_RC}" -eq 0
     t_check "a repeated run keeps the copied files private and complete" \
         bash -c 'cmp -s "$1" "$2" && [[ "$(stat -c %a "$2")" == 600 && "$(stat -c %a "$3")" == 600 ]]' _ \
@@ -208,8 +235,11 @@ test_backup_local_success() {
         t_check "a later weekday run is a differential backup" \
             bash -c '[[ "$1" == 1 && "$2" == 1 ]]' _ "${full_count}" "${diff_count}"
     fi
-    t_check "two dumps are kept" \
-        bash -c 'n=0; for f in "$1"/sjv-*.dump; do [[ -f "$f" ]] && n=$((n + 1)); done; [[ "$n" -eq 2 ]]' _ "${dumps}"
+    t_check "each preparation keeps its own dump" \
+        bash -c 'n=0; for f in "$1"/sjv-*.dump; do [[ -f "$f" ]] && n=$((n + 1)); done; [[ "$n" -eq 1 ]]' _ "${dumps}"
+    t_check "the repeated run publishes a different preparation" \
+        bash -c '[[ "$1" -ge 2 ]]' _ \
+            "$(find "${base}/backups/infrastructure-sjv/preparations" -mindepth 1 -maxdepth 1 -type d -name '20*' | wc -l)"
     t_check "stanza-create runs once" \
         bash -c '[[ "$(grep -c "^stanza-create$" "$1")" == 1 ]]' _ "${base}/stub/log"
     cp -- "${files}/runtime.env" "${base}/stub/good-env" || true
@@ -225,7 +255,7 @@ test_backup_local_success() {
 
 test_backup_local_failures() {
     print_section "Local backup failures"
-    local base status
+    local base status current files dumps
     base="$(local_backup_prepare bl2)"
     local_backup_run "${base}" STUB_READY_RC=1
     status="${base}/infrastructure-sjv/state/backup.json"
@@ -240,8 +270,8 @@ test_backup_local_failures() {
     status="${base}/infrastructure-sjv/state/backup.json"
     t_check "a failed pgBackRest backup fails" test "${T_RC}" -ne 0
     t_check "a failed pgBackRest backup does not dump or snapshot" \
-        bash -c 'grep -q "pgbackrest-failed" "$1" && ! grep -q "restic-daily" "$2" && ! compgen -G "$3/sjv-*.dump" >/dev/null' _ \
-            "${status}" "${base}/stub/log" "${base}/backups/infrastructure-sjv/dumps"
+        bash -c 'grep -q "pgbackrest-failed" "$1" && ! grep -q "restic-daily" "$2" && ! find "$3" -name "sjv-*.dump" -type f -print -quit | grep -q .' _ \
+            "${status}" "${base}/stub/log" "${base}/backups/infrastructure-sjv/preparations"
 
     base="$(local_backup_prepare bl4)"
     local_backup_run "${base}" STUB_CHECK_RC=1
@@ -255,8 +285,8 @@ test_backup_local_failures() {
     status="${base}/infrastructure-sjv/state/backup.json"
     t_check "a failed pg_dump fails" test "${T_RC}" -ne 0
     t_check "a failed pg_dump does not leave a dump or a snapshot" \
-        bash -c 'grep -q "dump-failed" "$1" && ! grep -q "restic-daily" "$2" && ! compgen -G "$3/sjv-*.dump" >/dev/null' _ \
-            "${status}" "${base}/stub/log" "${base}/backups/infrastructure-sjv/dumps"
+        bash -c 'grep -q "dump-failed" "$1" && ! grep -q "restic-daily" "$2" && ! find "$3" -name "sjv-*.dump" -type f -print -quit | grep -q .' _ \
+            "${status}" "${base}/stub/log" "${base}/backups/infrastructure-sjv/preparations"
     t_check "pg_dump is asked for a custom archive without a password argument" \
         bash -c 'grep -qx "\-Fc --no-password --dbname=sjv" "$1" && ! grep -q "fixture-db-password-not-logged" "$1"' _ \
             "${base}/stub/log"
@@ -266,20 +296,21 @@ test_backup_local_failures() {
     status="${base}/infrastructure-sjv/state/backup.json"
     t_check "a dump without a PGDMP header fails" test "${T_RC}" -ne 0
     t_check "a damaged dump is not kept" \
-        bash -c '! compgen -G "$1/sjv-*.dump" >/dev/null && ! compgen -G "$1/.sjv."* >/dev/null && grep -q "dump-failed" "$2"' _ \
-            "${base}/backups/infrastructure-sjv/dumps" "${status}"
+        bash -c '! find "$1" -name "sjv-*.dump" -type f -print -quit | grep -q . && ! find "$1" -name ".sjv.*" -type f -print -quit | grep -q . && grep -q "dump-failed" "$2"' _ \
+            "${base}/backups/infrastructure-sjv/preparations" "${status}"
 
     base="$(local_backup_prepare bl7)"
     rm -f -- "${base}/infrastructure-sjv/secrets/app-kek"
     local_backup_run "${base}" STUB_KEYS=present
     status="${base}/infrastructure-sjv/state/backup.json"
     t_check "missing app-kek with encrypted meter keys is incomplete" \
-        bash -c '[[ "$1" -eq 2 ]] && grep -q "\"status\":\"incomplete\"" "$2" && grep -q "\"app_kek\":\"missing\"" "$2" && [[ ! -e "$3/app-kek" ]]' _ \
-            "${T_RC}" "${status}" "${base}/backups/infrastructure-sjv/files"
+        bash -c '[[ "$1" -eq 2 ]] && grep -q "\"status\":\"incomplete\"" "$2" && grep -q "\"app_kek\":\"missing\"" "$2" && ! find "$3" -path "*/files/app-kek" -print -quit | grep -q .' _ \
+            "${T_RC}" "${status}" "${base}/backups/infrastructure-sjv/preparations"
     t_check "an incomplete backup is not recorded as the last success" \
         test ! -e "${base}/infrastructure-sjv/state/backup-last-success.json"
-    t_check "an incomplete backup still confirms the Restic snapshot" \
-        grep -q '"restic":"ok"' "${status}"
+    t_check "an incomplete preparation does not start Restic" \
+        bash -c 'grep -q "\"restic\":\"not_run\"" "$1" && ! grep -q "^restic-daily$" "$2"' _ \
+            "${status}" "${base}/stub/log"
     t_check "an incomplete backup hides fixtures" local_outputs_hide_fixtures "${status}"
 
     base="$(local_backup_prepare bl8)"
@@ -289,23 +320,185 @@ test_backup_local_failures() {
     local_backup_run "${base}"
     status="${base}/infrastructure-sjv/state/backup.json"
     t_check "a short app-kek is a failed backup and is not copied" \
-        bash -c '[[ "$1" -ne 0 ]] && grep -q "app-kek-damaged" "$2" && [[ ! -e "$3/app-kek" ]]' _ \
-            "${T_RC}" "${status}" "${base}/backups/infrastructure-sjv/files"
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "app-kek-damaged" "$2" && ! find "$3" -path "*/files/app-kek" -print -quit | grep -q .' _ \
+            "${T_RC}" "${status}" "${base}/backups/infrastructure-sjv/preparations"
 
     base="$(local_backup_prepare bl9)"
     local_backup_run "${base}" STUB_RESTIC_RC=1
     status="${base}/infrastructure-sjv/state/backup.json"
-    t_check "a failed Restic snapshot fails the backup" test "${T_RC}" -ne 0
-    t_check "a failed Restic snapshot keeps the local dump and is not success" \
-        bash -c 'grep -q "restic-failed" "$1" && [[ ! -e "$2" ]] && compgen -G "$3/sjv-*.dump" >/dev/null' _ \
-            "${status}" "${base}/infrastructure-sjv/state/backup-last-success.json" \
-            "${base}/backups/infrastructure-sjv/dumps"
+    t_check "local preparation succeeds without starting a Restic snapshot" test "${T_RC}" -eq 0
+    t_check "local preparation records Restic as not run" \
+        grep -q '"restic":"not_run"' "${status}"
+    t_check "local preparation does not invoke the Restic stub" \
+        bash -c '! grep -q "^restic-daily$" "$1"' _ "${base}/stub/log"
 
     base="$(local_backup_prepare bl10)"
     local_backup_run "${base}" STUB_RESTIC_STATUS=not-configured STUB_RESTIC_RC=0
     status="${base}/infrastructure-sjv/state/backup.json"
-    t_check "a Restic run that is not status ok is not a successful snapshot" \
-        bash -c '[[ "$1" -ne 0 ]] && grep -q "restic-failed" "$2"' _ "${T_RC}" "${status}"
+    t_check "a local preparation does not depend on Restic status" \
+        bash -c '[[ "$1" -eq 0 ]] && grep -q "\"restic\":\"not_run\"" "$2"' _ "${T_RC}" "${status}"
+}
+
+test_backup_preparations() {
+    print_section "Atomic backup preparations"
+    local base status first second current manifest
+
+    base="$(local_backup_prepare prep1)"
+    local_backup_run "${base}"
+    first="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    manifest="${base}/backups/infrastructure-sjv/preparations/${first}/backup-manifest.json"
+    t_check "a successful preparation publishes current atomically" \
+        bash -c '[[ "$1" == "$2" ]] && [[ -f "$3" ]] && [[ ! -e "$3.tmp" ]]' _ \
+            "${first}" "$(basename -- "${first}")" "${manifest}"
+    t_check "the published manifest has the ready state" \
+        grep -q '"status":"ready"' "${manifest}"
+
+    rm -f -- "${base}/infrastructure-sjv/secrets/app-kek"
+    local incomplete_current
+    incomplete_current="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    local_backup_run "${base}" STUB_KEYS=present
+    status="${base}/infrastructure-sjv/state/backup.json"
+    t_check "missing app-kek after a complete preparation is incomplete" \
+        bash -c '[[ "$1" -eq 2 ]] && grep -q "\"status\":\"incomplete\"" "$2"' _ \
+            "${T_RC}" "${status}"
+    t_check "an incomplete preparation preserves the previous current" \
+        test "${incomplete_current}" = "$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    t_check "the previous preparation and ready manifest remain intact" \
+        bash -c '[[ -f "$1/backup-manifest.json" ]] && grep -q "\"status\":\"ready\"" "$1/backup-manifest.json"' _ \
+            "${base}/backups/infrastructure-sjv/preparations/${incomplete_current}"
+    t_check "the incomplete preparation is recorded separately and is not ready" \
+        bash -c 'for manifest in "$1"/.*.incomplete/backup-manifest.json; do [[ -f "$manifest" ]] || continue; grep -q "\"status\":\"incomplete\"" "$manifest" && ! grep -q "\"status\":\"ready\"" "$manifest" && exit 0; done; exit 1' _ \
+            "${base}/backups/infrastructure-sjv/preparations"
+    t_check "the backup lock is released after an incomplete preparation" \
+        bash -c 'flock -n -x "$1" true' _ \
+            "${base}/infrastructure-sjv/backup-locks/backup.lock"
+
+    printf '%s\n' "broken" > "${base}/infrastructure-sjv/secrets/app-kek"
+    chmod 600 "${base}/infrastructure-sjv/secrets/app-kek"
+    local_backup_run "${base}"
+    second="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    status="${base}/infrastructure-sjv/state/backup.json"
+    t_check "a damaged app-kek is failed" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "app-kek-damaged" "$2"' _ "${T_RC}" "${status}"
+    t_check "a failed preparation does not replace current" test "${first}" = "${second}"
+    t_check "a failed preparation does not put secrets in its manifest" \
+        bash -c '! find "$1" -name backup-manifest.json -type f -exec grep -E "fixture-|broken|POSTGRES_PASSWORD" {} + >/dev/null 2>&1' _ \
+            "${base}/backups/infrastructure-sjv/preparations"
+
+    base="$(local_backup_prepare prep2)"
+    local_backup_run "${base}"
+    first="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    local_backup_run "${base}" SJV_BACKUP_TEST_FAIL_AFTER_PREPARATION_RENAME=1
+    second="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    t_check "a failure after directory rename preserves the old current" \
+        test "${first}" = "${second}"
+    t_check "a renamed but unpublished preparation is recorded as failed" \
+        bash -c 'find "$1" -mindepth 1 -maxdepth 1 -type d -name ".*.failed" -print -quit | grep -q .' _ \
+            "${base}/backups/infrastructure-sjv/preparations"
+
+    base="$(local_backup_prepare prep3)"
+    rm -f -- "${base}/infrastructure-sjv/secrets/app-kek"
+    ln -s "${base}/stacks/infrastructure-sjv/.env" \
+        "${base}/infrastructure-sjv/secrets/app-kek"
+    local_backup_run "${base}"
+    status="${base}/infrastructure-sjv/state/backup.json"
+    t_check "a symlinked app-kek is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "app-kek-damaged" "$2"' _ "${T_RC}" "${status}"
+
+    base="$(local_backup_prepare prep4)"
+    printf '%s\n' "not-a-preparation" > "${base}/stub/marker-target"
+    ln -s "${base}/stub/marker-target" \
+        "${base}/backups/infrastructure-sjv/preparations/current"
+    local_backup_run "${base}"
+    status="${base}/infrastructure-sjv/state/backup.json"
+    t_check "a symlinked current marker is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "\"status\":\"failed\"" "$2"' _ "${T_RC}" "${status}"
+
+    base="$(local_backup_prepare prep5)"
+    printf '%s\n' "marker-target" > "${base}/stub/marker-target"
+    ln -s "${base}/stub/marker-target" \
+        "${base}/backups/infrastructure-sjv/preparations/.current.tmp"
+    local_backup_run "${base}"
+    t_check "an old symlink temporary marker is not used" \
+        test -L "${base}/backups/infrastructure-sjv/preparations/.current.tmp"
+
+    base="$(local_backup_prepare prep6)"
+    printf '%s\n' "sentinel" > "${base}/backups/infrastructure-sjv/preparations/.current.tmp"
+    local_backup_run "${base}"
+    t_check "an old regular temporary marker is not used" \
+        bash -c '[[ "$(cat "$1")" == sentinel ]]' _ \
+            "${base}/backups/infrastructure-sjv/preparations/.current.tmp"
+
+    base="$(local_backup_prepare prep7)"
+    local_backup_run "${base}"
+    first="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    local_backup_run "${base}" SJV_BACKUP_TEST_FAIL_MARKER_PUBLISH=1
+    second="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    t_check "a marker publication error preserves current" test "${first}" = "${second}"
+    t_check "a marker publication error cleans its unique temporary file" \
+        bash -c '! find "$1" -mindepth 1 -maxdepth 1 -name ".current.??????" -type f -print -quit | grep -q .' _ \
+            "${base}/backups/infrastructure-sjv/preparations"
+
+    base="$(local_backup_prepare prep8)"
+    local_backup_run "${base}" SJV_BACKUP_TEST_MANIFEST_VALUES=1
+    current="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    manifest="${base}/backups/infrastructure-sjv/preparations/${current}/backup-manifest.json"
+    t_check "manifest with quotes, backslashes and newlines is valid JSON" \
+        python3 -c 'import json, sys; d=json.load(open(sys.argv[1])); v=d["pgbackrest_label"]; assert v.startswith("label\"\\\n"); assert [ord(c) for c in v[8:]] == list(range(1, 32)); assert d["pgbackrest_type"] == "type\"\\\n"; assert d["dump_file"] == "dump\"\\\n"' \
+            "${manifest}"
+
+    base="$(local_backup_prepare prep9)"
+    chmod 644 "${base}/infrastructure-sjv/secrets/app-kek"
+    local_backup_run "${base}"
+    status="${base}/infrastructure-sjv/state/backup.json"
+    t_check "an app-kek with open permissions is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "app-kek-damaged" "$2"' _ "${T_RC}" "${status}"
+
+    base="$(local_backup_prepare prep10)"
+    local_backup_run "${base}"
+    first="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    local_backup_run "${base}" SJV_BACKUP_TEST_FAIL_MARKER_MV=1
+    second="$(<"${base}/backups/infrastructure-sjv/preparations/current")"
+    t_check "a real marker mv failure preserves current" test "${first}" = "${second}"
+    t_check "a real marker mv failure removes the temporary marker" \
+        bash -c '! find "$1" -mindepth 1 -maxdepth 1 -name ".current.??????" -type f -print -quit | grep -q .' _ \
+            "${base}/backups/infrastructure-sjv/preparations"
+    t_check "a real marker mv failure does not publish the new preparation" \
+        bash -c '! find "$1" -mindepth 1 -maxdepth 1 -type d -name "20*" -newer "$2" -print -quit | grep -q .' _ \
+            "${base}/backups/infrastructure-sjv/preparations" \
+            "${base}/backups/infrastructure-sjv/preparations/current"
+
+    base="$(local_backup_prepare prep11)"
+    find "${base}/backups/infrastructure-sjv/preparations" -mindepth 1 -delete
+    rmdir -- "${base}/backups/infrastructure-sjv/preparations"
+    ln -s "${base}/stub" "${base}/backups/infrastructure-sjv/preparations"
+    local_backup_run "${base}"
+    t_check "a symlinked preparations directory is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && [[ -L "$2" ]]' _ "${T_RC}" \
+            "${base}/backups/infrastructure-sjv/preparations"
+    rm -f -- "${base}/backups/infrastructure-sjv/preparations"
+    mkdir -m 700 "${base}/backups/infrastructure-sjv/preparations"
+
+    base="$(local_backup_prepare prep12)"
+    chmod 755 "${base}/backups/infrastructure-sjv/preparations"
+    local_backup_run "${base}"
+    t_check "preparations mode is tightened to 700" \
+        test "$(stat -c %a "${base}/backups/infrastructure-sjv/preparations")" = 700
+
+    for optional in acme htpasswd bouncer; do
+        base="$(local_backup_prepare "optional-${optional}")"
+        case "${optional}" in
+            acme) source="${base}/infrastructure-sjv/traefik/acme/acme.json" ;;
+            htpasswd) source="${base}/infrastructure-sjv/traefik/users/dashboard.htpasswd" ;;
+            bouncer) source="${base}/infrastructure-sjv/traefik/crowdsec/BOUNCER_KEY_sjv-traefik" ;;
+        esac
+        mkdir -p -- "${source%/*}"
+        ln -s "${base}/stacks/infrastructure-sjv/.env" "${source}"
+        local_backup_run "${base}"
+        t_check "a symlinked optional ${optional} source is rejected" \
+            bash -c '[[ "$1" -ne 0 ]] && grep -q "files-damaged" "$2"' _ "${T_RC}" \
+                "${base}/infrastructure-sjv/state/backup.json"
+    done
 }
 
 test_backup_local_guards() {
@@ -357,5 +550,6 @@ run_backup_local_tests() {
     print_header "Local backup creation"
     test_backup_local_success
     test_backup_local_failures
+    test_backup_preparations
     test_backup_local_guards
 }

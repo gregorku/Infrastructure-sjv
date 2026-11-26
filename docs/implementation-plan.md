@@ -27,7 +27,7 @@ Stav: čeká na schválení. Cílový termín zahájení ostrého sběru skuteč
 - Zafixování verzí: Python, Node a rest-server. PostgreSQL 19.0 a pgBackRest 2.60.1 jsou připnuté rozhodnutím R33. Restic zůstává 0.19.1. Ověření voleb `expire-auto` v pgBackRest 2.60.1 a `manual_ack` v paho-mqtt.
 - Hotovo, když:
   - `test.sh --static` a shellcheck projdou,
-  - deploy v režimu `local` na testovacím kontejneru spustí Traefik a CrowdSec,
+  - deploy v režimu `local` na testovacím kontejneru spustí Traefik, CrowdSec a `sjv-backup`,
   - kontroly z `checks.md` projdou.
 
 ### 2. PostgreSQL a lokální zálohy
@@ -41,7 +41,7 @@ Stav: čeká na schválení. Cílový termín zahájení ostrého sběru skuteč
 
 ### 3. Vzdálená záloha a test obnovy
 
-- Trvale běžící kontejner `sjv-backup` (`compose/30-backup.yml`), jen na `sjv-egress` a bez publikovaného portu. Plánovač běží uvnitř kontejneru. `daily` v 03:15 posílá celé `pgbackrest/`, `dumps/` a `files/`. `wal` posílá jen `pgbackrest/archive/`, běžně po `SJV_BACKUP_WAL_SECONDS` (výchozí 300 s). VPS do vzdáleného repozitáře zapisuje a čte. `rest-server` běží na domácím serveru. Služba `forget` ani `prune` nevolá.
+- Trvale běžící kontejner `sjv-backup` (`compose/30-backup.yml`), jen na `sjv-egress` a bez publikovaného portu. Plánovač běží uvnitř kontejneru. `scripts/backup.sh` nejprve atomicky zveřejní `preparations/<preparation_id>`; jediný denní Restic vlastník pak v 03:15 ověří `preparations/current` a posílá `pgbackrest/` plus konkrétní přípravu. `wal` posílá jen `pgbackrest/archive/`, běžně po `SJV_BACKUP_WAL_SECONDS` (výchozí 300 s). VPS do vzdáleného repozitáře zapisuje a čte. `rest-server` běží na domácím serveru. Služba `forget` ani `prune` nevolá.
 - Zámky: obě úlohy berou exkluzivní `restic-job.lock` bez čekání, takže dva procesy Resticu neběží zároveň. `daily` bere sdílený `backup.lock` a `repo.lock` bez čekání. `wal` `backup.lock` nebere, aby šel dál i během lokální zálohy, a bere sdílený `repo.lock` bez čekání, aby neběžel zároveň s `pgbackrest expire`.
 - Při obsazeném `restic-job.lock` nebo `repo.lock` se `wal` hned přeskočí, získané zámky uvolní a další pokus je až po `SJV_BACKUP_WAL_RETRY_SECONDS` (výchozí 60 s). Po úspěchu, prázdném archivu a chybě Resticu zůstává interval 300 s. Plánovač na zámku nečeká.
 - `restore-test.sh` ze vzdáleného zdroje (`daily` a přes něj `wal`), s měřením času.

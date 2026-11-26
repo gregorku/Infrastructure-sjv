@@ -349,7 +349,7 @@ deploy_prepares_access_log_before_compose() {
                 [[ "${stage}" -eq 1 ]] || return 1
                 stage=2
                 ;;
-            'docker_compose up -d traefik crowdsec')
+            'docker_compose up -d traefik crowdsec sjv-backup')
                 [[ "${stage}" -eq 2 ]] || return 1
                 stage=3
                 ;;
@@ -363,8 +363,8 @@ deploy_first_phase_compose_line() {
     count="$(grep -c '^docker_compose ' "${REPO_ROOT}/scripts/deploy.sh" || true)"
     [[ "${count}" -eq 1 ]] || return 1
     line="$(grep '^docker_compose ' "${REPO_ROOT}/scripts/deploy.sh" || true)"
-    [[ "${line}" == 'docker_compose up -d traefik crowdsec' ]] || return 1
-    [[ "${line}" != *--build* && "${line}" != *sjv-backup* && "${line}" != *postgresql* ]]
+    [[ "${line}" == 'docker_compose up -d traefik crowdsec sjv-backup' ]] || return 1
+    [[ "${line}" != *--build* && "${line}" != *postgresql* ]]
 }
 
 test_infra_access_log_prepare() {
@@ -373,7 +373,7 @@ test_infra_access_log_prepare() {
     docker_data_before="$(docker_data_snapshot)"
     t_check "deploy creates access.log after render-only and before compose" \
         deploy_prepares_access_log_before_compose
-    t_check "the first deploy starts only Traefik and CrowdSec" \
+    t_check "the first deploy starts Traefik, CrowdSec and sjv-backup" \
         deploy_first_phase_compose_line
     t_check "the first deploy does not pass --build" \
         bash -c '! grep -q -- "--build" "$1"' _ "${REPO_ROOT}/scripts/deploy.sh"
@@ -916,7 +916,7 @@ test_init_backup_host() {
         bash -c '! printf "%s\n" "$1" | grep -Eq "sjv-traefik|sjv-crowdsec|sjv-postgresql|supervise"' _ "${body}"
     hits="$(grep -nE '^[[:space:]]*docker[[:space:]]+run([[:space:]]|$)' "${docker_sh}" || true)"
     t_check "an unrestricted run command stays unavailable" test -z "${hits}"
-    t_check "deploy.sh still starts only Traefik and CrowdSec" deploy_first_phase_compose_line
+    t_check "deploy.sh starts the backup scheduler without PostgreSQL" deploy_first_phase_compose_line
     hits="$(grep -nE '(^|[[:space:]])(--insecure-tls|forget|prune)([[:space:]]|$)' \
         "${REPO_ROOT}/scripts/init-backup.sh" "${docker_sh}" "${REPO_ROOT}/backup/sjv-backup.sh" || true)"
     t_check "initialization does not forget, prune or disable TLS" test -z "${hits}"

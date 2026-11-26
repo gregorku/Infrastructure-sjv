@@ -35,8 +35,7 @@ services:
       RESTIC_CACHE_DIR: /tmp/restic-cache
     volumes:
       - ${BACKUP_LOCAL_DIR}/pgbackrest:/backup/pgbackrest:ro
-      - ${BACKUP_LOCAL_DIR}/dumps:/backup/dumps:ro
-      - ${BACKUP_LOCAL_DIR}/files:/backup/files:ro
+      - ${BACKUP_LOCAL_DIR}/preparations:/backup/preparations:ro
       - ${DATA_DIR}/secrets/restic-rest-server.crt:/certs/rest-server.crt:ro
       - ${DATA_DIR}/secrets/restic-key-password:/run/secrets/restic-key-password:ro
       - ${DATA_DIR}/state:/state

@@ -112,6 +112,7 @@ layout_prepare() {
     layout_prepare_postgres_mount "${BACKUP_LOCAL_DIR}/pgbackrest/archive"
     ensure_dir "${BACKUP_LOCAL_DIR}/dumps" 700
     ensure_dir "${BACKUP_LOCAL_DIR}/files" 700
+    ensure_dir "${BACKUP_LOCAL_DIR}/preparations" 700
     ensure_dir "${DATA_DIR}/backup-locks" 700
     layout_prepare_postgres_mount "${POSTGRES_DIR}"
     ensure_dir "${TRAEFIK_DIR}" 755

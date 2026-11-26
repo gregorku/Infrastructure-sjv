@@ -281,8 +281,8 @@ static_test_backup_init() {
     t_check "docker.sh does not gain a general docker run" test -z "${hits}"
     t_check "init-backup.sh calls only the fixed helper" \
         bash -c 'grep -q "^docker_compose_init_backup$" "$1" && ! grep -Eq "^[[:space:]]*docker([[:space:]]|$)" "$1"' _ "${init_sh}"
-    t_check "deploy.sh still starts only Traefik and CrowdSec" \
-        bash -c '[[ "$(grep -c "^docker_compose " "$1")" -eq 1 ]] && grep -qx "docker_compose up -d traefik crowdsec" "$1"' _ "${deploy_sh}"
+    t_check "deploy.sh starts backup without PostgreSQL" \
+        bash -c '[[ "$(grep -c "^docker_compose " "$1")" -eq 1 ]] && grep -qx "docker_compose up -d traefik crowdsec sjv-backup" "$1"' _ "${deploy_sh}"
     hits="$(grep -nE '(^|[[:space:]])(forget|prune|--insecure-tls)([[:space:]]|$)' "${init_sh}" "${docker_sh}" || true)"
     t_check "initialization does not forget, prune or disable TLS" test -z "${hits}"
 }

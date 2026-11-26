@@ -13,18 +13,151 @@ backup_compose() {
 backup_prepare_tree() {
     local root="$1" secret="fixture-restic-key-not-logged"
     mkdir -p "${root}/bin" "${root}/locks" "${root}/state" "${root}/backup/pgbackrest/archive" \
-        "${root}/backup/dumps" "${root}/backup/files" "${root}/certs" "${root}/run"
+        "${root}/backup/preparations/fixture-preparation/dumps" \
+        "${root}/backup/preparations/fixture-preparation/files" "${root}/certs" "${root}/run"
+    chmod 700 "${root}/state"
     printf '%s\n' "${secret}" > "${root}/key"
     chmod 600 "${root}/key"
     printf '%s\n' "fixture-certificate" > "${root}/certs/rest-server.crt"
     chmod 644 "${root}/certs/rest-server.crt"
+    printf '%s\n' "PGDMPfixture-dump" \
+        > "${root}/backup/preparations/fixture-preparation/dumps/sjv-20261126T120000Z.dump"
+    printf '%s\n' "PG_DB=sjv" > "${root}/backup/preparations/fixture-preparation/files/runtime.env"
+    chmod 600 \
+        "${root}/backup/preparations/fixture-preparation/dumps/sjv-20261126T120000Z.dump" \
+        "${root}/backup/preparations/fixture-preparation/files/runtime.env"
+    printf '%s\n' "fixture-preparation" \
+        > "${root}/backup/preparations/current"
+    chmod 600 "${root}/backup/preparations/current"
+    cat > "${root}/backup/preparations/fixture-preparation/backup-manifest.json" <<'EOF'
+{"schema":1,"preparation_id":"fixture-preparation","created_at":"2026-11-26T12:00:00Z","status":"ready","pgbackrest":"ok","pgbackrest_label":"20261126-120000F","pgbackrest_type":"full","wal_archive":"ok","pg_dump":"ok","runtime_config":"ok","app_kek":"not_required","dump_file":"sjv-20261126T120000Z.dump"}
+EOF
+    chmod 600 "${root}/backup/preparations/fixture-preparation/backup-manifest.json"
+    cat > "${root}/bin/jq-stub" <<'EOF'
+#!/usr/bin/env python3
+import json
+import sys
+
+args = sys.argv[1:]
+if "-s" in args:
+    path = args[-1]
+    values = [json.loads(line) for line in open(path) if line.strip()]
+    paths = {(item.get("path") or "") for item in values}
+    def arg(name):
+        return args[args.index(name) + 2]
+    root = arg("--arg") if "--arg" in args else ""
+    dump = args[args.index("--arg") + 3] if "--arg" in args else ""
+    # The production jq expression passes named pairs in this order:
+    # root, dump, app_kek, acme, htpasswd, bouncer.
+    pairs = {}
+    for index, item in enumerate(args):
+        if item == "--arg" and index + 2 < len(args):
+            pairs[args[index + 1]] = args[index + 2]
+    root = pairs.get("root", root)
+    dump = pairs.get("dump", dump)
+    required = {
+        root + "/backup-manifest.json",
+        root + "/dumps/" + dump,
+        root + "/files/runtime.env",
+    }
+    if pairs.get("app_kek") == "copied":
+        required.add(root + "/files/app-kek")
+    if pairs.get("acme") == "copied":
+        required.add(root + "/files/acme.json")
+    if pairs.get("htpasswd") == "copied":
+        required.add(root + "/files/dashboard.htpasswd")
+    if pairs.get("bouncer") == "copied":
+        required.add(root + "/files/crowdsec-bouncer-key")
+    if required <= paths:
+        sys.exit(0)
+    sys.exit(1)
+path = args[-1]
+if args and args[0] == "length":
+    print(len(json.load(open(path))))
+    sys.exit(0)
+if ".dump_file" in args:
+    print(json.load(open(path))["dump_file"])
+    sys.exit(0)
+if args and args[0] == "-r" and len(args) > 1 and args[1].split()[0] in (
+        ".acme", ".dashboard_htpasswd", ".crowdsec_bouncer_key"):
+    key = args[1].split()[0].lstrip(".")
+    value = json.load(open(path)).get(key)
+    print(value if value is not None else "absent")
+    sys.exit(0)
+if ".[0].id" in args:
+    print(json.load(open(path))[0]["id"])
+    sys.exit(0)
+if "--arg" in args:
+    value = json.load(open(path))
+    expected = args[args.index("--arg") + 2]
+    sys.exit(0 if value.get("schema") == 1
+              and value.get("preparation_id") == expected
+              and value.get("status") == "ready"
+              and value.get("pgbackrest") == "ok"
+              and value.get("pg_dump") == "ok"
+              and value.get("runtime_config") == "ok"
+              and value.get("wal_archive") == "ok"
+              and value.get("app_kek") in ("copied", "not_required")
+              and value.get("acme", "absent") in ("copied", "absent")
+              and value.get("dashboard_htpasswd", "absent") in ("copied", "absent")
+              and value.get("crowdsec_bouncer_key", "absent") in ("copied", "absent")
+              and isinstance(value.get("dump_file"), str) else 1)
+sys.exit(1)
+EOF
+    chmod 755 "${root}/bin/jq-stub"
     cat > "${root}/bin/restic-stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${STUB_LOG}"
+daily_backup=0
+backup_rc=0
 if [[ "${1:-}" == forget || "${1:-}" == prune ]]; then
     printf '%s\n' "forbidden-subcommand" >> "${STUB_LOG}"
     exit 99
+fi
+if [[ "$*" == *" backup "* && "$*" == *"sjv-daily-prep-"* ]]; then
+    daily_backup=1
+    backup_rc="${STUB_BACKUP_RC:-0}"
+fi
+if [[ "$*" == *" snapshots --json "* ]]; then
+    if [[ "${STUB_SNAPSHOTS_RC:-0}" -ne 0 ]]; then
+        exit "${STUB_SNAPSHOTS_RC}"
+    fi
+    if [[ -f "${STUB_DAILY_SNAPSHOT}" ]]; then
+        if [[ "${STUB_SNAPSHOTS_MULTI:-0}" -eq 1 ]]; then
+            printf '%s\n' '[{"id":"fixture-daily-snapshot-id"},{"id":"fixture-duplicate-snapshot-id"}]'
+            exit 0
+        fi
+        printf '%s\n' '[{"id":"fixture-daily-snapshot-id","paths":["/backup/pgbackrest","/backup/preparations/fixture-preparation"]}]'
+    else
+        printf '%s\n' '[]'
+    fi
+    exit 0
+fi
+if [[ "$*" == *" ls --json "* ]]; then
+    if [[ "${STUB_LS_RC:-0}" -ne 0 ]]; then
+        exit "${STUB_LS_RC}"
+    fi
+    if [[ "${STUB_LS_MISSING_MANIFEST:-0}" -eq 1 ]]; then
+        printf '%s\n' '{"path":"/backup/pgbackrest/backup-manifest.json"}'
+    else
+        printf '%s\n' '{"path":"/backup/preparations/fixture-preparation/backup-manifest.json"}'
+    fi
+    [[ "${STUB_LS_MISSING_DUMP:-0}" -eq 1 ]] ||
+        printf '%s\n' '{"path":"/backup/preparations/fixture-preparation/dumps/sjv-20261126T120000Z.dump"}'
+    [[ "${STUB_LS_MISSING_RUNTIME:-0}" -eq 1 ]] ||
+        printf '%s\n' '{"path":"/backup/preparations/fixture-preparation/files/runtime.env"}'
+    if [[ -n "${STUB_LS_COPIED_FILES:-}" ]]; then
+        [[ "${STUB_LS_MISSING_PATH:-}" == acme ]] ||
+            printf '%s\n' '{"path":"/backup/preparations/fixture-preparation/files/acme.json"}'
+        [[ "${STUB_LS_MISSING_PATH:-}" == htpasswd ]] ||
+            printf '%s\n' '{"path":"/backup/preparations/fixture-preparation/files/dashboard.htpasswd"}'
+        [[ "${STUB_LS_MISSING_PATH:-}" == bouncer ]] ||
+            printf '%s\n' '{"path":"/backup/preparations/fixture-preparation/files/crowdsec-bouncer-key"}'
+        [[ "${STUB_LS_MISSING_PATH:-}" == app-kek ]] ||
+            printf '%s\n' '{"path":"/backup/preparations/fixture-preparation/files/app-kek"}'
+    fi
+    exit 0
 fi
 if [[ "${RESTIC_REPOSITORY:-}" == *@* ]]; then
     printf '%s\n' "repository-url-still-has-user" >> "${STUB_LOG}"
@@ -46,7 +179,16 @@ if [[ -n "${STUB_OVERLAP_DIR:-}" ]]; then
     trap 'rmdir "${STUB_OVERLAP_DIR}" 2>/dev/null || true' EXIT
 fi
 sleep "${STUB_SLEEP:-0}"
-exit "${STUB_EXIT:-0}"
+if [[ "${daily_backup}" -eq 1 && "${backup_rc}" -ne 0 ]]; then
+    exit "${backup_rc}"
+fi
+if [[ "${STUB_EXIT:-0}" -ne 0 ]]; then
+    exit "${STUB_EXIT}"
+fi
+if [[ "${daily_backup}" -eq 1 ]]; then
+    : > "${STUB_DAILY_SNAPSHOT}"
+fi
+exit 0
 EOF
     chmod 755 "${root}/bin/restic-stub"
 }
@@ -263,11 +405,13 @@ backup_env() {
         "SJV_BACKUP_HEARTBEAT=${root}/run/heartbeat"
         "SJV_BACKUP_CACERT=${root}/certs/rest-server.crt"
         "SJV_BACKUP_RESTIC=${root}/bin/restic-stub"
+        "SJV_BACKUP_JQ=${root}/bin/jq-stub"
         "SJV_BACKUP_LOCK_WAIT=1"
         "RESTIC_PASSWORD_FILE=${root}/key"
         "RESTIC_REPOSITORY=rest:https://infrastructure-sjv@10.100.101.12:8000/infrastructure-sjv/"
         "RESTIC_REST_PASSWORD=fixture-rest-password-0123"
         "STUB_LOG=${root}/stub.log"
+        "STUB_DAILY_SNAPSHOT=${root}/daily-snapshot"
         "STUB_EXIT=${2:-0}"
         "STUB_SLEEP=${3:-0}"
     )
@@ -286,8 +430,8 @@ test_backup_compose() {
     t_check "the service publishes no port" bash -c '! grep -q "ports:" "$1"' _ "${compose}"
     t_check "the service drops new privileges" grep -q 'no-new-privileges:true' "${compose}"
     t_check "the TLS certificate is mounted read-only" grep -q '/certs/rest-server.crt:ro' "${compose}"
-    t_check "pgBackRest, dumps and files are mounted read-only" \
-        bash -c 'grep -q "/backup/pgbackrest:ro" "$1" && grep -q "/backup/dumps:ro" "$1" && grep -q "/backup/files:ro" "$1"' _ "${compose}"
+    t_check "pgBackRest and preparations are mounted read-only" \
+        bash -c 'grep -q "/backup/pgbackrest:ro" "$1" && grep -q "/backup/preparations:ro" "$1" && ! grep -qE "/backup/(dumps|files):ro" "$1"' _ "${compose}"
     t_check "the repository key uses RESTIC_PASSWORD_FILE" grep -q 'RESTIC_PASSWORD_FILE:' "${compose}"
     t_check "Restic is pinned to 0.19.1" grep -q 'infrastructure-sjv/sjv-backup:0.19.1' "${compose}"
     t_check "the scheduler script parses" bash -n "${script}"
@@ -479,6 +623,364 @@ test_backup_run() {
     printf '%s\n' 1 > "${root}/run/heartbeat"
     t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" health
     t_check "a stale heartbeat is unhealthy" test "${T_RC}" -ne 0
+}
+
+test_backup_daily_preparation() {
+    print_section "Daily preparation integration"
+    local root current state first_count second_count
+    root="${T_RUN_DIR}/daily-preparation"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    state="${root}/state/sjv-backup-daily.json"
+    t_check "a valid current preparation creates one daily snapshot" \
+        bash -c '[[ "$1" == 0 ]] && grep -q "\"status\":\"ok\"" "$2" && grep -q "fixture-daily-snapshot-id" "$2"' _ \
+            "${T_RC}" "${state}"
+    t_check "the daily snapshot carries the preparation tag" \
+        grep -q -- "--tag sjv-daily-prep-fixture-preparation" "${root}/stub.log"
+    t_check "the verified daily state is the last restorable backup" \
+        grep -q '"status":"ok".*"fixture-daily-snapshot-id"' "${root}/state/sjv-backup-last-restorable.json"
+    t_check "daily state files are private" \
+        bash -c 'for file in "$1"/sjv-backup-daily.json "$1"/sjv-backup-last-attempt.json "$1"/sjv-backup-last-restorable.json "$1"/sjv-backup-daily.failures; do [[ "$(stat -c %a "$file")" == 600 ]] || exit 1; done' _ \
+            "${root}/state"
+    t_check "daily state has no fixed temporary files" \
+        bash -c '! compgen -G "$1/.sjv-backup-*" >/dev/null' _ "${root}/state"
+    first_count="$(grep -c -- "backup --exclude .*sjv-daily-prep-fixture-preparation" "${root}/stub.log" || true)"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    second_count="$(grep -c -- "backup --exclude .*sjv-daily-prep-fixture-preparation" "${root}/stub.log" || true)"
+    t_check "repeating the same preparation does not create a second snapshot" \
+        bash -c '[[ "$1" == 0 && "$2" == "$3" && "$2" == 1 ]]' _ "${T_RC}" "${second_count}" "${first_count}"
+    cp -- "${root}/state/sjv-backup-daily.json" "${root}/daily-before-wal"
+    printf '%s\n' "segment" > "${root}/backup/pgbackrest/archive/000000010000000000000001"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run wal
+    t_check "WAL does not change the daily state" cmp -s \
+        "${root}/daily-before-wal" "${root}/state/sjv-backup-daily.json"
+
+    root="${T_RUN_DIR}/daily-invalid"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    rm -f "${root}/backup/preparations/current"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "missing current skips daily without Restic" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "skipped-invalid-preparation" "$2" && [[ ! -e "$3" ]]' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.json" "${root}/stub.log"
+
+    root="${T_RUN_DIR}/daily-symlink"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    rm -f "${root}/backup/preparations/current"
+    ln -s "${root}/backup/preparations/fixture-preparation" "${root}/backup/preparations/current"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "symlink current skips daily" \
+        grep -q "skipped-invalid-preparation" "${root}/state/sjv-backup-daily.json"
+
+    root="${T_RUN_DIR}/daily-path"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    printf '%s\n' "../outside" > "${root}/backup/preparations/current"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "path traversal in current skips daily" \
+        grep -q "skipped-invalid-preparation" "${root}/state/sjv-backup-daily.json"
+
+    for invalid_id in "." ".." "a\\b"; do
+        root="${T_RUN_DIR}/daily-invalid-${invalid_id//[^A-Za-z0-9]/x}"
+        backup_prepare_tree "${root}"
+        backup_env "${root}" 0 0
+        printf '%s\n' "${invalid_id}" > "${root}/backup/preparations/current"
+        t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+        t_check "preparation ID ${invalid_id} is rejected" \
+            grep -q "skipped-invalid-preparation" "${root}/state/sjv-backup-daily.json"
+    done
+
+    root="${T_RUN_DIR}/daily-manifest"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    printf '%s\n' '{"schema":1' > "${root}/backup/preparations/fixture-preparation/backup-manifest.json"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "invalid JSON skips daily" \
+        grep -q "skipped-invalid-preparation" "${root}/state/sjv-backup-daily.json"
+    printf '%s\n' '{"schema":1,"preparation_id":"other","status":"ready","pgbackrest":"ok","pg_dump":"ok","runtime_config":"ok","wal_archive":"ok","app_kek":"not_required","dump_file":"sjv-20261126T120000Z.dump"}' \
+        > "${root}/backup/preparations/fixture-preparation/backup-manifest.json"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "manifest ID mismatch skips daily" \
+        grep -q "skipped-invalid-preparation" "${root}/state/sjv-backup-daily.json"
+    printf '%s\n' '{"schema":1,"preparation_id":"fixture-preparation","created_at":"2026-11-26T12:00:00Z","status":"incomplete","pgbackrest":"ok","pg_dump":"ok","runtime_config":"ok","wal_archive":"ok","app_kek":"not_required","dump_file":"sjv-20261126T120000Z.dump"}' \
+        > "${root}/backup/preparations/fixture-preparation/backup-manifest.json"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "an incomplete manifest skips daily" \
+        grep -q "skipped-invalid-preparation" "${root}/state/sjv-backup-daily.json"
+    printf '%s\n' '{"schema":1,"preparation_id":"fixture-preparation","created_at":"2026-11-26T12:00:00Z","status":"failed","pgbackrest":"ok","pg_dump":"ok","runtime_config":"ok","wal_archive":"ok","app_kek":"not_required","dump_file":"sjv-20261126T120000Z.dump"}' \
+        > "${root}/backup/preparations/fixture-preparation/backup-manifest.json"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "a failed manifest skips daily" \
+        grep -q "skipped-invalid-preparation" "${root}/state/sjv-backup-daily.json"
+    printf '%s\n' '{"schema":1,"preparation_id":"fixture-preparation","created_at":"2026-11-26T12:00:00Z","status":"ready","pgbackrest":"ok","pg_dump":"ok","runtime_config":"ok","wal_archive":"ok","app_kek":"not_required","dump_file":"sjv-20261126T120000Z.dump"}' \
+        > "${root}/backup/preparations/fixture-preparation/backup-manifest.json"
+    rm -f "${root}/backup/preparations/fixture-preparation/dumps/sjv-20261126T120000Z.dump"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "a missing dump skips daily" \
+        grep -q "skipped-invalid-preparation" "${root}/state/sjv-backup-daily.json"
+    printf '%s\n' '{"schema":1,"preparation_id":"fixture-preparation","created_at":"2026-11-26T12:00:00Z","status":"ready","pgbackrest":"ok","pg_dump":"ok","runtime_config":"ok","wal_archive":"ok","app_kek":"missing","dump_file":"sjv-20261126T120000Z.dump"}' \
+        > "${root}/backup/preparations/fixture-preparation/backup-manifest.json"
+    printf '%s\n' "PGDMPfixture-dump" \
+        > "${root}/backup/preparations/fixture-preparation/dumps/sjv-20261126T120000Z.dump"
+    chmod 600 "${root}/backup/preparations/fixture-preparation/dumps/sjv-20261126T120000Z.dump"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "missing app-kek state is not accepted as complete" \
+        grep -q "skipped-invalid-preparation" "${root}/state/sjv-backup-daily.json"
+}
+
+test_backup_daily_restic_errors() {
+    print_section "Daily Restic error handling"
+    local root saved
+
+    root="${T_RUN_DIR}/daily-snapshots-error"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    t_run env "${BACKUP_ENV[@]}" STUB_SNAPSHOTS_RC=11 \
+        bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "snapshots error returns failure without backup" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "\"status\":\"failed\"" "$2" && ! grep -q " backup " "$3"' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.json" "${root}/stub.log"
+
+    root="${T_RUN_DIR}/daily-snapshots-multi"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    : > "${root}/daily-snapshot"
+    t_run env "${BACKUP_ENV[@]}" STUB_SNAPSHOTS_MULTI=1 \
+        bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "duplicate preparation tags fail closed" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "\"status\":\"failed\"" "$2" && ! grep -q " backup " "$3"' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.json" "${root}/stub.log"
+
+    root="${T_RUN_DIR}/daily-backup-error"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    t_run env "${BACKUP_ENV[@]}" STUB_BACKUP_RC=12 \
+        bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "backup error is recorded with its return code" \
+        bash -c '[[ "$1" -eq 12 ]] && grep -q "\"status\":\"failed\"" "$2" && grep -q "\"exit_code\":12" "$2"' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.json"
+    t_check "failed backup does not create a snapshot marker" \
+        test ! -e "${root}/daily-snapshot"
+    rm -f "${root}/daily-snapshot"
+    t_run env STUB_LOG="${root}/stub.log" STUB_DAILY_SNAPSHOT="${root}/daily-snapshot" \
+        STUB_BACKUP_RC=0 STUB_EXIT=12 \
+        "${root}/bin/restic-stub" --cacert "${root}/certs/rest-server.crt" \
+        backup --tag daily --tag sjv-daily-prep-fixture-preparation
+    t_check "stub exit failure does not create a snapshot marker" \
+        bash -c '[[ "$1" -ne 0 ]] && [[ ! -e "$2" ]]' _ \
+            "${T_RC}" "${root}/daily-snapshot"
+
+    root="${T_RUN_DIR}/daily-ls-error"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    : > "${root}/daily-snapshot"
+    t_run env "${BACKUP_ENV[@]}" STUB_LS_RC=13 \
+        bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "ls error is recorded as failed" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "\"status\":\"failed\"" "$2"' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.json"
+
+    root="${T_RUN_DIR}/daily-missing-manifest"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    : > "${root}/daily-snapshot"
+    t_run env "${BACKUP_ENV[@]}" STUB_LS_MISSING_MANIFEST=1 \
+        bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "a snapshot without the preparation manifest is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "\"status\":\"failed\"" "$2"' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.json"
+
+    root="${T_RUN_DIR}/daily-missing-runtime"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    : > "${root}/daily-snapshot"
+    t_run env "${BACKUP_ENV[@]}" STUB_LS_MISSING_RUNTIME=1 \
+        bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "a snapshot without runtime.env is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "\"status\":\"failed\"" "$2"' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.json"
+
+    root="${T_RUN_DIR}/daily-missing-dump-in-snapshot"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    : > "${root}/daily-snapshot"
+    t_run env "${BACKUP_ENV[@]}" STUB_LS_MISSING_DUMP=1 \
+        bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "a snapshot missing the declared dump is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "\"status\":\"failed\"" "$2"' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.json"
+
+    root="${T_RUN_DIR}/daily-copied-recovery-files"
+    backup_prepare_tree "${root}"
+    printf '%s\n' "PGDMPfixture-dump" \
+        > "${root}/backup/preparations/fixture-preparation/dumps/sjv-20261126T120000Z.dump"
+    dd if=/dev/zero of="${root}/backup/preparations/fixture-preparation/files/app-kek" \
+        bs=32 count=1 status=none
+    printf '%s\n' acme > "${root}/backup/preparations/fixture-preparation/files/acme.json"
+    printf '%s\n' htpasswd > "${root}/backup/preparations/fixture-preparation/files/dashboard.htpasswd"
+    printf '%s\n' bouncer > "${root}/backup/preparations/fixture-preparation/files/crowdsec-bouncer-key"
+    chmod 600 \
+        "${root}/backup/preparations/fixture-preparation/files/app-kek" \
+        "${root}/backup/preparations/fixture-preparation/files/acme.json" \
+        "${root}/backup/preparations/fixture-preparation/files/dashboard.htpasswd" \
+        "${root}/backup/preparations/fixture-preparation/files/crowdsec-bouncer-key"
+    printf '%s\n' '{"schema":1,"preparation_id":"fixture-preparation","status":"ready","pgbackrest":"ok","pg_dump":"ok","runtime_config":"ok","wal_archive":"ok","app_kek":"copied","acme":"copied","dashboard_htpasswd":"copied","crowdsec_bouncer_key":"copied","dump_file":"sjv-20261126T120000Z.dump"}' \
+        > "${root}/backup/preparations/fixture-preparation/backup-manifest.json"
+    chmod 600 "${root}/backup/preparations/fixture-preparation/backup-manifest.json"
+    backup_env "${root}" 0 0
+    t_run env "${BACKUP_ENV[@]}" STUB_LS_COPIED_FILES=1 \
+        bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "a snapshot with all copied recovery files is verified" \
+        bash -c '[[ "$1" -eq 0 ]] && grep -q "\"status\":\"ok\"" "$2" && grep -q "\"status\":\"ok\"" "$3"' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.json" \
+            "${root}/state/sjv-backup-last-restorable.json"
+    : > "${root}/daily-snapshot"
+    t_run env "${BACKUP_ENV[@]}" STUB_LS_COPIED_FILES=1 STUB_LS_MISSING_PATH=acme \
+        bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "a snapshot missing a copied recovery file is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "\"status\":\"failed\"" "$2"' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.json"
+
+    root="${T_RUN_DIR}/daily-last-restorable"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    saved="$(cat "${root}/state/sjv-backup-last-restorable.json")"
+    t_run env "${BACKUP_ENV[@]}" STUB_LS_RC=13 \
+        bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "failed verification preserves last-restorable" \
+        bash -c '[[ "$1" -ne 0 ]] && cmp -s "$2" "$3"' _ \
+            "${T_RC}" "${root}/state/sjv-backup-last-restorable.json" <(printf '%s\n' "${saved}")
+}
+
+test_backup_state_guards() {
+    print_section "Backup state file guards"
+    local root target saved count_before count_after
+
+    root="${T_RUN_DIR}/state-json-symlink"
+    backup_prepare_tree "${root}"
+    printf '%s\n' sentinel > "${root}/state/target"
+    ln -s target "${root}/state/sjv-backup-wal.json"
+    backup_env "${root}" 0 0
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run wal
+    t_check "a symlinked JSON state target is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && [[ -L "$2" ]] && [[ "$(cat "$3")" == sentinel ]]' _ \
+            "${T_RC}" "${root}/state/sjv-backup-wal.json" "${root}/state/target"
+    t_check "JSON state rejection leaves no temporary file" \
+        bash -c '! compgen -G "$1/.sjv-backup-wal.json.*" >/dev/null' _ "${root}/state"
+
+    root="${T_RUN_DIR}/state-failures-symlink"
+    backup_prepare_tree "${root}"
+    rm -f "${root}/backup/preparations/current"
+    printf '%s\n' sentinel > "${root}/state/target"
+    ln -s target "${root}/state/sjv-backup-daily.failures"
+    backup_env "${root}" 0 0
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    t_check "a symlinked daily failure counter is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && [[ -L "$2" ]] && [[ "$(cat "$3")" == sentinel ]]' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.failures" "${root}/state/target"
+
+    root="${T_RUN_DIR}/state-directory-symlink"
+    backup_prepare_tree "${root}"
+    target="${root}/outside-state"
+    mkdir -m 700 "${target}"
+    rmdir "${root}/state"
+    ln -s "${target}" "${root}/state"
+    backup_env "${root}" 0 0
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run wal
+    t_check "a symlinked state directory is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && [[ -L "$2" ]] && [[ -z "$(find "$3" -mindepth 1 -print -quit)" ]]' _ \
+            "${T_RC}" "${root}/state" "${target}"
+
+    root="${T_RUN_DIR}/state-directory-mode"
+    backup_prepare_tree "${root}"
+    chmod 755 "${root}/state"
+    backup_env "${root}" 0 0
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run wal
+    t_check "a state directory with unsafe mode is rejected" \
+        bash -c '[[ "$1" -ne 0 ]] && [[ "$(stat -c %a "$2")" == 755 ]]' _ \
+            "${T_RC}" "${root}/state"
+
+    root="${T_RUN_DIR}/state-directory-owner"
+    backup_prepare_tree "${root}"
+    if chown 65534:65534 "${root}/state" 2>/dev/null; then
+        backup_env "${root}" 0 0
+        t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run wal
+        t_check "a state directory with unsafe owner is rejected" \
+            test "${T_RC}" -ne 0
+    else
+        t_skip "state directory owner guard needs chown permission"
+    fi
+
+    root="${T_RUN_DIR}/last-restorable-write"
+    backup_prepare_tree "${root}"
+    backup_env "${root}" 0 0
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    saved="$(cat "${root}/state/sjv-backup-last-restorable.json")"
+    count_before="$(grep -c -- " backup --exclude .*sjv-daily-prep-fixture-preparation" "${root}/stub.log" || true)"
+    printf '%s\n' "${saved}" > "${root}/state/last-restorable-target"
+    rm -f "${root}/state/sjv-backup-last-restorable.json"
+    ln -s last-restorable-target "${root}/state/sjv-backup-last-restorable.json"
+    t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+    count_after="$(grep -c -- " backup --exclude .*sjv-daily-prep-fixture-preparation" "${root}/stub.log" || true)"
+    t_check "last-restorable write failure is not reported as daily success" \
+        bash -c '[[ "$1" -ne 0 ]] && grep -q "\"status\":\"failed-evidence\"" "$2"' _ \
+            "${T_RC}" "${root}/state/sjv-backup-daily.json"
+    t_check "last-restorable remains unchanged after write failure" \
+        bash -c '[[ -L "$1" ]] && cmp -s "$2" "$3"' _ \
+            "${root}/state/sjv-backup-last-restorable.json" \
+            "${root}/state/last-restorable-target" <(printf '%s\n' "${saved}")
+    t_check "evidence failure does not create another snapshot" \
+        test "${count_after}" = "${count_before}"
+    t_check "last-restorable failure leaves no temporary file" \
+        bash -c '! compgen -G "$1/.sjv-backup-last-restorable.json.*" >/dev/null' _ "${root}/state"
+}
+
+test_backup_daily_lock_skips() {
+    print_section "Daily lock skip evidence"
+    local lock_name lock_path expected root holder saved count_before count_after
+    for lock_name in restic-job backup repo; do
+        root="${T_RUN_DIR}/daily-lock-${lock_name}"
+        backup_prepare_tree "${root}"
+        backup_env "${root}" 0 0
+        t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+        saved="$(cat "${root}/state/sjv-backup-last-restorable.json")"
+        count_before="$(grep -c -- " backup --exclude .*sjv-daily-prep-fixture-preparation" "${root}/stub.log" || true)"
+        case "${lock_name}" in
+            restic-job)
+                lock_path="${root}/locks/restic-job.lock"
+                expected="skipped-locked"
+                ;;
+            backup)
+                lock_path="${root}/locks/backup.lock"
+                expected="skipped-backup-lock"
+                ;;
+            repo)
+                lock_path="${root}/locks/repo.lock"
+                expected="skipped-repo-lock"
+                ;;
+        esac
+        backup_hold_exclusive "${lock_path}"
+        holder="${BACKUP_HOLDER}"
+        backup_env "${root}" 0 0
+        t_run env "${BACKUP_ENV[@]}" bash "${REPO_ROOT}/backup/sjv-backup.sh" run daily
+        count_after="$(grep -c -- " backup --exclude .*sjv-daily-prep-fixture-preparation" "${root}/stub.log" || true)"
+        t_check "${lock_name} skip returns 75" test "${T_RC}" -eq 75
+        t_check "${lock_name} skip records the lock-specific state and times" \
+            bash -c 'grep -q "\"status\":\"$1\"" "$2" && grep -Eq "\"started_at\":\"[^\"]+\".*\"finished_at\":\"[^\"]+\"" "$2"' _ \
+                "${expected}" "${root}/state/sjv-backup-daily.json"
+        t_check "${lock_name} skip is recorded as the last attempt" \
+            grep -q "\"status\":\"${expected}\"" "${root}/state/sjv-backup-last-attempt.json"
+        t_check "${lock_name} skip starts no new Restic backup" \
+            test "${count_after}" = "${count_before}"
+        t_check "${lock_name} skip preserves last-restorable" \
+            bash -c 'cmp -s "$1" "$2"' _ \
+                "${root}/state/sjv-backup-last-restorable.json" \
+                <(printf '%s\n' "${saved}")
+        backup_stop_group "${holder}"
+    done
 }
 
 test_backup_locks() {
@@ -1282,6 +1784,10 @@ run_backup_tests() {
     print_header "Remote backup"
     test_backup_compose
     test_backup_run
+    test_backup_daily_preparation
+    test_backup_daily_restic_errors
+    test_backup_state_guards
+    test_backup_daily_lock_skips
     test_backup_locks
     test_backup_wal_schedule
     test_backup_init

@@ -5,10 +5,13 @@
 
 DUMPS_DIR="${BACKUP_LOCAL_DIR}/dumps"
 FILES_DIR="${BACKUP_LOCAL_DIR}/files"
+PREPARATIONS_DIR="${BACKUP_LOCAL_DIR}/preparations"
+CURRENT_PREPARATION_FILE="${PREPARATIONS_DIR}/current"
 LOCK_FILE="${DATA_DIR}/backup-locks/backup.lock"
 STATUS_FILE="${STATE_DIR}/backup.json"
 LAST_SUCCESS_FILE="${STATE_DIR}/backup-last-success.json"
 LAST_RESTIC_FILE="${STATE_DIR}/backup-last-restic.json"
+LAST_PREPARATION_FILE="${STATE_DIR}/backup-last-preparation.json"
 
 BACKUP_FINALIZED=0
 BACKUP_RESULT="failed"
@@ -22,6 +25,9 @@ BACKUP_DUMP="not_run"
 BACKUP_DUMP_FILE=""
 BACKUP_FILES="not_run"
 BACKUP_KEK="not_run"
+BACKUP_ACME="absent"
+BACKUP_HTPASSWD="absent"
+BACKUP_BOUNCER="absent"
 BACKUP_RESTIC="not_run"
 BACKUP_ERROR=""
 LAST_SUCCESS_AT=""
@@ -31,6 +37,11 @@ INFO_FILE=""
 PGBR_ERR=""
 INCOMPLETE=0
 METER_STATE=""
+PREPARATION_ID=""
+PREPARATION_TMP_DIR=""
+PREPARATION_DIR=""
+PREPARATION_MANIFEST=""
+PREPARATION_PUBLISHED=0
 
 backup_timestamp() {
     date -u +%Y-%m-%dT%H:%M:%SZ
@@ -86,6 +97,152 @@ backup_write_json() {
     chmod 600 "${path}"
 }
 
+backup_manifest_status() {
+    case "$1" in
+        ready|incomplete|failed) printf '%s\n' "$1" ;;
+        *) printf '%s\n' "failed" ;;
+    esac
+}
+
+json_escape() {
+    local value="$1" char hex i
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    for ((i = 1; i <= 31; i++)); do
+        printf -v hex '%02x' "${i}"
+        printf -v char '%b' "\\x${hex}"
+        value="${value//${char}/\\u00${hex}}"
+    done
+    printf '%s' "${value}"
+}
+
+backup_create_preparation() {
+    local stamp suffix
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    suffix="${BASHPID}-${RANDOM}"
+    PREPARATION_ID="${stamp}-${suffix}"
+    PREPARATION_TMP_DIR="${PREPARATIONS_DIR}/.${PREPARATION_ID}.tmp"
+    PREPARATION_DIR="${PREPARATIONS_DIR}/${PREPARATION_ID}"
+    PREPARATION_MANIFEST="${PREPARATION_TMP_DIR}/backup-manifest.json"
+    mkdir -m 700 "${PREPARATION_TMP_DIR}"
+    mkdir -m 700 "${PREPARATION_TMP_DIR}/dumps" "${PREPARATION_TMP_DIR}/files"
+    DUMPS_DIR="${PREPARATION_TMP_DIR}/dumps"
+    FILES_DIR="${PREPARATION_TMP_DIR}/files"
+}
+
+backup_write_manifest() {
+    local state="$1" path="$2" tmp
+    local preparation_id created_at pgbr label btype wal dump files kek dump_file
+    local acme htpasswd bouncer
+    state="$(backup_manifest_status "${state}")"
+    preparation_id="$(json_escape "${PREPARATION_ID}")"
+    created_at="$(json_escape "${BACKUP_FINISHED_AT:-$(backup_timestamp)}")"
+    state="$(json_escape "${state}")"
+    pgbr="$(json_escape "$(backup_allow_simple "${BACKUP_PGBR}")")"
+    label="$(json_escape "${BACKUP_LABEL}")"
+    btype="$(json_escape "${BACKUP_TYPE}")"
+    wal="$(json_escape "$(backup_allow_simple "${BACKUP_WAL}")")"
+    dump="$(json_escape "$(backup_allow_simple "${BACKUP_DUMP}")")"
+    files="$(json_escape "$(backup_allow_simple "${BACKUP_FILES}")")"
+    kek="$(json_escape "$(backup_allow_simple "${BACKUP_KEK}")")"
+    dump_file="$(json_escape "${BACKUP_DUMP_FILE}")"
+    acme="$(json_escape "$(backup_allow_simple "${BACKUP_ACME}")")"
+    htpasswd="$(json_escape "$(backup_allow_simple "${BACKUP_HTPASSWD}")")"
+    bouncer="$(json_escape "$(backup_allow_simple "${BACKUP_BOUNCER}")")"
+    tmp="${path}.tmp"
+    printf '{"schema":1,"preparation_id":"%s","created_at":"%s","status":"%s","pgbackrest":"%s","pgbackrest_label":"%s","pgbackrest_type":"%s","wal_archive":"%s","pg_dump":"%s","runtime_config":"%s","app_kek":"%s","acme":"%s","dashboard_htpasswd":"%s","crowdsec_bouncer_key":"%s","dump_file":"%s"}\n' \
+        "${preparation_id}" "${created_at}" "${state}" "${pgbr}" "${label}" \
+        "${btype}" "${wal}" "${dump}" "${files}" "${kek}" "${acme}" \
+        "${htpasswd}" "${bouncer}" "${dump_file}" > "${tmp}"
+    chmod 600 "${tmp}"
+    mv -f -- "${tmp}" "${path}"
+}
+
+backup_publish_preparation() {
+    local marker_tmp=""
+    [[ -n "${PREPARATION_TMP_DIR}" && -d "${PREPARATION_TMP_DIR}" ]] \
+        || fail "Preparation directory is missing."
+    [[ ! -L "${CURRENT_PREPARATION_FILE}" ]] \
+        || fail "Current preparation marker is a symlink."
+    [[ ! -e "${PREPARATION_DIR}" && ! -L "${PREPARATION_DIR}" ]] \
+        || fail "Preparation destination already exists."
+    BACKUP_FINISHED_AT="$(backup_timestamp)"
+    if [[ "${SJV_TEST_MODE:-0}" -eq 1 && "${SJV_BACKUP_TEST_MANIFEST_VALUES:-0}" -eq 1 ]]; then
+        local saved_label="${BACKUP_LABEL}" saved_type="${BACKUP_TYPE}" saved_dump="${BACKUP_DUMP_FILE}"
+        BACKUP_LABEL=$'label"\\\n\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f'
+        BACKUP_TYPE=$'type"\\\n'
+        BACKUP_DUMP_FILE=$'dump"\\\n'
+        backup_write_manifest ready "${PREPARATION_MANIFEST}"
+        BACKUP_LABEL="${saved_label}"
+        BACKUP_TYPE="${saved_type}"
+        BACKUP_DUMP_FILE="${saved_dump}"
+    else
+        backup_write_manifest ready "${PREPARATION_MANIFEST}"
+    fi
+    mv -f -- "${PREPARATION_TMP_DIR}" "${PREPARATION_DIR}"
+    if [[ "${SJV_TEST_MODE:-0}" -eq 1 && "${SJV_BACKUP_TEST_FAIL_AFTER_PREPARATION_RENAME:-0}" -eq 1 ]]; then
+        return 1
+    fi
+    marker_tmp="$(mktemp "${PREPARATIONS_DIR}/.current.XXXXXX")" || return 1
+    if ! printf '%s\n' "${PREPARATION_ID}" > "${marker_tmp}"; then
+        rm -f -- "${marker_tmp}"
+        return 1
+    fi
+    if ! chmod 600 "${marker_tmp}"; then
+        rm -f -- "${marker_tmp}"
+        return 1
+    fi
+    if [[ "${SJV_TEST_MODE:-0}" -eq 1 && "${SJV_BACKUP_TEST_FAIL_MARKER_PUBLISH:-0}" -eq 1 ]]; then
+        rm -f -- "${marker_tmp}"
+        return 1
+    fi
+    [[ ! -L "${CURRENT_PREPARATION_FILE}" && ! -d "${CURRENT_PREPARATION_FILE}" ]] \
+        || {
+            rm -f -- "${marker_tmp}"
+            return 1
+        }
+    if [[ "${SJV_TEST_MODE:-0}" -eq 1 && "${SJV_BACKUP_TEST_FAIL_MARKER_MV:-0}" -eq 1 ]]; then
+        CURRENT_PREPARATION_FILE="${PREPARATIONS_DIR}/.missing/current"
+    fi
+    if ! mv -f -- "${marker_tmp}" "${CURRENT_PREPARATION_FILE}"; then
+        rm -f -- "${marker_tmp}"
+        return 1
+    fi
+    PREPARATION_PUBLISHED=1
+    PREPARATION_TMP_DIR=""
+    PREPARATION_MANIFEST="${PREPARATION_DIR}/backup-manifest.json"
+    DUMPS_DIR="${PREPARATION_DIR}/dumps"
+    FILES_DIR="${PREPARATION_DIR}/files"
+    backup_write_json "${LAST_PREPARATION_FILE}" \
+        "{\"preparation_id\":\"${PREPARATION_ID}\",\"status\":\"ready\",\"finished_at\":\"${BACKUP_FINISHED_AT}\"}"
+}
+
+backup_write_failure_manifest() {
+    local state="$1" failure_dir
+    [[ -n "${PREPARATION_ID}" ]] || return 0
+    failure_dir="${PREPARATIONS_DIR}/.${PREPARATION_ID}.${state}"
+    mkdir -m 700 "${failure_dir}" 2>/dev/null || return 0
+    BACKUP_FINISHED_AT="$(backup_timestamp)"
+    backup_write_manifest "${state}" "${failure_dir}/backup-manifest.json"
+}
+
+backup_discard_preparation() {
+    [[ "${PREPARATION_PUBLISHED}" -eq 0 ]] || return 0
+    [[ -n "${PREPARATION_TMP_DIR}" && -d "${PREPARATION_TMP_DIR}" ]] || return 0
+    find "${PREPARATION_TMP_DIR}" -mindepth 1 -delete
+    rmdir -- "${PREPARATION_TMP_DIR}" 2>/dev/null || true
+    PREPARATION_TMP_DIR=""
+    DUMPS_DIR="${BACKUP_LOCAL_DIR}/dumps"
+    FILES_DIR="${BACKUP_LOCAL_DIR}/files"
+}
+
+backup_discard_unpublished_final() {
+    [[ "${PREPARATION_PUBLISHED}" -eq 0 ]] || return 0
+    [[ -n "${PREPARATION_DIR}" && -d "${PREPARATION_DIR}" ]] || return 0
+    find "${PREPARATION_DIR}" -mindepth 1 -delete
+    rmdir -- "${PREPARATION_DIR}" 2>/dev/null || true
+}
+
 write_backup_status() {
     local now error result pgbr wal dump files kek restic label dump_file btype
     local success_at restic_at
@@ -131,8 +288,11 @@ backup_finalize_exit() {
     if [[ -z "${BACKUP_ERROR}" ]]; then
         BACKUP_ERROR="unexpected"
     fi
+    backup_write_failure_manifest failed
     write_backup_status || true
     backup_cleanup_temps || true
+    backup_discard_preparation
+    backup_discard_unpublished_final
     if [[ "${code}" -eq 0 ]]; then
         exit 1
     fi
@@ -149,9 +309,11 @@ finish_failed() {
     BACKUP_RESULT="failed"
     BACKUP_EXIT=1
     BACKUP_FINISHED_AT="$(backup_timestamp)"
+    backup_write_failure_manifest failed
     write_backup_status
     BACKUP_FINALIZED=1
     backup_cleanup_temps
+    backup_discard_preparation
     fail "Backup failed (${BACKUP_ERROR})."
 }
 
@@ -160,9 +322,12 @@ finish_incomplete() {
     BACKUP_EXIT=2
     BACKUP_ERROR="app-kek-missing"
     BACKUP_FINISHED_AT="$(backup_timestamp)"
+    backup_write_failure_manifest incomplete
     write_backup_status
     BACKUP_FINALIZED=1
     backup_cleanup_temps
+    backup_discard_preparation
+    backup_release_lock
     error "Backup is incomplete: encrypted meter keys exist and app-kek was not copied."
     exit 2
 }
@@ -207,22 +372,10 @@ invoke_database() {
     esac
 }
 
-invoke_restic_daily() {
-    local bin=""
-    if [[ "${SJV_TEST_MODE}" -eq 1 ]]; then
-        bin="${SJV_BACKUP_RESTIC:-}"
-        [[ -n "${bin}" && -x "${bin}" && ! -L "${bin}" ]] || fail "Test backup command is not executable."
-        "${bin}"
-        return
-    fi
-    docker_compose_backup_daily
-}
-
 backup_prepare_dirs() {
     ensure_dir "${DATA_DIR}/backup-locks" 700
     ensure_dir "${STATE_DIR}" 700
-    ensure_dir "${DUMPS_DIR}" 700
-    ensure_dir "${FILES_DIR}" 700
+    ensure_dir "${PREPARATIONS_DIR}" 700
     [[ -d "${BACKUP_LOCAL_DIR}/pgbackrest" && ! -L "${BACKUP_LOCAL_DIR}/pgbackrest" ]] \
         || fail "pgBackRest repository directory is missing."
 }
@@ -400,12 +553,19 @@ copy_private() {
     [[ -f "${dest}" && ! -L "${dest}" && "$(stat -c '%a' "${dest}")" == "600" ]]
 }
 
+backup_source_private() {
+    local path="$1"
+    [[ -f "${path}" && ! -L "${path}" ]] || return 1
+    [[ "$(file_owner "${path}")" == "${EUID}" ]] || return 1
+    [[ "$(file_mode "${path}")" == "600" ]]
+}
+
 copy_optional() {
     local src="$1" dest="$2"
     if [[ ! -e "${src}" && ! -L "${src}" ]]; then
         return 0
     fi
-    if [[ -L "${src}" || ! -f "${src}" ]]; then
+    if ! backup_source_private "${src}"; then
         return 1
     fi
     copy_private "${src}" "${dest}" 1 0
@@ -438,13 +598,18 @@ copy_recovery_files() {
         fi
         finish_failed
     fi
+    if ! backup_source_private "${ENV_FILE}"; then
+        BACKUP_FILES="failed"
+        BACKUP_ERROR="files-damaged"
+        finish_failed
+    fi
     if ! copy_private "${ENV_FILE}" "${FILES_DIR}/runtime.env" 1 0; then
         BACKUP_FILES="failed"
         BACKUP_ERROR="files-damaged"
         finish_failed
     fi
     if [[ -e "${APP_KEK_FILE}" || -L "${APP_KEK_FILE}" ]]; then
-        if [[ -L "${APP_KEK_FILE}" || ! -f "${APP_KEK_FILE}" ]] \
+        if ! backup_source_private "${APP_KEK_FILE}" \
             || ! copy_private "${APP_KEK_FILE}" "${FILES_DIR}/app-kek" 32 32; then
             BACKUP_FILES="failed"
             BACKUP_KEK="damaged"
@@ -471,15 +636,24 @@ copy_recovery_files() {
         BACKUP_ERROR="files-damaged"
         finish_failed
     fi
+    if [[ -e "${ACME_FILE}" || -L "${ACME_FILE}" ]]; then
+        BACKUP_ACME="copied"
+    fi
     if ! copy_optional "${HTPASSWD_FILE}" "${FILES_DIR}/dashboard.htpasswd"; then
         BACKUP_FILES="failed"
         BACKUP_ERROR="files-damaged"
         finish_failed
     fi
+    if [[ -e "${HTPASSWD_FILE}" || -L "${HTPASSWD_FILE}" ]]; then
+        BACKUP_HTPASSWD="copied"
+    fi
     if ! copy_optional "${BOUNCER_KEY_FILE}" "${FILES_DIR}/crowdsec-bouncer-key"; then
         BACKUP_FILES="failed"
         BACKUP_ERROR="files-damaged"
         finish_failed
+    fi
+    if [[ -e "${BOUNCER_KEY_FILE}" || -L "${BOUNCER_KEY_FILE}" ]]; then
+        BACKUP_BOUNCER="copied"
     fi
     if [[ "${INCOMPLETE}" -eq 1 ]]; then
         BACKUP_FILES="incomplete"
@@ -489,46 +663,13 @@ copy_recovery_files() {
     info "Recovery files copied."
 }
 
-confirm_restic_snapshot() {
-    local path="${STATE_DIR}/sjv-backup-daily.json" line="" rc="$1"
-    if [[ "${rc}" -ne 0 ]]; then
-        BACKUP_RESTIC="failed"
-        BACKUP_ERROR="restic-failed"
-        finish_failed
-    fi
-    [[ -f "${path}" && ! -L "${path}" ]] || {
-        BACKUP_RESTIC="failed"
-        BACKUP_ERROR="restic-failed"
-        finish_failed
-    }
-    IFS= read -r line < "${path}" || {
-        BACKUP_RESTIC="failed"
-        BACKUP_ERROR="restic-failed"
-        finish_failed
-    }
-    [[ "${line}" =~ \"status\":\"ok\" ]] || {
-        BACKUP_RESTIC="failed"
-        BACKUP_ERROR="restic-failed"
-        finish_failed
-    }
-    [[ "${line}" =~ \"finished_at\":\"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)\" ]] || {
-        BACKUP_RESTIC="failed"
-        BACKUP_ERROR="restic-failed"
-        finish_failed
-    }
-    LAST_RESTIC_AT="${BASH_REMATCH[1]}"
-    backup_write_json "${LAST_RESTIC_FILE}" "{\"restic_finished_at\":\"${LAST_RESTIC_AT}\"}"
-    BACKUP_RESTIC="ok"
-    info "Restic daily snapshot confirmed."
-}
-
 backup_run_main() {
-    local restic_rc=0
     umask 077
     trap 'backup_finalize_exit "$?"' EXIT
     backup_prepare_dirs
     backup_load_history
     backup_hold_lock
+    backup_create_preparation
     if ! invoke_database pg_isready; then
         BACKUP_ERROR="database-missing"
         finish_failed
@@ -536,12 +677,11 @@ backup_run_main() {
     run_pgbackrest
     run_logical_dump
     copy_recovery_files
-    backup_release_lock
-    invoke_restic_daily || restic_rc=$?
-    confirm_restic_snapshot "${restic_rc}"
     if [[ "${INCOMPLETE}" -eq 1 ]]; then
         finish_incomplete
     fi
+    backup_publish_preparation
+    backup_release_lock
     finish_ok
 }
 

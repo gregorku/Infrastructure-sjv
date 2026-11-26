@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Renders Traefik and, outside test mode, starts Traefik and CrowdSec.
+# Renders the stack and, outside test mode, starts the services that have an
+# automatic lifecycle. PostgreSQL is intentionally not started here.
 # A missing access.log is created empty first. Safe to run repeatedly.
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,9 +30,9 @@ case "${1:-}" in
     --render-only) RENDER_ONLY=1 ;;
     --help)
         printf '%s\n' "Usage: ./scripts/deploy.sh [--render-only]" \
-            "Validates .env, renders Traefik and starts sjv-traefik and sjv-crowdsec." \
+            "Validates .env, renders the stack and starts sjv-traefik, sjv-crowdsec and sjv-backup." \
             "A missing access.log is created empty before those containers start." \
-            "sjv-backup and sjv-postgresql stay defined and are not started." \
+            "sjv-postgresql stays defined and is not started." \
             "--render-only writes the runtime files and does not call Docker."
         exit 0
         ;;
@@ -69,7 +70,7 @@ if [[ "${RUNTIME_ENV[TRAEFIK_TLS_MODE]}" == letsencrypt ]]; then
     fi
 fi
 layout_prepare_access_log
-docker_compose up -d traefik crowdsec
-ok "Traefik and CrowdSec were reconciled. Other projects were not changed."
+docker_compose up -d traefik crowdsec sjv-backup
+ok "Traefik, CrowdSec and sjv-backup were reconciled. PostgreSQL and other projects were not changed."
 deploy_crowdsec_install_collections
 print_footer "Deploy completed. Next: ./scripts/init-backup.sh"
