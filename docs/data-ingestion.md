@@ -76,7 +76,7 @@ Adaptér smí předat dál jen tuto položku. Zápis do `meter_readings`, `raw_t
 | --- | --- |
 | endpoint | koncový bod, který data přijal |
 | device_id | z autentizace, nebo z už uloženého externího identifikátoru u záznamu z platformy |
-| message_kind | `raw_wmbus`, `decoded`, `event`, `heartbeat`, `import_row` |
+| message_kind | `raw_wmbus`, `decoded`, `telemetry`, `event`, `heartbeat`, `import_row` |
 | msg_key | idempotence doručení, viz [Identita zprávy](#identita-zprávy) |
 | external_message_id | identifikátor výrobce, jen když v datech je |
 | capture | jen časové údaje, které zdroj skutečně poslal |
@@ -94,6 +94,7 @@ Heartbeat a událost nevytvářejí odečet. `import_row` vytvoří odečet se `
 | --- | --- | --- | --- | --- |
 | `raw` | skutečný wM-Bus rámec | vlastní ESP, kterýkoli koncentrátor, který rámec předá | `radio` | `ingest_payloads` → `ingest_receipts` → `raw_telegrams` → dekódování → `meter_readings` |
 | `decoded` | hodnoty, které už dekódoval zdroj | koncentrátor nebo API bez rámce, import souboru | `vendor:<kód>` nebo `import` | `ingest_payloads` → `decoded_observations` → `meter_readings` |
+| `telemetry` | normalizované provozní hodnoty zařízení | vlastní zařízení | `device` | `ingest_payloads` → `ingest_payload_items` → `ingest_receipts` → `device_telemetry` |
 
 Podpora koncentrátorů, které posílají jen dekódované hodnoty:
 
@@ -193,7 +194,7 @@ Postup podle priority:
 | `captured_at_est` starší než `INGEST_MAX_MESSAGE_AGE` (30 dní) | `too_old` |
 | `rx.unix_ms` (NTP) a odhad z epochy se liší víc než tolerance | platí epocha, příznak `clock_disagreement`, událost |
 
-`partition_month` příjmu, payloadu tohoto příjmu a `decoded_observations` je měsíc `server_received_at` nebo `received_at`. `partition_month` telegramu je měsíc kotvy. `partition_month` události zařízení je měsíc `received_at` v UTC a `occurred_at` ho neurčuje. Příjem z prosince 2028, který odkazuje na telegram z ledna 2027, leží v prosinci 2028. Lednová identita telegramu je ve sloupcích `raw_telegram_id` a `raw_partition_month` a není to cizí klíč. Retence příjmu je 24 měsíců od prosince 2028. Retence telegramu je 24 měsíců od ledna 2027. Limity stáří a budoucnosti dál rozhodují, jestli z příjmu smí vzniknout odečet. Neříkají, do které partition se příjem uloží.
+`partition_month` příjmu, payloadu tohoto příjmu a `decoded_observations` je měsíc `server_received_at` nebo `received_at`. `partition_month` telegramu je měsíc kotvy. `partition_month` události zařízení je měsíc `received_at` v UTC a `occurred_at` ho neurčuje. Příjem z prosince 2028, který odkazuje na telegram z ledna 2027, leží v prosinci 2028. Lednová identita telegramu je ve sloupcích `raw_telegram_id` a `raw_partition_month` a není to cizí klíč. Retence payloadu, položek a příjmu je 36 měsíců od prosince 2028; retence telegramu a dekódovaného pozorování je 24 měsíců od jejich měsíce. Limity stáří a budoucnosti dál rozhodují, jestli z příjmu smí vzniknout odečet. Neříkají, do které partition se příjem uloží.
 
 ### Replay
 
@@ -216,6 +217,7 @@ Postup podle priority:
 ```text
 sjv/v1/dev/{device}/telegrams   zařízení → server   QoS 1      raw, dávka
 sjv/v1/dev/{device}/readings    zařízení → server   QoS 1      decoded, dávka
+sjv/v1/dev/{device}/telemetry   zařízení → server   QoS 1      normalizovaná telemetrie, dávka
 sjv/v1/dev/{device}/events      zařízení → server   QoS 1      boot, chyby, přetečení fronty
 sjv/v1/dev/{device}/heartbeat   zařízení → server   QoS 0      stav a časová reference
 sjv/v1/dev/{device}/status      zařízení → server   retained   LWT "offline"
@@ -228,11 +230,11 @@ sjv/v1/dev/{device}/config      server → zařízení   retained   konfigurace 
 ### ACL
 
 - **Zařízení** (vlastní role pro každé zařízení):
-  - publikovat smí jen do `telegrams`, `readings`, `events`, `heartbeat` a `status` svého kódu,
+  - publikovat smí jen do `telegrams`, `readings`, `telemetry`, `events`, `heartbeat` a `status` svého kódu,
   - odebírat smí jen `ack` a `config` svého kódu,
   - výchozí politika je zakázat vše. `$CONTROL/#` a `$SYS/#` zařízení nevidí,
   - client ID musí odpovídat jménu, takže si zařízení nemůže převzít cizí sezení.
-- **Collector:** odebírá `sjv/v1/dev/+/telegrams|readings|events|heartbeat|status`, publikuje `sjv/v1/dev/+/ack|config`. Připojuje se jen přes interní listener 1883.
+- **Collector:** odebírá `sjv/v1/dev/+/telegrams|readings|telemetry|events|heartbeat|status`, publikuje `sjv/v1/dev/+/ack|config`. Připojuje se jen přes interní listener 1883.
 - **Backend admin:** jediný účet s právem na `$CONTROL/dynamic-security/v1`. Zakládá, vypíná a ruší účty zařízení. Heslo má jen backend.
 
 ### Raw zpráva
@@ -258,6 +260,41 @@ sjv/v1/dev/{device}/config      server → zařízení   retained   konfigurace 
 - `crc: true` znamená, že rámec obsahuje CRC bloky a server je ověří a odstraní.
 - Položka z předchozího bootu má `rx.boot` menší než `tx.boot` a nemá `age_ms`.
 
+### Telemetrie
+
+Telemetrie používá samostatný topic `sjv/v1/dev/{device}/telemetry` s QoS 1 a také HTTPS endpoint `POST /api/v1/ingest/telemetry`. Obě transportní cesty převádějí zprávu na stejný interní kontrakt `message_kind = telemetry`; nevzniká paralelní ingest ani deduplikační mechanismus. Cesta je `ingest_payloads` (původní obálka) → `ingest_payload_items` (položka) → `ingest_receipts` (příjem a výsledek validace/deduplikace) → `device_telemetry` (normalizovaný vzorek).
+
+```json
+{
+  "v": 1,
+  "tx": {
+    "instance": "9f3c51a07be2d410",
+    "boot": 17,
+    "uptime_ms": 99300000,
+    "at": "2026-11-09T13:15:00.000Z"
+  },
+  "samples": [
+    {
+      "msg_key": "9f3c51a07be2d410-17-t-001234",
+      "uptime_ms": 99300000,
+      "measured_at": "2026-11-09T13:15:00.000Z",
+      "power": {
+        "source": "battery",
+        "battery_mv": 3820,
+        "charging": false,
+        "soc_percent": null
+      }
+    }
+  ]
+}
+```
+
+`v` je verze kontraktu. `tx.instance`, `tx.boot`, `tx.uptime_ms` a `tx.at` identifikují vysílač a čas odeslání. Každý prvek `samples` je jedna položka, má stabilní `msg_key`, `uptime_ms` a UTC `measured_at`; při opakování se odešle stejný klíč i obsah. Dávka používá `item_index` v existující identitě `(ingest_source_id, msg_key_namespace, msg_key, item_index)` v `ingest_message_keys`. `power` je nepovinná skupina. Neznámé hodnoty se neposílají jako nula; `soc_percent` se vynechá nebo je `null`, pokud jej zařízení neumí spolehlivě určit.
+
+Jeden prvek `samples` je jeden kompletní telemetrický vzorek, nikoli jeden řádek pro každou skupinu hodnot. Jeden vzorek proto může mít současně `power`, teplotu, signál i další stavové skupiny v témže objektu; JSON kontrakt pro něj nepoužívá samostatné pole `kind`.
+
+Příjem zachovává limit `INGEST_MAX_MESSAGE_AGE` a existující validační a deduplikační pravidla. `ingest_receipts` eviduje každou přijatou položku a její výsledek, včetně `accepted` nebo `duplicate_delivery`; tento výsledek je podkladem pro položkový aplikační ACK. ACK se publikuje až po COMMIT výsledné transakce. Zařízení odstraní vzorek z persistentní fronty až po uložení odpovídajícího výsledku ACK. Telemetrický vzorek sám o sobě nezakládá `device_events`; významné změny a alarmy se vyhodnocují centrálně po uložení.
+
 ### Heartbeat
 
 ```json
@@ -282,7 +319,7 @@ Retained zprávu publikuje collector podle `PUT /api/v1/admin/devices/{id}/confi
   "v": 1, "rev": 7,
   "meters": ["2C2D31957904", "2C2D98670804"],
   "discovery_until": null,
-  "heartbeat_s": 60, "batch_max": 50, "ack_timeout_s": 30,
+  "heartbeat_s": 60, "telemetry_interval_s": 900, "batch_max": 50, "ack_timeout_s": 30,
   "replay_since": null
 }
 ```
@@ -328,6 +365,7 @@ Zařízení smaže zprávu z fronty až tehdy, když má uložený výsledek ka�
 | --- | --- |
 | `POST /api/v1/ingest/telegrams` | dávka raw, stejný formát jako MQTT |
 | `POST /api/v1/ingest/readings` | dávka decoded: kanonický formát, nebo formát dodavatele přes adaptér |
+| `POST /api/v1/ingest/telemetry` | dávka telemetrie, stejný interní kontrakt jako MQTT |
 | `POST /api/v1/ingest/events` | události |
 | `POST /api/v1/ingest/heartbeat` | stav, stejný formát jako MQTT |
 

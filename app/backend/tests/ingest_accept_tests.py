@@ -4,12 +4,14 @@ itself runs as ``sjv_collector``.
 """
 
 import os
+import threading
 from datetime import datetime, timezone
 
 import psycopg
 
 from sjv_ingest.contract import Envelope, Fragment, Frame, Item, SourceTime
 from sjv_ingest.restore import load_envelope
+from sjv_ingest.evaluator import evaluate_item
 from sjv_ingest.service import IngestRejected, accept
 
 URL = os.environ["SJV_DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
@@ -17,7 +19,6 @@ UNTOUCHED = (
     "telegram_dedup_keys",
     "raw_telegrams",
     "decode_queue",
-    "ingest_message_keys",
     "ingest_fragment_sets",
     "ingest_fragments",
     "meter_readings",
@@ -123,8 +124,13 @@ def main():
             (endpoint_code,),
         ).fetchone()[0]
         before = counts(conn)
+        bootstrap_user = conn.execute("SELECT current_user").fetchone()[0]
+        if bootstrap_user == "sjv_collector":
+            print("SKIP non-collector role test: test URL is sjv_collector")
 
         conn.execute("SET ROLE sjv_collector")
+        if conn.execute("SELECT current_user").fetchone()[0] != "sjv_collector":
+            fail("main test connection did not assume sjv_collector")
         try:
             conn.execute(
                 "INSERT INTO ingest_sources (code, kind, device_id) "
@@ -137,6 +143,7 @@ def main():
             ).fetchone()[0]
             _valid(conn, source_id, endpoint_id, device_id)
             _round_trip(conn, source_id, endpoint_id, device_id)
+            _evaluate(conn, source_id, endpoint_id, device_id)
             _boolean_is_not_proof(conn, source_id, endpoint_id, device_id)
             _item_failure(conn, source_id, endpoint_id, device_id)
             _empty(conn, source_id, endpoint_id, device_id)
@@ -297,6 +304,571 @@ def _round_trip(conn, source_id, endpoint_id, device_id):
     if again != expected:
         fail("later evaluation failure changed the stored envelope")
     print("PASS stored items reload in order and survive a later failure")
+
+
+def _evaluate(conn, source_id, endpoint_id, device_id):
+    received_at = datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc)
+    body = b"\x0a-evaluator"
+    stored = accept(
+        Envelope(
+            source_id,
+            "https",
+            received_at,
+            body,
+            (
+                Item(
+                    index=0,
+                    original=body,
+                    message_kind="raw_wmbus",
+                    msg_key="evaluator-key",
+                    msg_key_namespace="https",
+                ),
+            ),
+            endpoint_id=endpoint_id,
+            device_id=device_id,
+        ),
+        conn,
+    )
+    _evaluate_invalid_item_indexes(conn, stored)
+    first = evaluate_item(conn, stored.payload_id, stored.payload_partition_month, 0)
+    if (
+        first.receipt_status != "accepted"
+        or not first.first_delivery
+        or first.outcome != "accepted"
+        or first.original_receipt_id != first.receipt_id
+    ):
+        fail(f"first evaluation result is wrong: {first}")
+    with psycopg.connect(URL, autocommit=True) as bootstrap:
+        current_user = bootstrap.execute("SELECT current_user").fetchone()[0]
+        if current_user == "sjv_collector":
+            print("SKIP evaluator rejects a non-collector role: test URL is sjv_collector")
+        else:
+            try:
+                evaluate_item(bootstrap, stored.payload_id, stored.payload_partition_month, 0)
+            except PermissionError:
+                pass
+            else:
+                fail("evaluator accepted a non-collector role")
+    _evaluate_selected_item(conn, source_id, endpoint_id, device_id)
+    row = conn.execute(
+        """
+        SELECT first_received_at, last_received_at, delivery_count, outcome,
+               receipt_id, receipt_partition_month, message_kind
+        FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = 'evaluator-key' AND item_index = 0
+        """,
+        (source_id,),
+    ).fetchone()
+    expected = (
+        received_at,
+        received_at,
+        1,
+        "accepted",
+        first.receipt_id,
+        first.receipt_partition_month,
+        "telegram",
+    )
+    if row != expected:
+        fail(f"first dedup row is wrong: {row}")
+
+    older = accept(
+        Envelope(
+            source_id,
+            "https",
+            datetime(2026, 11, 20, 9, 0, tzinfo=timezone.utc),
+            b"\x0b-evaluator-older",
+            (
+                Item(
+                    index=0,
+                    original=b"\x0b-evaluator-older",
+                    message_kind="raw_wmbus",
+                    msg_key="evaluator-key",
+                    msg_key_namespace="https",
+                ),
+            ),
+            endpoint_id=endpoint_id,
+            device_id=device_id,
+        ),
+        conn,
+    )
+    duplicate = evaluate_item(conn, older.payload_id, older.payload_partition_month, 0)
+    if (
+        duplicate.receipt_status != "duplicate_delivery"
+        or duplicate.first_delivery
+        or duplicate.outcome != "accepted"
+        or duplicate.original_receipt_id != first.receipt_id
+    ):
+        fail(f"duplicate evaluation result is wrong: {duplicate}")
+    if _ack_projection(first) != _ack_projection(duplicate):
+        fail(
+            "repeated delivery cannot reconstruct the original ACK result: "
+            f"{_ack_projection(first)} != {_ack_projection(duplicate)}"
+        )
+    row = conn.execute(
+        """
+        SELECT first_received_at, last_received_at, delivery_count, outcome,
+               receipt_id, receipt_partition_month
+        FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = 'evaluator-key' AND item_index = 0
+        """,
+        (source_id,),
+    ).fetchone()
+    if row != (
+        received_at,
+        received_at,
+        2,
+        "accepted",
+        first.receipt_id,
+        first.receipt_partition_month,
+    ):
+        fail(f"duplicate changed original key state: {row}")
+    statuses = conn.execute(
+        """
+        SELECT status FROM ingest_receipts
+        WHERE id IN (%s, %s)
+        ORDER BY id
+        """,
+        (first.receipt_id, duplicate.receipt_id),
+    ).fetchall()
+    if [status[0] for status in statuses] != ["accepted", "duplicate_delivery"]:
+        fail(f"receipt statuses are wrong: {statuses}")
+    print("PASS evaluator stores first and duplicate delivery state")
+
+    _evaluate_rollbacks(conn, source_id, endpoint_id, device_id)
+    _evaluate_null_history(conn, source_id, endpoint_id, device_id)
+    _evaluate_concurrent(conn, source_id, endpoint_id, device_id)
+
+
+def _evaluate_invalid_item_indexes(conn, stored):
+    before = conn.execute(
+        """
+        SELECT
+            (SELECT count(*) FROM ingest_receipts),
+            (SELECT count(*) FROM ingest_message_keys)
+        """
+    ).fetchone()
+    for invalid in (True, False, 1.0, -1, "1", None):
+        try:
+            evaluate_item(
+                conn,
+                stored.payload_id,
+                stored.payload_partition_month,
+                invalid,
+            )
+        except ValueError:
+            pass
+        else:
+            fail(f"invalid item_index was accepted: {invalid!r}")
+    after = conn.execute(
+        """
+        SELECT
+            (SELECT count(*) FROM ingest_receipts),
+            (SELECT count(*) FROM ingest_message_keys)
+        """
+    ).fetchone()
+    if after != before:
+        fail(f"invalid item_index changed database state: {before} -> {after}")
+    print("PASS evaluator rejects invalid item_index before database work")
+
+
+def _ack_projection(result):
+    """The current ACK-relevant result; transport serialization is separate."""
+
+    return (
+        result.outcome,
+        result.original_receipt_id,
+        result.original_receipt_partition_month,
+    )
+
+
+class _FailingConnection:
+    def __init__(self, conn, needle):
+        self._conn = conn
+        self._needle = needle
+
+    @property
+    def autocommit(self):
+        return self._conn.autocommit
+
+    def execute(self, query, params=None):
+        if self._needle in query:
+            raise RuntimeError(f"forced failure: {self._needle}")
+        if params is None:
+            return self._conn.execute(query)
+        return self._conn.execute(query, params)
+
+    def transaction(self):
+        return self._conn.transaction()
+
+
+def _new_evaluation_payload(conn, source_id, endpoint_id, device_id, key, stamp, body):
+    return accept(
+        Envelope(
+            source_id,
+            "https",
+            stamp,
+            body,
+            (
+                Item(
+                    index=0,
+                    original=body,
+                    message_kind="raw_wmbus",
+                    msg_key=key,
+                    msg_key_namespace="https",
+                ),
+            ),
+            endpoint_id=endpoint_id,
+            device_id=device_id,
+        ),
+        conn,
+    )
+
+
+def _evaluate_rollbacks(conn, source_id, endpoint_id, device_id):
+    receipt_payload = _new_evaluation_payload(
+        conn, source_id, endpoint_id, device_id, "rollback-receipt",
+        datetime(2026, 11, 21, 11, 0, tzinfo=timezone.utc), b"\x0e-receipt",
+    )
+    try:
+        evaluate_item(
+            _FailingConnection(conn, "INSERT INTO ingest_receipts"),
+            receipt_payload.payload_id,
+            receipt_payload.payload_partition_month,
+            0,
+        )
+    except RuntimeError:
+        pass
+    else:
+        fail("receipt failure was not raised")
+    if conn.execute(
+        """
+        SELECT count(*) FROM ingest_receipts
+        WHERE payload_id = %s AND payload_partition_month = %s
+        """,
+        (receipt_payload.payload_id, receipt_payload.payload_partition_month),
+    ).fetchone()[0] != 0:
+        fail("receipt rollback left a receipt")
+    if conn.execute(
+        """
+        SELECT count(*) FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key = 'rollback-receipt'
+        """,
+        (source_id,),
+    ).fetchone()[0] != 0:
+        fail("receipt rollback left a dedup key")
+
+    upsert_payload = _new_evaluation_payload(
+        conn, source_id, endpoint_id, device_id, "rollback-upsert",
+        datetime(2026, 11, 21, 11, 1, tzinfo=timezone.utc), b"\x0f-upsert",
+    )
+    try:
+        evaluate_item(
+            _FailingConnection(conn, "INSERT INTO ingest_message_keys"),
+            upsert_payload.payload_id,
+            upsert_payload.payload_partition_month,
+            0,
+        )
+    except RuntimeError:
+        pass
+    else:
+        fail("upsert failure was not raised")
+    if conn.execute(
+        """
+        SELECT count(*) FROM ingest_receipts
+        WHERE payload_id = %s AND payload_partition_month = %s
+        """,
+        (upsert_payload.payload_id, upsert_payload.payload_partition_month),
+    ).fetchone()[0] != 0:
+        fail("upsert rollback did not remove its receipt")
+    print("PASS evaluator rolls back receipt and dedup changes together")
+
+
+def _evaluate_null_history(conn, source_id, endpoint_id, device_id):
+    first_payload = _new_evaluation_payload(
+        conn, source_id, endpoint_id, device_id, "null-history",
+        datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc), b"\x10-null-first",
+    )
+    first = evaluate_item(conn, first_payload.payload_id, first_payload.payload_partition_month, 0)
+    conn.execute(
+        """
+        UPDATE ingest_message_keys
+        SET last_received_at = NULL, delivery_count = NULL
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = 'null-history' AND item_index = 0
+        """,
+        (source_id,),
+    )
+    second_payload = _new_evaluation_payload(
+        conn, source_id, endpoint_id, device_id, "null-history",
+        datetime(2026, 11, 21, 12, 1, tzinfo=timezone.utc), b"\x11-null-second",
+    )
+    second = evaluate_item(conn, second_payload.payload_id, second_payload.payload_partition_month, 0)
+    row = conn.execute(
+        """
+        SELECT first_received_at, last_received_at, delivery_count, receipt_id
+        FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = 'null-history' AND item_index = 0
+        """,
+        (source_id,),
+    ).fetchone()
+    if row != (
+        datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc),
+        datetime(2026, 11, 21, 12, 1, tzinfo=timezone.utc),
+        2,
+        first.receipt_id,
+    ):
+        fail(f"NULL historical fields were not handled safely: {row}")
+    if second.receipt_status != "duplicate_delivery":
+        fail(f"NULL historical key did not produce a duplicate receipt: {second}")
+    print("PASS evaluator handles NULL historical dedup fields conservatively")
+
+
+def _evaluate_selected_item(conn, source_id, endpoint_id, device_id):
+    first_body = b"\x14-invalid-other-item"
+    selected_body = b"\x15-selected-item"
+    stored = accept(
+        Envelope(
+            source_id,
+            "https",
+            datetime(2026, 11, 21, 12, 30, tzinfo=timezone.utc),
+            b"\x16-selected-envelope",
+            (
+                Item(index=0, original=first_body, message_kind="not-a-kind"),
+                Item(
+                    index=1,
+                    original=selected_body,
+                    message_kind="raw_wmbus",
+                    msg_key="selected-index",
+                    msg_key_namespace="https",
+                ),
+            ),
+            endpoint_id=endpoint_id,
+            device_id=device_id,
+        ),
+        conn,
+    )
+    result = evaluate_item(conn, stored.payload_id, stored.payload_partition_month, 1)
+    if result.receipt_status != "accepted" or not result.first_delivery:
+        fail(f"selected valid item was affected by another item: {result}")
+    receipt = conn.execute(
+        """
+        SELECT item_index, status FROM ingest_receipts
+        WHERE id = %s AND partition_month = %s
+        """,
+        (result.receipt_id, result.receipt_partition_month),
+    ).fetchone()
+    if receipt != (1, "accepted"):
+        fail(f"original item index was not preserved in receipt: {receipt}")
+    key = conn.execute(
+        """
+        SELECT item_index FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = 'selected-index'
+        """,
+        (source_id,),
+    ).fetchone()
+    if key != (1,):
+        fail(f"original item index was not preserved in dedup key: {key}")
+    print("PASS evaluator validates only the selected item and preserves its index")
+
+
+class _BarrierConnection:
+    def __init__(self, conn, barrier):
+        self._conn = conn
+        self._barrier = barrier
+
+    @property
+    def autocommit(self):
+        return self._conn.autocommit
+
+    def execute(self, query, params=None):
+        if "INSERT INTO ingest_message_keys" in query:
+            self._barrier.wait(timeout=10)
+        if params is None:
+            return self._conn.execute(query)
+        return self._conn.execute(query, params)
+
+    def transaction(self):
+        return self._conn.transaction()
+
+
+def _evaluate_concurrent(conn, source_id, endpoint_id, device_id):
+    body_a = b"\x0c-concurrent-a"
+    body_b = b"\x0d-concurrent-b"
+    payloads = []
+    for body in (body_a, body_b):
+        result = accept(
+            Envelope(
+                source_id,
+                "https",
+                datetime(2026, 11, 21, 10, 0, tzinfo=timezone.utc),
+                body,
+                (
+                    Item(
+                        index=0,
+                        original=body,
+                        message_kind="raw_wmbus",
+                        msg_key="concurrent-key",
+                        msg_key_namespace="https",
+                    ),
+                ),
+                endpoint_id=endpoint_id,
+                device_id=device_id,
+            ),
+            conn,
+        )
+        payloads.append((result.payload_id, result.payload_partition_month))
+
+    barrier = threading.Barrier(2)
+    results = []
+    errors = []
+
+    def run(payload):
+        try:
+            with psycopg.connect(URL, autocommit=True) as other:
+                other_user = other.execute("SELECT current_user").fetchone()[0]
+                other.execute("SET ROLE sjv_collector")
+                if other.execute("SELECT current_user").fetchone()[0] != "sjv_collector":
+                    raise AssertionError(f"concurrent connection role is {other_user}")
+                results.append(evaluate_item(_BarrierConnection(other, barrier), *payload, 0))
+                other.execute("RESET ROLE")
+        except Exception as exc:  # pragma: no cover - reported by the test
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(payload,)) for payload in payloads]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+    if errors or len(results) != 2 or any(thread.is_alive() for thread in threads):
+        fail(f"concurrent evaluation failed: {errors}, results={results}")
+    row = conn.execute(
+        """
+        SELECT delivery_count, first_received_at, last_received_at
+        FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = 'concurrent-key' AND item_index = 0
+        """,
+        (source_id,),
+    ).fetchone()
+    if row != (2, datetime(2026, 11, 21, 10, 0, tzinfo=timezone.utc),
+               datetime(2026, 11, 21, 10, 0, tzinfo=timezone.utc)):
+        fail(f"concurrent upsert lost an update: {row}")
+    if sum(result.first_delivery for result in results) != 1:
+        fail(f"concurrent first-delivery count is wrong: {results}")
+    if sum(not result.first_delivery for result in results) != 1:
+        fail(f"concurrent duplicate-delivery count is wrong: {results}")
+    first = next(result for result in results if result.first_delivery)
+    duplicate = next(result for result in results if not result.first_delivery)
+    if first.receipt_status != "accepted" or duplicate.receipt_status != "duplicate_delivery":
+        fail(f"concurrent receipt statuses are wrong: {results}")
+    if {result.outcome for result in results} != {"accepted"}:
+        fail(f"concurrent outcomes differ: {results}")
+    if (
+        first.original_receipt_id != first.receipt_id
+        or first.original_receipt_partition_month != first.receipt_partition_month
+    ):
+        fail(f"first concurrent result does not reference itself: {first}")
+    if (
+        duplicate.original_receipt_id != first.receipt_id
+        or duplicate.original_receipt_partition_month != first.receipt_partition_month
+    ):
+        fail(f"duplicate concurrent result does not reference the first receipt: {duplicate}")
+    if len({result.receipt_id for result in results}) != 2:
+        fail(f"concurrent deliveries did not get separate receipts: {results}")
+    key = conn.execute(
+        """
+        SELECT receipt_id, receipt_partition_month
+        FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = 'concurrent-key' AND item_index = 0
+        """,
+        (source_id,),
+    ).fetchone()
+    if key != (first.original_receipt_id, first.original_receipt_partition_month):
+        fail(f"dedup key does not point to the first concurrent receipt: {key}")
+    if key != (first.receipt_id, first.receipt_partition_month):
+        fail(f"first concurrent receipt reference is wrong: {key}")
+    print("PASS concurrent evaluator upserts serialize without lost delivery")
+    _evaluate_concurrent_duplicates(conn, source_id, endpoint_id, device_id)
+
+
+def _evaluate_concurrent_duplicates(conn, source_id, endpoint_id, device_id):
+    key = "concurrent-duplicate"
+    seed = _new_evaluation_payload(
+        conn, source_id, endpoint_id, device_id, key,
+        datetime(2026, 11, 21, 10, 30, tzinfo=timezone.utc), b"\x12-seed",
+    )
+    original = evaluate_item(conn, seed.payload_id, seed.payload_partition_month, 0)
+    deliveries = []
+    timestamps = (
+        datetime(2026, 11, 21, 10, 29, tzinfo=timezone.utc),
+        datetime(2026, 11, 21, 10, 31, tzinfo=timezone.utc),
+        datetime(2026, 11, 21, 10, 30, 30, tzinfo=timezone.utc),
+    )
+    for index, stamp in enumerate(timestamps):
+        payload = _new_evaluation_payload(
+            conn, source_id, endpoint_id, device_id, key, stamp,
+            f"\x13-duplicate-{index}".encode(),
+        )
+        deliveries.append((payload.payload_id, payload.payload_partition_month))
+
+    barrier = threading.Barrier(len(deliveries))
+    results = []
+    errors = []
+
+    def run(payload):
+        try:
+            with psycopg.connect(URL, autocommit=True) as other:
+                other_user = other.execute("SELECT current_user").fetchone()[0]
+                other.execute("SET ROLE sjv_collector")
+                if other.execute("SELECT current_user").fetchone()[0] != "sjv_collector":
+                    raise AssertionError(f"duplicate connection role is {other_user}")
+                results.append(evaluate_item(_BarrierConnection(other, barrier), *payload, 0))
+                other.execute("RESET ROLE")
+        except Exception as exc:  # pragma: no cover - reported by the test
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(payload,)) for payload in deliveries]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+    if errors or len(results) != len(deliveries) or any(thread.is_alive() for thread in threads):
+        fail(f"concurrent duplicate evaluation failed: {errors}, results={results}")
+    if any(result.first_delivery for result in results):
+        fail(f"concurrent duplicate was reported as first delivery: {results}")
+    if any(result.receipt_status != "duplicate_delivery" for result in results):
+        fail(f"concurrent duplicate receipt status is wrong: {results}")
+    if any(result.outcome != original.outcome for result in results):
+        fail(f"concurrent duplicate outcome changed: {results}")
+    if any(result.original_receipt_id != original.receipt_id for result in results):
+        fail(f"concurrent duplicate receipt reference changed: {results}")
+    row = conn.execute(
+        """
+        SELECT delivery_count, last_received_at, receipt_id, receipt_partition_month,
+               outcome
+        FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = %s AND item_index = 0
+        """,
+        (source_id, key),
+    ).fetchone()
+    if row != (
+        4,
+        max(timestamps),
+        original.receipt_id,
+        original.receipt_partition_month,
+        original.outcome,
+    ):
+        fail(f"concurrent duplicate update is wrong: {row}")
+    receipt_ids = {result.receipt_id for result in results}
+    if len(receipt_ids) != len(deliveries):
+        fail(f"concurrent duplicate receipts were merged: {results}")
+    print("PASS concurrent duplicate deliveries preserve outcome and count")
 
 
 def _boolean_is_not_proof(conn, source_id, endpoint_id, device_id):

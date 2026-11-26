@@ -1,6 +1,6 @@
 # Rozhodnutí
 
-Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Dne 16. 11. 2026 přibylo rozhodnutí R31 o výměnách a metrologické historii. Téhož dne se uzavřely jeho tři otevřené body: metrologické lhůty a upozornění, význam `failed` a shoda `location`. R1–R30 zůstávají schválené a beze změny. Dne 17. 11. 2026 přibylo rozhodnutí R32 o doručení s prokázaným `message_ref` po `timed_out`. R1–R31 se nemění. Dne 20. 11. 2026 přibylo rozhodnutí R33 o PostgreSQL 19 a o zahájení ostrého sběru 1. 1. 2027. Znění rozhodnutí 1–32 a revizí R1–R32 se nemění. Téhož dne přibylo rozhodnutí R34 o dokončení ingest schématu. Znění R1–R33 se nemění. Schválení dokumentace neznamená souhlas s nasazením.
+Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Dne 16. 11. 2026 přibylo rozhodnutí R31 o výměnách a metrologické historii. Téhož dne se uzavřely jeho tři otevřené body: metrologické lhůty a upozornění, význam `failed` a shoda `location`. R1–R30 zůstávají schválené a beze změny. Dne 17. 11. 2026 přibylo rozhodnutí R32 o doručení s prokázaným `message_ref` po `timed_out`. R1–R31 se nemění. Dne 20. 11. 2026 přibylo rozhodnutí R33 o PostgreSQL 19 a o zahájení ostrého sběru 1. 1. 2027. Znění rozhodnutí 1–32 a revizí R1–R32 se nemění. Téhož dne přibylo rozhodnutí R34 o dokončení ingest schématu a 26. 11. 2026 R36 o obecné telemetrii a bateriovém monitoringu. Znění R1–R35 se nemění. Schválení dokumentace neznamená souhlas s nasazením.
 
 ## Potvrzená rozhodnutí
 
@@ -44,7 +44,9 @@ Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11
 | Data | Retence | Mechanismus |
 | --- | --- | --- |
 | Odečty (`meter_readings`), denní hodnoty (`meter_daily_values`), souhrnná provenience (`reading_provenance`), příjmové zdroje (`ingest_sources`) | trvale | tabulky bez partitioningu. Odečty a provenience nemají cizí klíč na data s retencí |
-| Původní obálky (`ingest_payloads`), položky obálky (`ingest_payload_items`), příjmy (`ingest_receipts`), kandidáti deduplikace (`ingest_dedup_candidates`), odmítnuté obálky (`ingest_rejections`), dekódovaná pozorování (`decoded_observations`) | 24 měsíců stáří měsíce přijetí | měsíční partitions. Položky se odpojí dřív než jejich payload. Příjem z prosince se nemaže s telegramem z ledna |
+| Původní obálky (`ingest_payloads`), položky obálky (`ingest_payload_items`) a příjmy (`ingest_receipts`) | 36 měsíců stáří měsíce přijetí | měsíční partitions. Položky se odpojí dřív než jejich payload |
+| Kandidáti deduplikace (`ingest_dedup_candidates`), odmítnuté obálky (`ingest_rejections`) a dekódovaná pozorování (`decoded_observations`) | 24 měsíců stáří měsíce přijetí | měsíční partitions. Příjem z prosince se nemaže s telegramem z ledna |
+| Normalizovaná telemetrie (`device_telemetry`) | 36 měsíců stáří měsíce `received_at` | měsíční partitions podle UTC `received_at` |
 | Surové telegramy (`raw_telegrams`) | 24 měsíců stáří měsíce kotvy | měsíční partitions. Pozdější příjem tuto dobu neprodlužuje a cizím klíčem ji nedrží |
 | Fragmentové sady (`ingest_fragment_sets`) a fragmenty (`ingest_fragments`) | 24 měsíců od `first_received_at` a od `received_at` | bez partitioningu. Nejdřív `DELETE` fragmentů, potom sady, na kterou už žádný fragment neukazuje. Pozdní fragment sadu podrží. Každé doručení fragmentu je vlastní řádek |
 | Události zařízení (`device_events`) | 12 měsíců stáří měsíce `received_at` | měsíční partitions. `partition_month` je měsíc UTC hodnoty `received_at`. `occurred_at` měsíc neurčuje |
@@ -200,6 +202,19 @@ Systém zavádí samostatnou tabulku `ingest_payload_items`, která uchovává j
 
 R35 neschvaluje nové statusy příjmu, změnu `ingest_message_keys.outcome`, zápis do `meter_readings`, deduplikační algoritmus, pravidla fragmentace ani transportní adaptéry. Tyto oblasti zůstávají předmětem samostatného vyhodnocení a schválení.
 
+## Doplnění 26. 11. 2026: obecná telemetrie a bateriový monitoring
+
+**R36 – Obecná telemetrie zařízení a bateriový monitoring**
+
+Znění R1–R35 se nemění. Jde o dokumentační návrh; schválení R36 samo o sobě neznamená implementaci ani nasazení.
+
+1. Normalizovaná data se ukládají do obecné tabulky `device_telemetry`, nikoli do nové bateriové tabulky. Telemetrie se měří v intervalu 900 sekund a normalizovaná data se navrhují uchovávat 36 měsíců.
+2. R36 konkretizuje obecné pravidlo R27 pro nové retenční vrstvy: původní `ingest_payloads`, `ingest_payload_items` a `ingest_receipts` se uchovávají 36 měsíců. `ingest_message_keys` zůstává 60 dní, `raw_telegrams` a `decoded_observations` 24 měsíců a `device_events` 12 měsíců.
+3. Doručení používá samostatný MQTT topic `sjv/v1/dev/{device}/telemetry` s QoS 1 a HTTPS `POST /api/v1/ingest/telemetry`. Obě cesty používají stejný interní kontrakt a existující identitu `ingest_message_keys` `(ingest_source_id, msg_key_namespace, msg_key, item_index)`.
+   Jeden prvek `samples` je jeden kompletní vzorek, jehož payload může obsahovat více skupin hodnot současně. R36 neschvaluje nový sloupec `kind` ani nový deduplikační mechanismus. Současný návrh `device_telemetry` ale neobsahuje úplnou složenou identitu ani odkaz na `ingest_receipts`; rozhodnutí, zda ukládat složenou vazbu na příjem, zůstává otevřené.
+4. Aplikační ACK se publikuje až po databázovém COMMIT. Zařízení odstraní vzorek z lokální fronty až po uložení odpovídajícího výsledku ACK. Heartbeat zůstává samostatný, QoS 0, s intervalem 60 sekund.
+5. Alarmy baterie vyhodnocuje centrálně VPS po uložení telemetrie. `device_events` je určen pro významné změny a alarmy (`battery_low`, `battery_critical`, `power_source_changed`, `charging_changed`, `battery_sensor_fault`), nikoli pro každý vzorek. Konkrétní prahy vyžadují rozhodnutí podle chemie a zapojení, včetně hystereze a potlačení opakovaných notifikací.
+
 ## Otevřené body
 
 Hodnoty, které nejsou známé, se nedoplňují odhadem.
@@ -221,6 +236,8 @@ Hodnoty, které nejsou známé, se nedoplňují odhadem.
 | UDP/DTLS port a případný DNAT, pokud PoC přímý UDP potvrdí | samostatná změna mimo repozitář, až po PoC. Teď se port nepublikuje |
 | Která role smí číst `endpoint_credentials.secret_enc` kvůli DTLS PSK | UDP/DTLS listener není přiřazený. `sjv_collector`, `sjv_api`, `sjv_worker` ani `sjv_readonly` `secret_enc` nečtou. Přístup listeneru zůstává otevřený |
 | Kam se uloží odchozí token platformy | R34 přiřazuje `secret_enc` jen `dtls_psk`. Nový sloupec pro token platformy se nezakládá |
+| Přesná relační vazba `device_telemetry` na `ingest_receipts` | R36 určuje pořadí společného ingestu a používá existující `ingest_message_keys`, ale neschvaluje nový složený cizí klíč ani kopii celé ingest identity v telemetrii. Je třeba rozhodnout mezi dohledatelnou vazbou na `(receipt_id, receipt_partition_month)` a uložením celé identity `(ingest_source_id, msg_key_namespace, msg_key, item_index)` |
+| Závazné hodnoty případného klasifikačního pole telemetrie | JSON R36 žádné pole `kind` nemá a jeden řádek obsahuje celý vzorek; další klasifikace skupin v `payload` vyžaduje samostatný kontrakt |
 | Počet měřidel a intervaly vysílání | odhad objemu, fáze 4 |
 | Další doručení s prokázaným `message_ref`, když odpovídající sada je `complete` nebo `conflict` | Samostatné rozhodnutí. R32 se na tyto stavy nevztahuje. Fragment se k sadě nepřipojí. Jak se doručení dál eviduje, schválená pravidla neurčují |
 | Verze software a ověření bodů „k ověření“ | fáze 1–3 |

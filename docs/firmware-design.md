@@ -54,6 +54,16 @@ heartbeat, time_sync (SNTP), config_handler, ota, watchdog
 5. **uplink:** odesílání dávek do `batch_max` položek. Čekání na ACK s timeoutem `ack_timeout_s` z `config`. Při výpadku exponenciální backoff s náhodným rozptylem a horní mezí. Před první dávkou po připojení se pošle heartbeat, aby server znal epochu bootu.
 6. **ack_handler:** podle `msg_key` označí položky jako potvrzené. Všechny stavy ACK v [data-ingestion.md](data-ingestion.md#ack) končí potvrzením.
 
+## Telemetrie
+
+- Zařízení vytvoří telemetrický vzorek každých 900 sekund; výsledný interval se čte z `telemetry_interval_s` v retained konfiguraci.
+- Každý vzorek má stabilní `msg_key` a při opakovaném odeslání se nemění klíč ani obsah. Vzorky čekají v lokální persistentní frontě a odesílají se přes MQTT QoS 1.
+- Jeden vzorek je kompletní objekt s jedním `msg_key`; může obsahovat současně skupiny `power`, teploty, signálu a dalších stavových údajů podle kontraktu. Samostatné pole `kind` ani samostatný vzorek pro každou skupinu se nepoužívá.
+- Vzorek se z fronty odstraní až po uložení odpovídajícího aplikačního ACK. Fronta a její identita přežijí přepnutí Ethernet/LTE i výpadek sítě.
+- Heartbeat zůstává samostatný, QoS 0, s intervalem `heartbeat_s` (návrh 60 sekund); nenahrazuje telemetrii.
+- Skupina `power` je nepovinná. Firmware neposílá neznámé hodnoty jako nulu.
+- Tento návrh nezavádí AES klíče měřidel ani dešifrování do firmware.
+
 ## Identita zprávy
 
 | Hodnota | Uložení | Chování |
