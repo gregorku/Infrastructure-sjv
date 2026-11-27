@@ -86,7 +86,7 @@ Adaptér smí předat dál jen tuto položku. Zápis do `meter_readings`, `raw_t
 | payload_id | nezměněná obálka |
 | adapter, adapter_version | verze, která položku oddělila |
 
-Heartbeat a událost nevytvářejí odečet. `import_row` vytvoří odečet se `source_kind = import` až po validaci řádku. Neplatný řádek je příjem `invalid` a původní text řádku zůstane v payloadu.
+Heartbeat, událost a telemetrie nevytvářejí odečet. Telemetrie končí v `device_telemetry`, ne v `meter_readings`. `import_row` vytvoří odečet se `source_kind = import` až po validaci řádku. Neplatný řádek je příjem `invalid` a původní text řádku zůstane v payloadu.
 
 ## Dva druhy dat
 
@@ -262,7 +262,11 @@ sjv/v1/dev/{device}/config      server → zařízení   retained   konfigurace 
 
 ### Telemetrie
 
-Telemetrie používá samostatný topic `sjv/v1/dev/{device}/telemetry` s QoS 1 a také HTTPS endpoint `POST /api/v1/ingest/telemetry`. Obě transportní cesty převádějí zprávu na stejný interní kontrakt `message_kind = telemetry`; nevzniká paralelní ingest ani deduplikační mechanismus. Cesta je `ingest_payloads` (původní obálka) → `ingest_payload_items` (položka) → `ingest_receipts` (příjem a výsledek validace/deduplikace) → `device_telemetry` (normalizovaný vzorek).
+Tato kapitola sjednocuje datový kontrakt R36. Jde o dokumentační návrh pro budoucí firmware, MQTT collector a HTTPS API; MQTT klient, collector ani HTTPS endpoint zatím v repozitáři nejsou.
+
+Telemetrie používá samostatný topic `sjv/v1/dev/{device}/telemetry` s QoS 1 a také HTTPS endpoint `POST /api/v1/ingest/telemetry`. Obě transportní cesty převádějí zprávu na stejný interní kontrakt `message_kind = telemetry`. Nevzniká paralelní ingest ani nový deduplikační mechanismus. Cesta je `ingest_payloads` (původní obálka) → `ingest_payload_items` (položka) → `ingest_receipts` (příjem a výsledek validace/deduplikace) → `device_telemetry` (normalizovaný vzorek). `meter_readings` z telemetrie nevzniká.
+
+Zařízení smí publikovat pouze do vlastního topicu `sjv/v1/dev/{device}/telemetry`. Collector tento topic odebírá a zpracuje stejnými pravidly společného ingestu. ACK zůstává na stávajícím topicu `sjv/v1/dev/{device}/ack`.
 
 ```json
 {
@@ -289,11 +293,13 @@ Telemetrie používá samostatný topic `sjv/v1/dev/{device}/telemetry` s QoS 1 
 }
 ```
 
-`v` je verze kontraktu. `tx.instance`, `tx.boot`, `tx.uptime_ms` a `tx.at` identifikují vysílač a čas odeslání. Každý prvek `samples` je jedna položka, má stabilní `msg_key`, `uptime_ms` a UTC `measured_at`; při opakování se odešle stejný klíč i obsah. Dávka používá `item_index` v existující identitě `(ingest_source_id, msg_key_namespace, msg_key, item_index)` v `ingest_message_keys`. `power` je nepovinná skupina. Neznámé hodnoty se neposílají jako nula; `soc_percent` se vynechá nebo je `null`, pokud jej zařízení neumí spolehlivě určit.
+`v` je verze kontraktu. `tx.instance`, `tx.boot`, `tx.uptime_ms` a `tx.at` identifikují vysílač a čas odeslání. Každý prvek `samples` je jedna položka se stabilním `msg_key`, `uptime_ms` a UTC `measured_at`. Při opakování se odešle stejný klíč i stejný obsah. Dávka používá `item_index` v existující identitě `(ingest_source_id, msg_key_namespace, msg_key, item_index)` v `ingest_message_keys`. Hash obsahu není náhradou `msg_key`.
 
-Jeden prvek `samples` je jeden kompletní telemetrický vzorek, nikoli jeden řádek pro každou skupinu hodnot. Jeden vzorek proto může mít současně `power`, teplotu, signál i další stavové skupiny v témže objektu; JSON kontrakt pro něj nepoužívá samostatné pole `kind`.
+Jeden prvek `samples` je jeden kompletní telemetrický vzorek. Může obsahovat více skupin hodnot současně, například `power`, teplotu nebo signál. JSON kontrakt nepoužívá samostatné pole `kind` ani samostatný vzorek pro každou skupinu. Skupiny přítomné ve vzorku se po úspěšném zpracování uloží jako objekt `device_telemetry.payload`; neznámé nebo nedostupné hodnoty se neposílají jako nula. `power` je nepovinná skupina; `soc_percent` se vynechá nebo je `null`, pokud jej zařízení neumí spolehlivě určit.
 
-Příjem zachovává limit `INGEST_MAX_MESSAGE_AGE` a existující validační a deduplikační pravidla. `ingest_receipts` eviduje každou přijatou položku a její výsledek, včetně `accepted` nebo `duplicate_delivery`; tento výsledek je podkladem pro položkový aplikační ACK. ACK se publikuje až po COMMIT výsledné transakce. Zařízení odstraní vzorek z persistentní fronty až po uložení odpovídajícího výsledku ACK. Telemetrický vzorek sám o sobě nezakládá `device_events`; významné změny a alarmy se vyhodnocují centrálně po uložení.
+Výchozí `msg_key_scope` je `transport`, takže MQTT používá namespace `mqtt` a HTTPS namespace `https`. Firmware ESP společný prostor klíčů napříč transporty zatím neprokazuje, proto se stejný text `msg_key` mezi MQTT a HTTPS automaticky neslučuje. Když má stejný text `msg_key` napříč transporty také stejný `content_hash`, pozdější příjem dostane `id_collision`. `delivery_count` se mezi transporty nesčítá, výsledek se neoznačuje jako `duplicate_delivery` a žádné pozorování se kvůli této kolizi nemaže. Opakované doručení stejného transportu se vyhodnocuje přes existující `ingest_message_keys` a může skončit jako `duplicate_delivery`.
+
+Příjem zachovává limit `INGEST_MAX_MESSAGE_AGE` a existující validační a deduplikační pravidla. `ingest_receipts` eviduje každou přijatou položku a její výsledek, včetně `accepted` nebo `duplicate_delivery`; tento výsledek je podkladem pro položkový aplikační ACK. ACK se publikuje až po COMMIT výsledné transakce. Zařízení odstraní vzorek z persistentní fronty až po uložení odpovídajícího výsledku ACK. Telemetrický vzorek sám o sobě nezakládá `device_events`; významné změny a alarmy se vyhodnocují centrálně po uložení. Heartbeat zůstává samostatný, QoS 0, s intervalem `heartbeat_s` (návrh 60 s) a telemetrii nenahrazuje. Interval telemetrie je `telemetry_interval_s` (návrh 900 s) v retained konfiguraci.
 
 ### Heartbeat
 
