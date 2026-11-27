@@ -765,10 +765,23 @@ PY
 }
 
 run_recovery_unit_tests() {
+    # psycopg comes from app/backend/uv.lock; never use bare system python3 here.
+    if ! command -v uv >/dev/null 2>&1; then
+        printf '%s\n' "uv is required for TX1 recovery unit tests (locked deps from ${BACKEND}/uv.lock). Install uv, then: uv sync --frozen --project ${BACKEND}" >&2
+        exit 1
+    fi
+    if [[ ! -f "${BACKEND}/uv.lock" ]]; then
+        printf '%s\n' "Missing locked dependencies file: ${BACKEND}/uv.lock" >&2
+        exit 1
+    fi
+    if [[ ! -f "${BACKEND}/pyproject.toml" ]]; then
+        printf '%s\n' "Missing project file: ${BACKEND}/pyproject.toml" >&2
+        exit 1
+    fi
     set +e
     (
         cd "${BACKEND}"
-        PYTHONPATH="${BACKEND}" python3 tests/test_recovery.py
+        PYTHONPATH="${BACKEND}" uv run --project "${BACKEND}" --locked python tests/test_recovery.py
     ) > "${TEST_ROOT}/recovery-unit.log" 2>&1
     local status=$?
     set -e
