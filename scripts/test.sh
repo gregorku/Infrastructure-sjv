@@ -82,6 +82,26 @@ run_meter_key_tests() {
         "${python}" "${REPO_ROOT}/app/backend/tests/test_meter_keys.py"
 }
 
+run_recovery_unit_tests() {
+    print_header "TX1 recovery unit tests"
+    if ! command -v python3 >/dev/null 2>&1; then
+        t_fail "python3 is required for the recovery unit tests. Install the python3 package: apt-get install python3 shellcheck"
+        return
+    fi
+    # psycopg comes from app/backend/uv.lock (runtime dependency of sjv_ingest.recovery).
+    local python="${REPO_ROOT}/.venv/bin/python"
+    if [[ ! -x "${python}" ]]; then
+        python="python3"
+    fi
+    if ! "${python}" -c 'import psycopg' >/dev/null 2>&1; then
+        t_fail "recovery unit tests need psycopg from app/backend/uv.lock. Install with: uv sync --frozen --project ${REPO_ROOT}/app/backend. No container was started."
+        return
+    fi
+    t_expect_ok "TX1 recovery unit tests" \
+        env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${REPO_ROOT}/app/backend" \
+        "${python}" "${REPO_ROOT}/app/backend/tests/test_recovery.py"
+}
+
 run_shellcheck_step() {
     print_header "ShellCheck"
     local rc=0
@@ -111,6 +131,7 @@ main() {
     run_backup_tests
     run_backup_local_tests
     run_ingest_contract_tests
+    run_recovery_unit_tests
     run_meter_key_tests
     run_shellcheck_step
 

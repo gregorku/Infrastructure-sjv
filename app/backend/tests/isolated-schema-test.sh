@@ -216,6 +216,20 @@ PY
     chmod 600 "${target}"
 }
 
+run_recovery_unit_tests() {
+    set +e
+    (
+        cd "${BACKEND}"
+        PYTHONPATH="${BACKEND}" python3 tests/test_recovery.py
+    ) > "${TEST_ROOT}/recovery-unit.log" 2>&1
+    local status=$?
+    set -e
+    show_log "${TEST_ROOT}/recovery-unit.log"
+    if [[ "${status}" -ne 0 ]]; then
+        exit "${status}"
+    fi
+}
+
 migrate() {
     local database="$1"
     local urlfile="${TEST_ROOT}/url-${database}"
@@ -290,8 +304,21 @@ migrate() {
     if [[ "${retention_status}" -ne 0 ]]; then
         exit "${retention_status}"
     fi
+    set +e
+    (
+        cd "${BACKEND}"
+        PYTHONPATH="${BACKEND}" SJV_DATABASE_URL="$(cat "${urlfile}")" python3 tests/recovery_tests.py
+    ) > "${TEST_ROOT}/recovery-${database}.log" 2>&1
+    local recovery_status=$?
+    set -e
+    show_log "${TEST_ROOT}/recovery-${database}.log"
+    if [[ "${recovery_status}" -ne 0 ]]; then
+        exit "${recovery_status}"
+    fi
     rm -f "${urlfile}"
 }
+
+run_recovery_unit_tests
 
 migrate sjv
 
