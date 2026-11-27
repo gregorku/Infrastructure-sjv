@@ -123,12 +123,12 @@ ověřená schopnost zařízení.
 Přijímač:
 
 1. zachytí celý rámec a RSSI;
-2. uloží `fmt` a příznak přítomnosti CRC;
-3. neprovádí dešifrování;
+2. uloží `fmt` a pole `crc` jako příznak přítomnosti CRC bloků v rámci, nikoli jako výsledek jejich ověření;
+3. neprovádí dešifrování a nemění ani neodstraňuje původní bajty rámce;
 4. předá rámec ke kontrole a filtraci;
 5. po úspěšném zápisu do fronty jej považuje za přijatý.
 
-Rámec se ve frontě nemění při opakovaném odeslání.
+Rámec se ve frontě nemění při opakovaném odeslání. Nový formát CRC ani nové pole se nepřidávají.
 
 ## 7. Konfigurace čtyř rádiových přijímačů
 
@@ -150,17 +150,21 @@ stejný typ raw položky.
 ## 8. Kontrola integrity a identifikace telegramů
 
 `frame_check` ve firmware je pouze předběžná, nedestruktivní kontrola délky,
-formátu a dostupného CRC příznaku. Není autoritativním rozhodnutím o validitě
-telegramu. Firmware nesmí měnit původní bajty ani odstraňovat CRC bloky.
-Předběžný výsledek se smí použít pro diagnostiku a filtraci zjevně vadného
-příjmu, ale politika zahazování rámce po takové kontrole musí být ještě
-ověřena na skutečných vzorcích.
+formátu a dostupného CRC. Není autoritativním rozhodnutím o validitě
+telegramu. Pole `crc` v raw kontraktu označuje přítomnost CRC bloků, nikoli
+výsledek jejich ověření. Firmware nesmí měnit původní bajty rámce ani
+odstraňovat CRC bloky.
 
-Autoritativní kontrolu provádí VPS podle `fmt` a `crc` v rámci společného
+Předběžná kontrola ve firmware slouží diagnostice. Politika lokálního
+odmítnutí rámce po této kontrole je rozhodnutí k ověření na skutečných
+vzorcích; není automaticky předpokládaným chováním přijímače.
+
+Autoritativní validaci provádí VPS podle `fmt` a `crc` v rámci společného
 ingest postupu. `crc: true` znamená, že rámec obsahuje CRC bloky a server je
 ověří a odstraní při své kanonizaci; tato operace nesmí zpětně změnit původní
-bajty uložené v payloadu. Při chybě vzniká příslušný stav příjmu, například
-`crc_error` nebo `invalid`, podle [data-ingestion.md](data-ingestion.md).
+bajty uložené v payloadu. Při chybě VPS vytvoří výsledek `crc_error` (nebo
+`invalid`, pokud chyba není CRC), podle [data-ingestion.md](data-ingestion.md).
+Nový formát CRC ani nové pole se nepřidávají.
 
 Z rámce se podle pravidel v [data-ingestion.md](data-ingestion.md#deduplikace-raw-telegramů)
 určí M a A pole, případně další identifikační údaje potřebné pro canonical
@@ -209,8 +213,12 @@ Fronta používá LittleFS podle návrhu firmware:
   velikosti záznamů.
 
 Při zaplnění se může zahodit nejstarší segment včetně nepotvrzených položek.
-Zařízení vytvoří událost `queue_overflow` s rozsahem ztracených `msg_key` a
-jejich počtem.
+`queue_overflow` je v [firmware-design.md](firmware-design.md) návrh
+lokální diagnostiky / události s rozsahem ztracených `msg_key` a jejich
+počtem. V [data-ingestion.md](data-ingestion.md) není jako závazný typ
+události doložen. Zůstává otevřeným bodem. Tento dokument proto
+nedefinuje jeho payload ani způsob publikování; případná implementace
+musí využít existující kontrakt událostí.
 Kapacita, životnost a skutečný formát oddílu se změří v Etapě 0/6, neodhadují
 se z typu desky.
 
@@ -218,6 +226,18 @@ Fronta přežije restart, výpadek sítě i přepnutí Ethernet/LTE. Záznam se
 odstraní až po uložení odpovídajícího aplikačního ACK pro každou jeho položku.
 
 ## 11. MQTT/TLS a datový kontrakt s VPS
+
+Aktuální plán firmware používá MQTT/TLS přes Ethernet jako primární uplink
+a přes LTE jako záložní uplink. Přepnutí Ethernet/LTE proto zůstává uvnitř
+MQTT: `instance_id`, `boot_counter`, `seq`, `msg_key` i obsah fronty se
+nemění a doručení zůstává ve stejném `msg_key_namespace = mqtt`.
+
+HTTPS je samostatná budoucí transportní možnost podle
+[data-ingestion.md](data-ingestion.md). Není transparentním failoverem
+aktuálního firmware a není způsobem opakování stejné položky se stejnou
+deduplikační identitou. MQTT a HTTPS mají rozdílný `msg_key_namespace`
+(`mqtt` / `https`). Stejný text `msg_key` při přechodu MQTT → HTTPS proto
+může skončit jako `id_collision`, nikoli jako `duplicate_delivery`.
 
 `data-ingestion.md` uvádí pro raw rámce topic:
 
@@ -228,21 +248,22 @@ sjv/v1/dev/{device}/telegrams
 Zařízení má podle návrhu publikovat raw dávky s QoS 1. Telemetrie má oddělený
 topic `sjv/v1/dev/{device}/telemetry`, rovněž QoS 1; nejde o náhradu raw
 telegramů. Heartbeat používá vlastní topic QoS 0. Tyto hodnoty jsou
-kontraktový návrh, nikoli důkaz implementace.
+kontraktový návrh; MQTT klient, collector, HTTPS API ani firmware v
+repozitáři zatím nejsou.
 
-Před implementací telemetrie je nutné sjednotit jeden topic registry a ověřit
+Před implementací telemetrie je nutné sjednotit topic registry a ověřit
 proti němu:
 
 - ACL zařízení pro publikování vlastního topicu;
 - subscription collectoru;
 - serverový ACK topic a jeho položkové výsledky;
-- HTTPS endpoint `POST /api/v1/ingest/telemetry`;
-- stejný interní kontrakt a stejnou deduplikační identitu pro MQTT i HTTPS.
+- HTTPS endpoint `POST /api/v1/ingest/telemetry` jako samostatnou budoucí
+  cestu se stejným interním kontraktem `message_kind = telemetry`, ale
+  s vlastním transportním namespace.
 
 Tato revize nevytváří nový topic ani nové JSON pole. Dokud není registry,
-ACL, collector subscription, ACK a HTTPS cesta implementovaná a otestovaná,
-nelze telemetrii označit za plně implementovanou nebo za dokonale sjednocený
-provozní kontrakt.
+ACL, collector subscription a ACK cesta implementovaná a otestovaná, nelze
+telemetrii označit za hotovou součást systému.
 
 Raw obálka odpovídá kontraktu v
 [data-ingestion.md](data-ingestion.md#raw-zpráva). Firmware posílá celé
@@ -257,10 +278,6 @@ MQTT/TLS:
   `ack` a `config`;
 - nové topics ani ACL se tímto plánem nepřidávají;
 - při výpadku uplinku se zprávy neodhazují dříve než podle pravidel fronty.
-
-HTTPS je v datovém kontraktu podporovaný fallback, ale adaptér ani HTTPS
-implementace nejsou součástí tohoto dokumentu. Pokud bude později použita,
-musí odeslat stejný obsah položky a stejný `msg_key`.
 
 ## 12. Aplikační ACK a deduplikace
 
@@ -283,12 +300,15 @@ logický odečet.
 ## 13. Ethernet a LTE failover
 
 Ethernet je preferovaná cesta. LTE se použije po detekovaném selhání
-Ethernetu a po ověření dostupnosti modemu a datového spojení. Přepnutí:
+Ethernetu a po ověření dostupnosti modemu a datového spojení. Obě cesty
+používají MQTT; přepnutí linky není přechodem na HTTPS. Přepnutí:
 
 - nesmí změnit `instance_id`, `boot_counter`, `seq`, `msg_key` ani uložený
   obsah fronty;
 - nesmí vytvořit nový záznam pro stejný rámec;
-- smí změnit pouze aktuální transportní cestu a diagnostiku;
+- zachovává `msg_key_namespace = mqtt`, protože transportní protokol zůstává
+  MQTT;
+- smí změnit pouze aktuální síťovou cestu (Ethernet/LTE) a diagnostiku;
 - musí zachovat pořadí a retry/backoff fronty;
 - po návratu Ethernetu smí uplink přejít zpět podle explicitního stavového
   automatu.
@@ -323,7 +343,8 @@ telegramů:
 - stav každého CC1101 a počty rámců;
 - CRC/formát chyby a `filtered_unknown`;
 - stav Ethernetu, LTE a přepínání;
-- hloubka fronty, nejstarší klíč, zahozené záznamy a `queue_overflow`;
+- hloubka fronty, nejstarší klíč, zahozené záznamy a případná diagnostika
+  přetečení fronty (návrh `queue_overflow`, otevřený bod);
 - MQTT reconnect, retry a ACK timeout;
 - synchronizace času, reset reason, heap a watchdog;
 - verze firmware a konfigurace.
@@ -360,9 +381,12 @@ Testy se dělí na hardware-in-the-loop, simulaci a integrační test s VPS.
 - **Fronta:** výpadek napájení při každé části zápisu, neplatný poslední
   CRC, zaplnění, replay a zachování pořadí.
 - **Uplink:** Ethernet výpadek, LTE přechod, návrat Ethernetu, TLS chyba,
-  broker reconnect a změna linky bez změny `msg_key`.
+  broker reconnect a změna linky bez změny `msg_key` (obě cesty MQTT).
 - **ACK:** ztracený ACK, duplicitní ACK, částečný ACK, `accepted`,
-  `duplicate_delivery`, `invalid`, `too_old` a další stavy podle kontraktu.
+  `duplicate_delivery` při opakování v rámci stejného MQTT transportu,
+  `id_collision` při stejném textu `msg_key` v jiném transportním namespace
+  (např. MQTT → HTTPS) bez záměny za `duplicate_delivery`, `invalid`,
+  `too_old` a další stavy podle kontraktu.
 - **Čas:** SNTP před příjmem, po příjmu, předchozí boot, drift a chybějící
   čas zařízení.
 - **Whitelist:** známé, neznámé a dočasně povolené měřidlo.
@@ -511,6 +535,9 @@ serveru a že transportní `tx.at` není autoritativní čas příjmu.
 | Podporované režimy Wireless M-Bus a konkrétní konfigurace | technické ověření na vzorcích | Etapa 3 |
 | Sdílení antén a elektromagnetické rušení | technické ověření | Etapy 0, 4 |
 | Velikost flash oddílu a životnost LittleFS | technické ověření/měření | Etapa 6 |
+| Segmenty LittleFS 64 kB | návrhový formát do ověření kapacity flash | Etapa 6 |
+| `REPLAY_HOURS = 24 h` | návrhová hodnota; ověřit podle skutečné flash a velikosti záznamů | Etapa 6 |
+| `queue_overflow` jako typ události | návrh lokální diagnostiky ve firmware-design; v data-ingestion není závazně doložen | kapitola 10, Etapa 6 |
 | Maximální počet měřidel a intervaly vysílání | vstup od provozu/měření | kapacita fronty |
 | APN, SIM, LTE režim a failover politika | schválení + technické ověření | Etapa 9 |
 | Secure boot v2 a flash encryption na konkrétní desce | technické ověření | kapitola 16 „Aktualizace firmware a bezpečnost“ |

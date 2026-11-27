@@ -14,15 +14,20 @@ Topic `config` je konfigurace směrem k zařízení. Heslo pro odesílání tele
 
 ## Neznámé vlastnosti hardwaru
 
-Návrh nepředpokládá konkrétní desku. Před implementací je potřeba zjistit:
+Návrh obecně nepředpokládá jedinou desku. Konkrétní přijímač T-ETH-Elite používá
+Ethernet jako primární připojení a T-A7670E jako LTE zálohu ke stejnému MQTT/TLS
+ingest rozhraní. Wi-Fi není požadavek tohoto receiveru; u jiného hardwarového
+provedení může zůstat variantou uplinku.
 
-- přesný model LILYGO, rádiový čip (CC1101, SX1262, SX1276 nebo jiný) a podporované režimy wM-Bus (T1, C1, S1),
+Před implementací je potřeba zjistit:
+
+- přesnou revizi desky, rádiový čip (CC1101 nebo jiný) a podporované režimy wM-Bus (T1, C1, S1),
 - velikost flash a PSRAM,
-- konektivitu v budově: Wi-Fi, LTE modem, nebo obojí,
+- ověřené parametry Ethernetu a LTE (T-A7670E); u jiné desky případně Wi-Fi,
 - napájení: síťové, nebo baterie (mění strategii spojení),
 - zda konkrétní varianta čipu podporuje flash encryption a secure boot v2,
 - přesnost krystalu, tedy drift monotónního času. Měří se v PoC, protože vstupuje do nejistoty času zachycení,
-- dřívější firmware LilyGO (zdroj, licence). Posílal hex do `wmbus/lilygo/telegram`.
+- dřívější firmware LilyGO (zdroj, licence), pokud se z něj něco přebírá. Posílal hex do `wmbus/lilygo/telegram`.
 
 ## Volba platformy
 
@@ -41,14 +46,17 @@ ESPHome nedává kontrolu nad persistentní frontou a aplikačním ACK. Arduino 
 ```text
 radio_rx ──► frame_check ──► filter ──► queue_append (flash)
                                              │
-uplink (Wi-Fi/LTE, MQTT TLS) ◄── queue_read ─┘
+uplink (Ethernet/LTE → MQTT TLS) ◄── queue_read ─┘
    │  publish dávky QoS 1                     ▲
    └─ ack_handler ── queue_mark_acked ────────┘
 heartbeat, time_sync (SNTP), config_handler, ota, watchdog
 ```
 
+U T-ETH-Elite je uplink Ethernet (primární) nebo LTE (záloha) do MQTT/TLS.
+Wi-Fi zde není požadavek. HTTPS není transparentní failover MQTT.
+
 1. **radio_rx:** příjem rámce a RSSI. Ihned se zaznamená reference zachycení: `instance_id`, `boot_counter`, `rx_uptime_ms` a `rx_unix_ms`, ale `rx_unix_ms` jen při synchronizovaném čase.
-2. **frame_check:** základní kontrola délky a CRC podle formátu. Rámec se nemění, posílá se původní podoba s údaji `fmt` a `crc`.
+2. **frame_check:** předběžná kontrola délky a dostupného CRC podle formátu. Autoritativní validace a kanonizace (ověření a odstranění CRC bloků) zůstává na VPS ([data-ingestion.md](data-ingestion.md)). Původní přijaté bajty telegramu se nesmějí svévolně měnit; posílá se původní podoba s údaji `fmt` a `crc`. CRC Wireless M-Bus není totéž co CRC32 interního záznamu fronty. Zda firmware vadný telegram lokálně zahodí, nebo ho předá k serverové klasifikaci, je otevřené.
 3. **filter:** whitelist měřidel (M a A pole) z retained `config`. Ostatní měřidla se nezapisují, jen se počítají (`filtered_unknown` v heartbeatu). Režim discovery do času `discovery_until` povolí odesílání všech měřidel kvůli instalaci nových.
 4. **queue_append:** zápis do persistentní fronty. Teprve potom se rámec považuje za přijatý.
 5. **uplink:** odesílání dávek do `batch_max` položek. Čekání na ACK s timeoutem `ack_timeout_s` z `config`. Při výpadku exponenciální backoff s náhodným rozptylem a horní mezí. Před první dávkou po připojení se pošle heartbeat, aby server znal epochu bootu.
@@ -76,16 +84,17 @@ heartbeat, time_sync (SNTP), config_handler, ota, watchdog
 
 ## Persistentní fronta
 
-- LittleFS, segmenty po 64 kB, jen přidávání na konec. Každý záznam má hlavičku `magic`, `version`, `len`, `crc32`.
+- LittleFS, segmenty po 64 kB, jen přidávání na konec. Každý záznam má hlavičku `magic`, `version`, `len`, `crc32` (integrita záznamu fronty, nikoli CRC Wireless M-Bus).
 - **Záznam obsahuje:**
   - `msg_key` (tedy `instance_id`, `boot_counter`, `seq`),
   - referenci zachycení: `rx_instance`, `rx_boot`, `rx_uptime_ms` a `rx_unix_ms` (0, když čas nebyl synchronizovaný),
   - `rssi`, `fmt`, `crc_flag` a rámec.
 
+  Interní `crc_flag` odpovídá wire poli `crc` v JSON raw kontraktu: příznak přítomnosti CRC bloků v rámci, nikoli výsledek serverové validace.
   Záznam se po zápisu nemění. Při každém, i opakovaném, odeslání se z něj posílají stejné údaje `rx` a stejný `msg_key`.
 - Potvrzení se nezapisuje k jednotlivým záznamům. Ukládá se jako „potvrzeno do“ pro každý segment. Segment se smaže, až jsou potvrzené všechny jeho záznamy a uplynulo `REPLAY_HOURS`.
 - Po výpadku napájení se při startu segmenty projdou a záznam s neplatným `crc32` na konci se zahodí. Ztratí se nejvýš rozepsaný záznam.
-- Při zaplnění se smaže nejstarší segment, i nepotvrzený. Zařízení pošle událost `queue_overflow` s rozsahem ztracených `msg_key` a počtem. Server z toho udělá alarm.
+- Při zaplnění se smaže nejstarší segment, i nepotvrzený. Diagnostika přetečení (návrhový příklad `queue_overflow` s rozsahem ztracených `msg_key` a počtem) není dokončený autoritativní event kontrakt. Firmware nesmí slibovat uložení této události do stejné plné fronty. Automatický serverový alarm z `queue_overflow` se nepředpokládá.
 - **Kapacita** se určí až podle skutečné flash a změřené velikosti záznamů: `kapacita ≈ velikost oddílu fronty / průměrná velikost záznamu`. Doba, kterou fronta pokryje, je `kapacita / počet přijatých telegramů za hodinu`. Obojí se zapíše po PoC.
 
 ## Čas
@@ -109,10 +118,10 @@ heartbeat, time_sync (SNTP), config_handler, ota, watchdog
   - časová reference: `instance`, `boot`, `uptime_ms`, `at` a stav SNTP,
   - verze firmware,
   - fronta: hloubka, reference nejstaršího nepotvrzeného záznamu, počet zahozených,
-  - RSSI Wi-Fi nebo LTE, volná paměť,
+  - indikátor rádiového / síťového signálu a volná paměť. Pole `rssi_wifi` v [data-ingestion.md](data-ingestion.md#heartbeat) zůstává názvem kontraktu; u T-ETH-Elite (Ethernet/LTE, bez Wi-Fi jako požadavku) není jasné, zda a jakou hodnotu má nést, a zůstává otevřenou otázkou,
   - počet přijatých a odfiltrovaných rámců.
 - LWT `status = offline` (retained). Po připojení `online`.
-- Události (QoS 1, přes frontu): `boot` (s důvodem resetu), `queue_overflow`, `time_sync_lost`, `radio_error`, `ota_result`.
+- Topic `events` existuje v [data-ingestion.md](data-ingestion.md), ale společný event kontrakt (envelope, typy, identita, deduplikace, ACK) není dokončený. Názvy jako `boot`, `queue_overflow`, `time_sync_lost`, `radio_error` nebo `ota_result` jsou jen návrhy / příklady, ne schválený seznam.
 
 ## Bezpečnost zařízení
 

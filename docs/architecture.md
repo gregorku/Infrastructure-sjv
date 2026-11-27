@@ -61,8 +61,8 @@ Adaptér jen převede bajty na interní kontrakt z [data-ingestion.md](data-inge
 | `sjv-postgresql` | lokální build z `postgres:19.0` a pgBackRest 2.60.1 | `sjv-internal` | žádný | `pg_isready` |
 | `sjv-mosquitto` | `eclipse-mosquitto` 2.x, přesný tag | `sjv-internal`, `sjv-mqtt` | `8883` | odběr `$SYS` přes interní listener s účtem healthcheck |
 | `sjv-backend` | lokální build `app/backend` | `sjv-proxy`, `sjv-internal` | žádný | `GET /readyz` |
-| `sjv-collector` | lokální build `app/collector` | `sjv-internal` | žádný | soubor heartbeat procesu |
-| `sjv-worker` | stejný image jako collector, jiný entrypoint | `sjv-internal`, `sjv-egress` | žádný | soubor heartbeat procesu |
+| `sjv-collector` | plánovaný lokální build `app/collector` (adresář v repozitáři zatím není) | `sjv-internal` | žádný | soubor heartbeat procesu |
+| `sjv-worker` | plánovaný; stejný image jako collector, jiný entrypoint | `sjv-internal`, `sjv-egress` | žádný | soubor heartbeat procesu |
 | `sjv-web` | lokální build `app/frontend` na `nginx-unprivileged` | `sjv-proxy` | žádný | HTTP na interní port |
 | `sjv-backup` | lokální build, Restic `0.19.1` | `sjv-egress` | žádný | soubor heartbeat plánovače |
 
@@ -314,10 +314,10 @@ Kontinuální práce (dekódovací fronta, timeout úplnosti fragmentů, offline
 Infrastructure-sjv/
 ├── README.md  .env.example  .gitignore  compose.yml
 ├── compose/   00-networks.yml 10-traefik.yml 15-traefik-admin-port.yml 20-crowdsec.yml
-│              30-postgresql.yml 40-mosquitto.yml 50-backend.yml 55-collector.yml
-│              60-worker.yml 70-web.yml
+│              30-postgresql.yml 40-mosquitto.yml (plán) 50-backend.yml (plán)
+│              55-collector.yml (plán) 60-worker.yml (plán) 70-web.yml (plán)
 ├── configs/   traefik/ crowdsec/ mosquitto/ postgres/ systemd/
-├── app/       backend/ collector/ frontend/
+├── app/       backend/ ; collector/ a frontend/ jsou plánované, zatím nejsou
 ├── scripts/   config.sh init.sh update-env.sh check-env.sh deploy.sh init-backup.sh post-deploy.sh
 │              upgrade.sh reload.sh test.sh shellcheck.sh create-dashboard-user.sh
 │              create-admin.sh cert-sync.sh maintenance.sh

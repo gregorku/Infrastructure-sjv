@@ -229,7 +229,7 @@ SJV_DATABASE_URL="…" alembic -c alembic.ini upgrade head
 SJV_DATABASE_URL="…" alembic -c alembic.ini check
 ```
 
-Produkční obal, který by totéž spustil v `sjv-postgresql`, v repozitáři není. Po `upgrade head` má tabulka `alembic_version` jeden řádek `0003_retention`. To izolovaný test ověřuje dotazem `SELECT version_num FROM alembic_version`.
+Produkční obal, který by totéž spustil v `sjv-postgresql`, v repozitáři není. Po `upgrade head` má tabulka `alembic_version` jeden řádek `0004_receipt_status_update`. To izolovaný test ověřuje dotazem `SELECT version_num FROM alembic_version`.
 
 Řetěz revizí:
 
@@ -238,8 +238,11 @@ Produkční obal, který by totéž spustil v `sjv-postgresql`, v repozitáři n
 | `0001_ingest_schema` | žádný | ingest, referenční tabulky, role oprávnění, měsíční partitions |
 | `0002_payload_items` | `0001_ingest_schema` | položky obálky `ingest_payload_items` |
 | `0003_retention` | `0002_payload_items` | `retention_log` a retenční procedury |
+| `0004_receipt_status_update` | `0003_retention` | `GRANT UPDATE (status)` na `ingest_receipts` pro `sjv_collector` (R20 větev `evaluate_item`) |
 
-Všechny tři revize mají `downgrade`, který vyvolá chybu a označí migraci jako forward-only. Izolovaný test očekává, že `alembic downgrade -1` selže a v hlášení bude `forward-only`. Návrat schématu je obnova ze zálohy, ne downgrade. Skript, který by před migrací zálohu vynutil, dnes není.
+Migrace `0004_receipt_status_update` nemění tabulky ani constrainty; jen udělí `sjv_collector` sloupcové `UPDATE (status)` na `ingest_receipts`. Bez této migrace selže R20 větev evaluatoru, která při opakovaném doručení zapisuje `receipt_status = duplicate_delivery`. Proto musí být `alembic upgrade head` (včetně 0004) dokončená **před** nasazením kódu `evaluate_item`, který R20 UPDATE používá. Pořadí zůstává: běžící PostgreSQL → ruční `SJV_DATABASE_URL` → `alembic -c alembic.ini upgrade head` → teprve potom provozní role collectoru s tímto evaluatorem. Periodický recovery worker ani host timer tím nevznikají.
+
+Všechny čtyři revize mají `downgrade`, který vyvolá chybu a označí migraci jako forward-only. Izolovaný test očekává, že `alembic downgrade -1` selže a v hlášení bude `forward-only`. Návrat schématu je obnova ze zálohy, ne downgrade. Skript, který by před migrací zálohu vynutil, dnes není.
 
 `alembic check` v izolovaném běhu porovná metadata s databází po `upgrade head`. Na VPS ho nemá co spustit, dokud nebude běžící PostgreSQL a ručně předané `SJV_DATABASE_URL`.
 
@@ -254,7 +257,7 @@ Kontroly, které projekt sám popisuje:
 3. Soubor bouncer klíče existuje a `check-env.sh` hlásí, že je soukromý. Hodnotu nečte.
 4. Po startu `sjv-crowdsec` v jeho logu není `No matching files for pattern /logs/access.log`. Až Traefik zapíše alespoň jeden řádek, uvnitř kontejneru `cscli metrics show acquisition parsers` ukáže zdroj `file:/logs/access.log` s nenulovým počtem načtených a parsovaných řádků. Příkaz z hostitele je `docker exec sjv-crowdsec cscli metrics show acquisition parsers`. Prázdný soubor při startu ještě žádný řádek nemá, proto nula do první skutečné žádosti není chyba akvizice.
 
-Kontrola databáze, oprávnění rolí a schématu na VPS hotový skript nemá. V izolovaném testu ji dělá `app/backend/tests/isolated-schema-test.sh` včetně `schema_tests.py`, `ingest_accept_tests.py` a `retention_tests.py`. Na VPS se nespouští.
+Kontrola databáze, oprávnění rolí a schématu na VPS hotový skript nemá. V izolovaném testu ji dělá `app/backend/tests/isolated-schema-test.sh` včetně `schema_tests.py`, `ingest_accept_tests.py`, `retention_tests.py` a `recovery_tests.py`. Na VPS se nespouští.
 
 ```bash
 ./scripts/test.sh
