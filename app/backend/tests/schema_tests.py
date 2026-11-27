@@ -106,7 +106,7 @@ def main():
         print("PASS trigger")
 
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()
-        if version != ("0003_retention",):
+        if version != ("0004_receipt_status_update",):
             fail(f"alembic version is {version}")
         print("PASS alembic version")
 
@@ -327,6 +327,41 @@ def main():
             True,
         ):
             fail(f"payload item privileges are {privileges}")
+        receipt_privileges = conn.execute(
+            """
+            SELECT
+                has_table_privilege('sjv_collector', 'ingest_receipts', 'UPDATE'),
+                has_column_privilege('sjv_collector', 'ingest_receipts', 'status', 'UPDATE'),
+                has_column_privilege('sjv_collector', 'ingest_receipts', 'message_kind', 'UPDATE'),
+                has_column_privilege('sjv_collector', 'ingest_receipts', 'payload_id', 'UPDATE')
+            """
+        ).fetchone()
+        if receipt_privileges != (False, True, False, False):
+            fail(f"ingest_receipts update privileges are {receipt_privileges}")
+        with conn.transaction():
+            conn.execute("SET LOCAL ROLE sjv_collector")
+            updated = conn.execute(
+                """
+                UPDATE ingest_receipts
+                SET status = status
+                WHERE id IN (SELECT id FROM ingest_receipts LIMIT 1)
+                """
+            ).rowcount
+            if updated < 1:
+                fail("collector could not update ingest_receipts.status")
+        expect_sqlstate(
+            conn,
+            "sjv_collector",
+            "UPDATE ingest_receipts SET message_kind = 'event'",
+            "42501",
+        )
+        expect_sqlstate(
+            conn,
+            "sjv_collector",
+            "UPDATE ingest_receipts SET payload_id = 0",
+            "42501",
+        )
+        print("PASS collector may update only ingest_receipts.status")
         expect_sqlstate(
             conn,
             "sjv_collector",

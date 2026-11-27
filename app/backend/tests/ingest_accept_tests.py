@@ -11,7 +11,7 @@ import psycopg
 
 from sjv_ingest.contract import Envelope, Fragment, Frame, Item, SourceTime
 from sjv_ingest.restore import load_envelope
-from sjv_ingest.evaluator import evaluate_item
+from sjv_ingest.evaluator import _ADVISORY_LOCK_SQL, evaluate_item
 from sjv_ingest.service import IngestRejected, accept
 
 URL = os.environ["SJV_DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
@@ -438,7 +438,11 @@ def _evaluate(conn, source_id, endpoint_id, device_id):
 
     _evaluate_rollbacks(conn, source_id, endpoint_id, device_id)
     _evaluate_null_history(conn, source_id, endpoint_id, device_id)
+    _evaluate_tx1_idempotence(conn, source_id, endpoint_id, device_id)
+    _evaluate_repeat_after_duplicate(conn, source_id, endpoint_id, device_id)
     _evaluate_concurrent(conn, source_id, endpoint_id, device_id)
+    _evaluate_concurrent_same_tx1(conn, source_id, endpoint_id, device_id)
+    _evaluate_advisory_lock_sql(conn)
 
 
 def _evaluate_invalid_item_indexes(conn, stored):
@@ -626,6 +630,137 @@ def _evaluate_null_history(conn, source_id, endpoint_id, device_id):
     print("PASS evaluator handles NULL historical dedup fields conservatively")
 
 
+def _receipt_count_for_item(conn, payload_id, payload_partition_month, item_index):
+    return conn.execute(
+        """
+        SELECT count(*) FROM ingest_receipts
+        WHERE payload_id = %s
+          AND payload_partition_month = %s
+          AND item_index = %s
+        """,
+        (payload_id, payload_partition_month, item_index),
+    ).fetchone()[0]
+
+
+def _evaluate_tx1_idempotence(conn, source_id, endpoint_id, device_id):
+    keyed = _new_evaluation_payload(
+        conn,
+        source_id,
+        endpoint_id,
+        device_id,
+        "tx1-idempotent",
+        datetime(2026, 11, 22, 8, 0, tzinfo=timezone.utc),
+        b"\x20-tx1-keyed",
+    )
+    first = evaluate_item(conn, keyed.payload_id, keyed.payload_partition_month, 0)
+    second = evaluate_item(conn, keyed.payload_id, keyed.payload_partition_month, 0)
+    if second != first:
+        fail(f"repeated keyed TX1 evaluate changed result: {first} -> {second}")
+    if _receipt_count_for_item(
+        conn, keyed.payload_id, keyed.payload_partition_month, 0
+    ) != 1:
+        fail("repeated keyed TX1 evaluate created another receipt")
+    keyed_count = conn.execute(
+        """
+        SELECT delivery_count FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = 'tx1-idempotent' AND item_index = 0
+        """,
+        (source_id,),
+    ).fetchone()[0]
+    if keyed_count != 1:
+        fail(f"repeated keyed TX1 evaluate changed delivery_count: {keyed_count}")
+
+    unkeyed = accept(
+        Envelope(
+            source_id,
+            "https",
+            datetime(2026, 11, 22, 8, 5, tzinfo=timezone.utc),
+            b"\x21-tx1-unkeyed",
+            (Item(index=0, original=b"\x21-tx1-unkeyed", message_kind="raw_wmbus"),),
+            endpoint_id=endpoint_id,
+            device_id=device_id,
+        ),
+        conn,
+    )
+    first_unkeyed = evaluate_item(
+        conn, unkeyed.payload_id, unkeyed.payload_partition_month, 0
+    )
+    second_unkeyed = evaluate_item(
+        conn, unkeyed.payload_id, unkeyed.payload_partition_month, 0
+    )
+    if second_unkeyed != first_unkeyed:
+        fail(
+            "repeated unkeyed TX1 evaluate changed result: "
+            f"{first_unkeyed} -> {second_unkeyed}"
+        )
+    if _receipt_count_for_item(
+        conn, unkeyed.payload_id, unkeyed.payload_partition_month, 0
+    ) != 1:
+        fail("repeated unkeyed TX1 evaluate created another receipt")
+    print("PASS evaluator is idempotent for the same TX1 item")
+
+
+def _evaluate_repeat_after_duplicate(conn, source_id, endpoint_id, device_id):
+    key = "tx1-after-duplicate"
+    payload_a = _new_evaluation_payload(
+        conn,
+        source_id,
+        endpoint_id,
+        device_id,
+        key,
+        datetime(2026, 11, 22, 9, 0, tzinfo=timezone.utc),
+        b"\x22-payload-a",
+    )
+    result_a = evaluate_item(conn, payload_a.payload_id, payload_a.payload_partition_month, 0)
+    payload_b = _new_evaluation_payload(
+        conn,
+        source_id,
+        endpoint_id,
+        device_id,
+        key,
+        datetime(2026, 11, 22, 9, 1, tzinfo=timezone.utc),
+        b"\x23-payload-b",
+    )
+    result_b = evaluate_item(conn, payload_b.payload_id, payload_b.payload_partition_month, 0)
+    if (
+        result_b.receipt_status != "duplicate_delivery"
+        or result_b.first_delivery
+        or result_b.outcome != result_a.outcome
+        or result_b.original_receipt_id != result_a.receipt_id
+        or result_b.receipt_id == result_a.receipt_id
+    ):
+        fail(f"payload B duplicate result is wrong: {result_b}")
+    before = conn.execute(
+        """
+        SELECT delivery_count FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = %s AND item_index = 0
+        """,
+        (source_id, key),
+    ).fetchone()[0]
+    repeated_b = evaluate_item(
+        conn, payload_b.payload_id, payload_b.payload_partition_month, 0
+    )
+    if repeated_b != result_b:
+        fail(f"repeated evaluate of payload B changed result: {result_b} -> {repeated_b}")
+    if _receipt_count_for_item(
+        conn, payload_b.payload_id, payload_b.payload_partition_month, 0
+    ) != 1:
+        fail("repeated evaluate of payload B created another receipt")
+    after = conn.execute(
+        """
+        SELECT delivery_count FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = %s AND item_index = 0
+        """,
+        (source_id, key),
+    ).fetchone()[0]
+    if after != before or after != 2:
+        fail(f"repeated evaluate of payload B changed delivery_count: {before} -> {after}")
+    print("PASS repeated evaluate of duplicate_delivery TX1 item returns the same result")
+
+
 def _evaluate_selected_item(conn, source_id, endpoint_id, device_id):
     first_body = b"\x14-invalid-other-item"
     selected_body = b"\x15-selected-item"
@@ -676,16 +811,17 @@ def _evaluate_selected_item(conn, source_id, endpoint_id, device_id):
 
 
 class _BarrierConnection:
-    def __init__(self, conn, barrier):
+    def __init__(self, conn, barrier, wait_needle="INSERT INTO ingest_message_keys"):
         self._conn = conn
         self._barrier = barrier
+        self._wait_needle = wait_needle
 
     @property
     def autocommit(self):
         return self._conn.autocommit
 
     def execute(self, query, params=None):
-        if "INSERT INTO ingest_message_keys" in query:
+        if self._wait_needle in query:
             self._barrier.wait(timeout=10)
         if params is None:
             return self._conn.execute(query)
@@ -869,6 +1005,189 @@ def _evaluate_concurrent_duplicates(conn, source_id, endpoint_id, device_id):
     if len(receipt_ids) != len(deliveries):
         fail(f"concurrent duplicate receipts were merged: {results}")
     print("PASS concurrent duplicate deliveries preserve outcome and count")
+
+
+def _run_concurrent_evaluate(payloads, wait_needle, item_indexes=None):
+    if item_indexes is None:
+        item_indexes = (0,) * len(payloads)
+    barrier = threading.Barrier(len(payloads))
+    results = []
+    errors = []
+
+    def run(payload, item_index):
+        try:
+            with psycopg.connect(URL, autocommit=True) as other:
+                other.execute("SET ROLE sjv_collector")
+                if other.execute("SELECT current_user").fetchone()[0] != "sjv_collector":
+                    raise AssertionError("concurrent connection is not sjv_collector")
+                wrapped = _BarrierConnection(other, barrier, wait_needle=wait_needle)
+                results.append(evaluate_item(wrapped, *payload, item_index))
+                other.execute("RESET ROLE")
+        except Exception as exc:  # pragma: no cover - reported by the test
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=run, args=(payload, item_index))
+        for payload, item_index in zip(payloads, item_indexes)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+    if errors or len(results) != len(payloads) or any(thread.is_alive() for thread in threads):
+        fail(f"concurrent TX1 evaluation failed: {errors}, results={results}")
+    return results
+
+
+def _evaluate_concurrent_same_tx1(conn, source_id, endpoint_id, device_id):
+    keyed = _new_evaluation_payload(
+        conn,
+        source_id,
+        endpoint_id,
+        device_id,
+        "tx1-concurrent-key",
+        datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc),
+        b"\x24-tx1-concurrent-keyed",
+    )
+    keyed_payload = (keyed.payload_id, keyed.payload_partition_month)
+    keyed_results = _run_concurrent_evaluate(
+        (keyed_payload, keyed_payload),
+        wait_needle="pg_advisory_xact_lock",
+    )
+    if len({result.receipt_id for result in keyed_results}) != 1:
+        fail(f"concurrent keyed TX1 created multiple receipts: {keyed_results}")
+    if _receipt_count_for_item(conn, *keyed_payload, 0) != 1:
+        fail("concurrent keyed TX1 left more than one receipt")
+    if keyed_results[0] != keyed_results[1]:
+        fail(f"concurrent keyed TX1 results differ: {keyed_results}")
+    keyed_count = conn.execute(
+        """
+        SELECT delivery_count FROM ingest_message_keys
+        WHERE ingest_source_id = %s AND msg_key_namespace = 'https'
+          AND msg_key = 'tx1-concurrent-key' AND item_index = 0
+        """,
+        (source_id,),
+    ).fetchone()[0]
+    if keyed_count != 1:
+        fail(f"concurrent keyed TX1 changed delivery_count: {keyed_count}")
+
+    unkeyed = accept(
+        Envelope(
+            source_id,
+            "https",
+            datetime(2026, 11, 22, 10, 5, tzinfo=timezone.utc),
+            b"\x25-tx1-concurrent-unkeyed",
+            (
+                Item(
+                    index=0,
+                    original=b"\x25-tx1-concurrent-unkeyed",
+                    message_kind="raw_wmbus",
+                ),
+            ),
+            endpoint_id=endpoint_id,
+            device_id=device_id,
+        ),
+        conn,
+    )
+    unkeyed_payload = (unkeyed.payload_id, unkeyed.payload_partition_month)
+    unkeyed_results = _run_concurrent_evaluate(
+        (unkeyed_payload, unkeyed_payload),
+        wait_needle="pg_advisory_xact_lock",
+    )
+    if len({result.receipt_id for result in unkeyed_results}) != 1:
+        fail(f"concurrent unkeyed TX1 created multiple receipts: {unkeyed_results}")
+    if _receipt_count_for_item(conn, *unkeyed_payload, 0) != 1:
+        fail("concurrent unkeyed TX1 left more than one receipt")
+
+    multi = accept(
+        Envelope(
+            source_id,
+            "https",
+            datetime(2026, 11, 22, 10, 10, tzinfo=timezone.utc),
+            b"\x26-tx1-parallel-items",
+            (
+                Item(
+                    index=0,
+                    original=b"\x26-item-0",
+                    message_kind="raw_wmbus",
+                    msg_key="tx1-parallel-0",
+                    msg_key_namespace="https",
+                ),
+                Item(
+                    index=1,
+                    original=b"\x26-item-1",
+                    message_kind="raw_wmbus",
+                    msg_key="tx1-parallel-1",
+                    msg_key_namespace="https",
+                ),
+            ),
+            endpoint_id=endpoint_id,
+            device_id=device_id,
+        ),
+        conn,
+    )
+    multi_payload = (multi.payload_id, multi.payload_partition_month)
+    parallel = _run_concurrent_evaluate(
+        (multi_payload, multi_payload),
+        wait_needle="pg_advisory_xact_lock",
+        item_indexes=(0, 1),
+    )
+    if {result.item_index for result in parallel} != {0, 1}:
+        fail(f"parallel item indexes were not both evaluated: {parallel}")
+    if len({result.receipt_id for result in parallel}) != 2:
+        fail(f"parallel item indexes did not get separate receipts: {parallel}")
+    print("PASS concurrent evaluators serialize the same TX1 item and keep indexes parallel")
+
+
+def _evaluate_advisory_lock_sql(conn):
+    params = {
+        "payload_id": 1,
+        "payload_partition_month": datetime(2026, 11, 1, tzinfo=timezone.utc).date(),
+        "item_index": 0,
+    }
+    key = conn.execute(
+        """
+        SELECT decode(
+          substr(
+            md5(
+              'sjv.evaluate_item.v1|'
+              || %(payload_id)s::text || '|'
+              || to_char(%(payload_partition_month)s::date, 'YYYY-MM-DD') || '|'
+              || %(item_index)s::text
+            ),
+            1,
+            16
+          ),
+          'hex'
+        )::bigint
+        """,
+        params,
+    ).fetchone()[0]
+    if not isinstance(key, int):
+        fail(f"advisory lock key is not bigint-compatible: {key!r}")
+    with conn.transaction():
+        conn.execute(_ADVISORY_LOCK_SQL, params)
+        again = conn.execute(
+            """
+            SELECT decode(
+              substr(
+                md5(
+                  'sjv.evaluate_item.v1|'
+                  || %(payload_id)s::text || '|'
+                  || to_char(%(payload_partition_month)s::date, 'YYYY-MM-DD') || '|'
+                  || %(item_index)s::text
+                ),
+                1,
+                16
+              ),
+              'hex'
+            )::bigint
+            """,
+            params,
+        ).fetchone()[0]
+        if again != key:
+            fail(f"advisory lock key is not stable: {key} -> {again}")
+    print("PASS evaluate_item advisory lock SQL converts md5 to bigint on PostgreSQL")
 
 
 def _boolean_is_not_proof(conn, source_id, endpoint_id, device_id):

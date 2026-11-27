@@ -24,6 +24,24 @@ _RECEIPT_TRANSPORTS = frozenset(
     ("mqtt", "https", "udp_dtls", "platform_api", "file_import")
 )
 
+_ADVISORY_LOCK_SQL = """
+SELECT pg_advisory_xact_lock(
+  decode(
+    substr(
+      md5(
+        'sjv.evaluate_item.v1|'
+        || %(payload_id)s::text || '|'
+        || to_char(%(payload_partition_month)s::date, 'YYYY-MM-DD') || '|'
+        || %(item_index)s::text
+      ),
+      1,
+      16
+    ),
+    'hex'
+  )::bigint
+)
+"""
+
 
 @dataclass(frozen=True)
 class EvaluationResult:
@@ -52,6 +70,10 @@ def evaluate_item(conn, payload_id, payload_partition_month, item_index):
     The connection is expected to follow the same autocommit convention as
     ``accept``.  The timestamp is read from the stored payload; this function
     never substitutes ``now()`` or a client timestamp.
+
+    Repeated evaluation of the same TX1 item
+    ``(payload_id, payload_partition_month, item_index)`` returns the existing
+    receipt result without writing again.
     """
 
     if not isinstance(item_index, int) or isinstance(item_index, bool) or item_index < 0:
@@ -60,6 +82,15 @@ def evaluate_item(conn, payload_id, payload_partition_month, item_index):
         raise RuntimeError("evaluate_item requires autocommit")
     with ingest_transaction(conn):
         _require_collector(conn)
+        _lock_tx1_item(conn, payload_id, payload_partition_month, item_index)
+        existing = _load_existing_receipt(
+            conn, payload_id, payload_partition_month, item_index
+        )
+        if existing is not None:
+            return _result_from_existing_receipt(
+                conn, payload_id, payload_partition_month, item_index, existing
+            )
+
         envelope = load_envelope(conn, payload_id, payload_partition_month)
         item = next(
             (candidate for candidate in envelope.items if candidate.index == item_index),
@@ -78,7 +109,7 @@ def evaluate_item(conn, payload_id, payload_partition_month, item_index):
         first_status = "accepted" if not item_issues else "invalid"
         outcome = first_status
 
-        identity = _identity(item)
+        identity = _identity(item.msg_key, item.msg_key_namespace)
         key_kind = None if identity is None else _KEY_MESSAGE_KIND.get(item.message_kind)
         if identity is not None and key_kind is None:
             first_status = "invalid"
@@ -183,12 +214,109 @@ def evaluate_item(conn, payload_id, payload_partition_month, item_index):
         )
 
 
-def _identity(item):
-    if not isinstance(item.msg_key, str) or not item.msg_key.strip():
+def _lock_tx1_item(conn, payload_id, payload_partition_month, item_index):
+    conn.execute(
+        _ADVISORY_LOCK_SQL,
+        {
+            "payload_id": payload_id,
+            "payload_partition_month": payload_partition_month,
+            "item_index": item_index,
+        },
+    )
+
+
+def _load_existing_receipt(conn, payload_id, payload_partition_month, item_index):
+    return conn.execute(
+        """
+        SELECT
+            id,
+            partition_month,
+            status,
+            ingest_source_id,
+            msg_key,
+            msg_key_namespace
+        FROM ingest_receipts
+        WHERE payload_id = %(payload_id)s
+          AND payload_partition_month = %(payload_partition_month)s
+          AND item_index = %(item_index)s
+        """,
+        {
+            "payload_id": payload_id,
+            "payload_partition_month": payload_partition_month,
+            "item_index": item_index,
+        },
+    ).fetchone()
+
+
+def _result_from_existing_receipt(
+    conn, payload_id, payload_partition_month, item_index, receipt
+):
+    receipt_id, receipt_month, receipt_status, ingest_source_id, msg_key, msg_key_namespace = (
+        receipt
+    )
+    if _identity(msg_key, msg_key_namespace) is None:
+        return _result_without_key(
+            payload_id,
+            payload_partition_month,
+            item_index,
+            receipt_id,
+            receipt_month,
+            receipt_status,
+            receipt_status,
+        )
+
+    key = conn.execute(
+        """
+        SELECT receipt_id, receipt_partition_month, outcome
+        FROM ingest_message_keys
+        WHERE ingest_source_id = %(ingest_source_id)s
+          AND msg_key_namespace = %(msg_key_namespace)s
+          AND msg_key = %(msg_key)s
+          AND item_index = %(item_index)s
+        """,
+        {
+            "ingest_source_id": ingest_source_id,
+            "msg_key_namespace": msg_key_namespace,
+            "msg_key": msg_key,
+            "item_index": item_index,
+        },
+    ).fetchone()
+    if key is None:
+        return _result_without_key(
+            payload_id,
+            payload_partition_month,
+            item_index,
+            receipt_id,
+            receipt_month,
+            receipt_status,
+            receipt_status,
+        )
+
+    original_receipt_id, original_receipt_month, outcome = key
+    first_delivery = (
+        original_receipt_id == receipt_id
+        and original_receipt_month == receipt_month
+    )
+    return EvaluationResult(
+        payload_id,
+        payload_partition_month,
+        item_index,
+        receipt_id,
+        receipt_month,
+        receipt_status,
+        first_delivery,
+        outcome,
+        original_receipt_id,
+        original_receipt_month,
+    )
+
+
+def _identity(msg_key, msg_key_namespace):
+    if not isinstance(msg_key, str) or not msg_key.strip():
         return None
-    if not isinstance(item.msg_key_namespace, str) or not item.msg_key_namespace.strip():
+    if not isinstance(msg_key_namespace, str) or not msg_key_namespace.strip():
         return None
-    return item.msg_key_namespace, item.msg_key
+    return msg_key_namespace, msg_key
 
 
 def _require_collector(conn):

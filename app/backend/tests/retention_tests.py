@@ -105,7 +105,7 @@ def release_lock(conn):
 def main():
     with psycopg.connect(URL, autocommit=True, cursor_factory=ClientCursor) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()
-        if version != ("0003_retention",):
+        if version != ("0004_receipt_status_update",):
             fail(f"alembic version is {version}")
         receipt_fk = conn.execute(
             """
