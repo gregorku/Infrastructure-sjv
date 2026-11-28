@@ -6,7 +6,7 @@ Stav repozitáře je etapa B1b. `deploy.sh` spouští Traefik a CrowdSec. `sjv-b
 
 ## A. Přehled
 
-Vývojová kontrola je `./scripts/test.sh`. Nepotřebuje root ani Docker démona a na hostiteli nic nemění. Izolovaná kontrola schématu je `app/backend/tests/isolated-schema-test.sh`. Běží ve vlastním dočasném Podman úložišti, maže jen `/tmp/sjv-alembic-itest` a svou síť a odmítne `/docker-data` i `SJV_DATABASE_URL` z okolí. Ani jeden z těchto běhů není instalace na VPS.
+Vývojová kontrola je `./scripts/test.sh`. Nepotřebuje root ani Docker démona a na hostiteli nic nemění. Jednorázová izolovaná kontrola schématu a recovery je `app/backend/tests/isolated-schema-test.sh`: sestaví dočasný Python test image z `app/backend/Dockerfile.test`, spustí dočasné PostgreSQL 19.0 ve vlastní Docker síti, uvnitř image provede Alembic i Python testy a po běhu odstraní jen objekty označené vlastním run ID. Odmítne `/docker-data` i zděděné `SJV_DATABASE_URL`. Produkční Debian nepotřebuje `uv`, Alembic, SQLAlchemy ani Python testovací závislosti. Ani jeden z těchto běhů není instalace na VPS.
 
 Provozní instalace je ruční postup v Incus kontejneru `sjv-monitoring`. `init.sh`, `update-env.sh`, `check-env.sh`, `deploy.sh`, `init-backup.sh`, `post-deploy.sh`, `reload.sh`, `create-dashboard-user.sh` a `rotate-traefik-logs.sh` chtějí root a mountpoint `/docker-data`. `shellcheck.sh` root nechce. Repozitář DNS, HAProxy, Incus ani firewall nemění.
 
@@ -43,6 +43,14 @@ Související dokumenty:
 Skripty `init.sh`, `update-env.sh`, `check-env.sh`, `deploy.sh`, `init-backup.sh` a `post-deploy.sh` volají `check_environment`. Ta vyžaduje root a příkazy `awk`, `base64`, `cmp`, `cp`, `date`, `find`, `findmnt`, `flock`, `head`, `install`, `mktemp`, `sort`, `stat` a `tr`. `deploy.sh` a `post-deploy.sh` navíc chtějí `docker` a fungující `docker compose`. `init-backup.sh` je chce jen tehdy, když je vzdálený repozitář vyplněný a běží mimo testovací režim. `create-dashboard-user.sh` chce `htpasswd`. `rotate-traefik-logs.sh` chce root, `gzip`, `truncate`, `sync`, `date`, `find`, `cp` a `mktemp`. `python3` a `shellcheck` mezi těmito příkazy nejsou. Provozní instalace je bez nich spustitelná.
 
 ### Vývoj a testování
+
+Rozlišují se tři režimy:
+
+| Režim | Příkaz | Co potřebuje | Co nedělá |
+| --- | --- | --- | --- |
+| Lokální unit / offline | `./scripts/test.sh` | `python3`, volitelně `.venv` ze `uv sync --frozen --project app/backend`, `shellcheck` | nespouští Docker ani databázi |
+| Jednorázový izolovaný integrační test | `app/backend/tests/isolated-schema-test.sh` | Docker démon, host `python3` jen pro lock/secrets/cesty | neinstaluje Python závislosti do produkčního Debianu; Alembic a testy běží v dočasném image |
+| Produkční provoz | `init.sh` / `deploy.sh` / … | root, `/docker-data`, Docker Compose | nevyžaduje `uv`, Alembic, SQLAlchemy ani testovací Python balíčky |
 
 Kompletní `./scripts/test.sh` na Debianu 13 potřebuje balíčky `python3` a `shellcheck`. Na VPS se neinstalují kvůli `init.sh` ani `deploy.sh`.
 
@@ -257,7 +265,7 @@ Kontroly, které projekt sám popisuje:
 3. Soubor bouncer klíče existuje a `check-env.sh` hlásí, že je soukromý. Hodnotu nečte.
 4. Po startu `sjv-crowdsec` v jeho logu není `No matching files for pattern /logs/access.log`. Až Traefik zapíše alespoň jeden řádek, uvnitř kontejneru `cscli metrics show acquisition parsers` ukáže zdroj `file:/logs/access.log` s nenulovým počtem načtených a parsovaných řádků. Příkaz z hostitele je `docker exec sjv-crowdsec cscli metrics show acquisition parsers`. Prázdný soubor při startu ještě žádný řádek nemá, proto nula do první skutečné žádosti není chyba akvizice.
 
-Kontrola databáze, oprávnění rolí a schématu na VPS hotový skript nemá. V izolovaném testu ji dělá `app/backend/tests/isolated-schema-test.sh` včetně `schema_tests.py`, `ingest_accept_tests.py`, `retention_tests.py` a `recovery_tests.py`. Na VPS se nespouští.
+Kontrola databáze, oprávnění rolí a schématu na VPS hotový skript nemá. Jednorázový izolovaný test `app/backend/tests/isolated-schema-test.sh` sestaví `app/backend/Dockerfile.test`, spustí Alembic a `schema_tests.py`, `ingest_accept_tests.py`, `retention_tests.py` i `recovery_tests.py` uvnitř dočasného image proti dočasnému PostgreSQL. Na produkční databázi ani do produkční sítě nesmí sahat. Produkční Debian kvůli němu neinstaluje `uv`, Alembic, SQLAlchemy ani testovací závislosti.
 
 ```bash
 ./scripts/test.sh
@@ -369,7 +377,7 @@ Pořadí mazání, odklady a cizí klíče jsou v [docs/database-design.md](docs
 | CrowdSec bouncer | do prvního `post-deploy.sh` middleware klíč nemá. Logy kontejneru `sjv-crowdsec` a soukromý soubor klíče |
 | `sjv-backup` po prvním `deploy.sh` neběží | tato fáze ho nespouští. Definice zůstává v `compose/30-backup.yml` |
 | PostgreSQL na VPS neběží | `deploy.sh` ho nespouští. Chybějící kontejner není chyba aktuálního instalačního pořadí |
-| Migrace | downgrade je odmítnutý. Produkční příkaz nasazení migrace není. Izolovaný test je `app/backend/tests/isolated-schema-test.sh` |
+| Migrace | downgrade je odmítnutý. Produkční příkaz nasazení migrace není. Jednorázový izolovaný test je `app/backend/tests/isolated-schema-test.sh` (dočasný Python image + dočasné PostgreSQL) |
 | Retence drží zámek | `COMMIT` po zámku procedura nezachytí a řádek protokolu neponechá. Na téže session `sjv_retention_release_lock` |
 | Retence skončí uprostřed měsíce | hláška `retention step <krok> failed`. Řádek `failed` vznikne až voláním `sjv_retention_record_failure` |
 | Přístup role | `permission denied` u `sjv_collector`, `sjv_api`, `sjv_worker` a `sjv_readonly` a u přímého volání interních funkcí včetně `sjv_retention_month_ok`. Přímý `INSERT` do `retention_log` rolí `sjv_maintenance` také |

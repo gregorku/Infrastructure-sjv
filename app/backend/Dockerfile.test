@@ -1,0 +1,69 @@
+# Temporary image for isolated schema and recovery integration tests.
+# Not a production service. Build installs locked deps; runtime has no uv/pip.
+#
+# Python packages live in /opt/sjv-venv. Sources and Alembic config are under /app.
+# Secrets are never baked into the image; callers mount a database URL file at run time.
+
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64
+FROM ${PYTHON_IMAGE} AS builder
+
+# uv is build-only. The runtime stage does not include it.
+# Distroless uv 0.9.7 multi-arch index digest verified via GHCR registry API for tag 0.9.7.
+COPY --from=ghcr.io/astral-sh/uv:0.9.7@sha256:ba4857bf2a068e9bc0e64eed8563b065908a4cd6bfb66b531a9c424c8e25e142 \
+    /uv /usr/local/bin/uv
+
+WORKDIR /src
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/sjv-venv \
+    UV_PYTHON_DOWNLOADS=never
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+FROM ${PYTHON_IMAGE}
+
+COPY --from=builder /opt/sjv-venv /opt/sjv-venv
+
+# Remove installer tools from the base image only. Leave /opt/sjv-venv untouched.
+RUN set -eux; \
+    rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.* /usr/local/bin/wheel; \
+    rm -rf /usr/local/lib/python*/ensurepip \
+        /usr/local/lib/python*/site-packages/pip \
+        /usr/local/lib/python*/site-packages/pip-*.dist-info \
+        /usr/local/lib/python*/site-packages/setuptools \
+        /usr/local/lib/python*/site-packages/setuptools-*.dist-info \
+        /usr/local/lib/python*/site-packages/pkg_resources \
+        /usr/local/lib/python*/site-packages/_distutils_hack \
+        /usr/local/lib/python*/site-packages/distutils-precedence.pth \
+        /usr/local/lib/python*/site-packages/wheel \
+        /usr/local/lib/python*/site-packages/wheel-*.dist-info; \
+    test ! -e /usr/local/bin/pip; \
+    test ! -e /usr/local/bin/uv; \
+    PATH="/usr/local/bin:/usr/bin:/bin" \
+        python -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("pip") is None else 1)'; \
+    test -x /opt/sjv-venv/bin/python; \
+    test -x /opt/sjv-venv/bin/alembic
+
+WORKDIR /app
+COPY alembic.ini ./
+COPY alembic/ ./alembic/
+COPY sjv_db/ ./sjv_db/
+COPY sjv_ingest/ ./sjv_ingest/
+COPY sjv_keys/ ./sjv_keys/
+COPY tests/ ./tests/
+COPY pyproject.toml uv.lock ./
+
+ENV PATH="/opt/sjv-venv/bin:${PATH}" \
+    PYTHONPATH=/app \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin sjvtest \
+    && chown -R sjvtest:sjvtest /app /opt/sjv-venv
+
+USER sjvtest
+WORKDIR /app
+
+# Explicit command required; this image is not a long-running service.
+CMD ["python", "-c", "raise SystemExit('Use an explicit isolated-schema test command.')"]
