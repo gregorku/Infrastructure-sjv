@@ -60,7 +60,7 @@ Wi-Fi zde není požadavek. HTTPS není transparentní failover MQTT.
 3. **filter:** whitelist měřidel (M a A pole) z retained `config`. Ostatní měřidla se nezapisují, jen se počítají (`filtered_unknown` v heartbeatu). Režim discovery do času `discovery_until` povolí odesílání všech měřidel kvůli instalaci nových.
 4. **queue_append:** zápis do persistentní fronty. Teprve potom se rámec považuje za přijatý.
 5. **uplink:** odesílání dávek do `batch_max` položek. Čekání na ACK s timeoutem `ack_timeout_s` z `config`. Při výpadku exponenciální backoff s náhodným rozptylem a horní mezí. Před první dávkou po připojení se pošle heartbeat, aby server znal epochu bootu.
-6. **ack_handler:** podle `msg_key` označí položky jako potvrzené. Všechny stavy ACK v [data-ingestion.md](data-ingestion.md#ack) končí potvrzením.
+6. **ack_handler:** podle `msg_key` označí položky jako potvrzené. Všechny literály application ACK v [data-ingestion.md](data-ingestion.md#ack) (včetně `content_mismatch` a `invalid` dle [R37-O1](decisions.md)) končí potvrzením. MQTT PUBACK to nenahrazuje.
 
 ## Telemetrie
 
@@ -74,13 +74,15 @@ Wi-Fi zde není požadavek. HTTPS není transparentní failover MQTT.
 
 ## Identita zprávy
 
+Kontrakt identity položky fronty a serverového důkazu `esp_queue_v1` je v [R37](decisions.md). Wire JSON se R37 nemění.
+
 | Hodnota | Uložení | Chování |
 | --- | --- | --- |
-| `instance_id` | NVS | náhodných 64 bitů z hardwarového RNG při prvním startu. Nové po vymazání NVS nebo flash |
-| `boot_counter` (uint32) | NVS | zvýší se při každém startu. Je to jediný pravidelný zápis do NVS |
-| `seq` (uint32) | RAM | od 0 po každém startu |
+| `instance_id` | NVS | náhodných 64 bitů z hardwarového RNG při prvním startu (16 lowercase hex). Nové po vymazání NVS nebo flash, nebo po neopravitelném poškození / overflow dle R37 §5 |
+| `boot_counter` (uint32) | NVS | monotónní; rezervace přes `boot_phase` ∈ {`idle`, `prepared`, `committed`} a `boot_next`, aby výpadek během startu nezdvojil inkrement (R37 §5). Brown-out záruky na konkrétním ESP32-S3 jsou otevřené (R37-O3) |
+| `seq` (uint32) | RAM | od 0 po každém startu; identifikuje položku v rámci bootu. Pořadí inkrementace vůči LittleFS commit je otevřené (R37-O2) |
 
-`msg_key = "<instance_id hex>-<boot_counter>-<seq>"` je jednoznačný napříč restarty bez zápisu do flash při každé zprávě. Díky `instance_id` je jednoznačný i po vymazání flash, kdy `boot_counter` začne znovu od nuly.
+`msg_key = "<instance_id>-<boot_counter>-<seq>"` identifikuje položku fronty, ne fyzické měřidlo. Je jednoznačný napříč restarty bez zápisu do flash při každé zprávě. Po nové `instance_id` staré záznamy fronty MUST zachovat původní `msg_key`. Při stavu identity unsafe se nesmějí vytvářet nové položky s neověřenou identitou.
 
 ## Persistentní fronta
 

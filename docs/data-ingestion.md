@@ -120,11 +120,12 @@ Co z dekódovaných dat zjistit nejde, popisuje část [Omezení dekódovaných 
 
 - `device_id` se vždy bere z autentizace (MQTT účet, API token, klientský certifikát nebo PSK), nikdy z těla zprávy. U Platform API je autentizovaný koncový bod a koncentrátor uvnitř odpovědi se přiřadí jen přes už uložené `device_external_ids`.
 - Prokázaný `msg_key` se ukládá po položkách do `ingest_message_keys` s `PRIMARY KEY (ingest_source_id, msg_key_namespace, msg_key, item_index)`:
-  - **vlastní ESP:** `<instance_id>-<boot_counter>-<seq>` pro opakované odeslání téhož záznamu fronty.
-    - `instance_id` je náhodné 64bitové číslo v hex. Vygeneruje se při prvním startu a znovu po každém vymazání flash, takže reset `boot_counter` nikdy nevytvoří klíč, který server už zná.
-    - `boot_counter` je v NVS a roste při každém startu.
-    - `seq` je čítač v RAM od nuly v každém bootu.
-  - **koncentrátor včetně ACRIOS:** jen identifikátor, u kterého PoC prokáže, že se během 60 dní neopakuje. Formát se dopředu nepředepisuje. Když ho data nemají, `msg_key` zůstane NULL a klíč se nevloží.
+  - **vlastní ESP:** kanonický `<instance_id>-<boot_counter>-<seq>` identifikuje položku fronty, ne fyzické měřidlo. Schválená důkazní báze je `proof_basis = esp_queue_v1` ([R37](decisions.md)). Pro tuto bázi je R20 `item_index` vždy 0; TX1 `ingest_payload_items.item_index` zůstává pořadím v obálce (R35). Ethernet a LTE sdílejí namespace `mqtt` (R29).
+    - `instance_id` je 16 lowercase hex znaků (64 bitů NVS). Nové po erase NVS/flash.
+    - `boot_counter` je monotónní uint32 v NVS se stavovým modelem rezervace dle R37 §5.
+    - `seq` je uint32 v RAM od nuly v každém bootu.
+    - `proof_basis` nastavuje jen důvěryhodný collector po P1–P7 ([R37](decisions.md) §3 a §6; produkční cesta [R37-O4](decisions.md)): uplinková `instance_id = V` musí být aktivní `esp_instance` právě autentizovaného `devices.id = D`, nebo úspěšná první registrace volné `V` u `D` bez aktivní instance přes `sjv_esp_instance_register_free`. Má-li `D` aktivní `A` a uplink nese `B ≠ A`, `proof_basis` MUST zůstat NULL (bez auto-rotace). `identifier_proven` samo o sobě klíč nezakládá. Obecná knihovní `accept()` MUST vždy ukládat `proof_basis` NULL; produkční ESP MQTT MUST použít `trusted_esp_accept` a v jedné TX1 uložit konečnou bázi `esp_queue_v1` nebo NULL. DB pojistka P4 je BEFORE INSERT trigger + `sjv_esp_p4_assert` (O4); P2 topic ACL ověřuje collector, ne databáze. Současný kód `accept` / `evaluate_item` / trusted cesta / SQL pojistka ještě nejsou; O4 je schválený kontrakt.
+  - **koncentrátor včetně ACRIOS:** jen identifikátor, u kterého PoC prokáže, že se během 60 dní neopakuje. Formát se dopředu nepředepisuje. Když ho data nemají, `msg_key` zůstane NULL a klíč se nevloží. R37 ACRIOS bázi neschvaluje.
 - `sha256` kanonického těla se do `msg_key` neukládá. Stejný obsah může patřit dvěma zprávám a jeden payload může přijít znovu. Bez prokázaného identifikátoru se uloží obě doručení, obě pozorování a stav `uncertain`. Odečet z druhého automaticky nevznikne.
 - **MQTT a HTTPS.** `msg_key_scope` je výchozí `transport`, takže `msg_key_namespace` je `mqtt` nebo `https`. Stejný text `msg_key` na obou transportech jsou dvě doručení. Když je navíc stejný `content_hash`, pozdější příjem dostane `id_collision`. Pozorování se nesmaže, `delivery_count` se mezi transporty nesčítá a stav se nehlásí jako `duplicate`. Rádiový rámec s důvěryhodnou kotvou dál smí projít oknem `telegram_dedup_keys`. To je shoda rámce, ne shoda textu `msg_key`.
 - `msg_key_scope = device` se nastaví jen tehdy, když kontrakt zdroje jeden prostor napříč transporty prokáže. Firmware ESP to pro MQTT a HTTPS neprokazuje. Popisuje stejný `msg_key` při opakovaném odeslání záznamu fronty, ne společný prostor dvou transportů.
@@ -202,7 +203,7 @@ Postup podle priority:
 
 | Situace | Ochrana |
 | --- | --- |
-| stejná položka znovu (ztracený ACK, `replay_since`) | nové transportní doručení přes `accept` (nový `payload_id`) se stejným prokázaným `(ingest_source_id, msg_key_namespace, msg_key, item_index)` → R20 `duplicate_delivery` jen této položky. Není to recovery stejné TX1 identity. Hash těla ani shoda bajtů payloadu TX1 identitu nesloučí |
+| stejná položka znovu (ztracený ACK, `replay_since`) | nové transportní doručení přes `accept` (nový `payload_id`) se stejným prokázaným R20 klíčem. U ESP s `esp_queue_v1` je R20 `item_index` 0; shoda přes `esp_queue_immutable_v1` (R37 §4): stejný hash → receipt `duplicate_delivery`, application ACK = `keys.outcome` (R37-O1 D2); jiný hash → receipt i ACK `content_mismatch`, keys beze změny (D1). Obecný `content_hash` příjmu TX1/R20 nesloučí. Není to recovery stejné TX1 identity |
 | stejný text `msg_key` na jiném transportu téhož zařízení | `id_collision`, obě doručení zůstanou. Při `msg_key_scope = transport` se nesloučí |
 | stejný telegram jiným zdrojem nebo v nové zprávě, v okně a s důvěryhodnou kotvou | exclusion constraint → `duplicate`, jeden `raw_telegrams`. Příjem leží v měsíci svého `server_received_at` |
 | stejný obsah, důvěryhodný čas, mimo `dedup_window`, do 60 dní | `suspect_replay`, vlastní příjem, bez odečtu, alarm. Ke staršímu telegramu se nepřipojí |
@@ -301,7 +302,7 @@ Jeden prvek `samples` je jeden kompletní telemetrický vzorek. Může obsahovat
 
 Výchozí `msg_key_scope` je `transport`, takže MQTT používá namespace `mqtt` a HTTPS namespace `https`. Firmware ESP společný prostor klíčů napříč transporty zatím neprokazuje, proto se stejný text `msg_key` mezi MQTT a HTTPS automaticky neslučuje. Když má stejný text `msg_key` napříč transporty také stejný `content_hash`, pozdější příjem dostane `id_collision`. `delivery_count` se mezi transporty nesčítá, výsledek se neoznačuje jako `duplicate_delivery` a žádné pozorování se kvůli této kolizi nemaže. Opakované doručení stejného transportu se vyhodnocuje přes existující `ingest_message_keys` a může skončit jako `duplicate_delivery`.
 
-Příjem zachovává limit `INGEST_MAX_MESSAGE_AGE` a existující validační a deduplikační pravidla. `ingest_receipts` eviduje každou přijatou položku a její výsledek, včetně `accepted` nebo `duplicate_delivery`; tento výsledek je podkladem pro položkový aplikační ACK. ACK se publikuje až po COMMIT výsledné transakce. Zařízení odstraní vzorek z persistentní fronty až po uložení odpovídajícího výsledku ACK. Telemetrický vzorek sám o sobě nezakládá `device_events`; významné změny a alarmy se vyhodnocují centrálně po uložení. Heartbeat zůstává samostatný, QoS 0, s intervalem `heartbeat_s` (návrh 60 s) a telemetrii nenahrazuje. Interval telemetrie je `telemetry_interval_s` (návrh 900 s) v retained konfiguraci.
+Příjem zachovává limit `INGEST_MAX_MESSAGE_AGE` a existující validační a deduplikační pravidla. `ingest_receipts` eviduje každou přijatou položku (`accepted`, `duplicate_delivery`, `content_mismatch`, …). Application ACK se sestavuje dle R37-O1 (ne nutně z `receipt.status`) a publikuje až po COMMIT všech TX2 položek doručení. Zařízení odstraní vzorek z persistentní fronty až po uložení odpovídajícího application ACK. Telemetrický vzorek sám o sobě nezakládá `device_events`; významné změny a alarmy se vyhodnocují centrálně po uložení. Heartbeat zůstává samostatný, QoS 0, s intervalem `heartbeat_s` (návrh 60 s) a telemetrii nenahrazuje. Interval telemetrie je `telemetry_interval_s` (návrh 900 s) v retained konfiguraci.
 
 ### Heartbeat
 
@@ -338,37 +339,51 @@ Retained zprávu publikuje collector podle `PUT /api/v1/admin/devices/{id}/confi
 
 ### ACK
 
+Application ACK (MQTT topic `ack` / HTTPS odpověď) je **odlišný** od MQTT PUBACK ([R37-O1](decisions.md) D7). Potvrzuje výsledek zpracování položky ESP fronty podle `msg_key`.
+
 ```json
 { "v": 1, "results": [ { "msg_key": "9f3c51a07be2d410-17-104233", "status": "accepted" } ] }
 ```
 
-| Stav | Význam |
+Pro ESP s unikátním `msg_key` na položku fronty je v `results` **jeden** záznam na unikátní `msg_key`. `status` je aplikační výsledek dle pořadí R37-O1, **ne** nutně `ingest_receipts.status` nového doručení.
+
+| Stav v application ACK | Význam |
 | --- | --- |
-| `accepted` | uložený výsledek položky (například nový telegram nebo pozorování). Sám o sobě nevypovídá, zda vznikl odečet |
-| `duplicate` | potvrzená shoda uvnitř `dedup_window`. Příjem je připojený k existujícímu telegramu |
-| `probable_duplicate` | rámec je uložený jako vlastní telegram `ambiguous`. Ke staršímu telegramu připojený není a odečet nevznikl |
-| `needs_review` | rámec je uložený, shoda se nenašla a bez důvěryhodné kotvy odečet nevznikl |
-| `duplicate_delivery` | prokázanou položku `(ingest_source_id, msg_key_namespace, msg_key, item_index)` už server má. Ostatní položky zprávy tento stav sám neuzavře |
-| `uncertain` | stejný `content_hash` bez prokázaného identifikátoru. Pozorování zůstalo, odečet z něj nevznikl |
-| `id_collision` | stejný text `msg_key` v jiném namespace. Doručení se nesloučila |
-| `suspect_replay` | uloženo jen jako příjem a telegram bez fronty dekódování, bez odečtu |
-| `unknown_meter` | měřidlo není evidované, rámec se neuložil |
-| `invalid` | chybný CRC, formát nebo nekonzistentní časy |
+| `accepted` | první (nebo opakovaný S1) výsledek s `keys.outcome = accepted` / první accepted bez R20 dle pravidel |
+| `duplicate` | potvrzená shoda rámce uvnitř `dedup_window` |
+| `probable_duplicate` | rámec uložený jako `ambiguous` |
+| `needs_review` | rámec uložený bez důvěryhodné kotvy |
+| `uncertain` | stejný `content_hash` bez prokázaného identifikátoru |
+| `id_collision` | stejný text `msg_key` v jiném namespace |
+| `suspect_replay` | uloženo bez fronty dekódování |
+| `unknown_meter` | měřidlo není evidované |
+| `invalid` | chybný CRC/formát/čas; **nebo** S3 duplicitní `msg_key` v envelope (R37-O1 D4) |
+| `content_mismatch` | stejný R20 klíč, jiný `esp_queue_immutable_v1` (R37-O1 D1); má přednost před `keys.outcome` |
 | `too_old` | starší než `INGEST_MAX_MESSAGE_AGE` |
-| `unresolved` | pozorování je uložené. Stejný čas ve streamu už má aktivní kumulativní odečet a druhý se nezaložil |
-| `conflict` | pozorování je uložené s jinou hodnotou. Původní odečet se nezměnil |
+| `unresolved` | pozorování uložené, druhý aktivní odečet nezaložen |
+| `conflict` | pozorování s jinou hodnotou |
 
-Normalizace může uložit interní příjem se stavem `crc_error`. Aplikační ACK vrací stav každé položky, ale mapování interního `crc_error` na některý status z této tabulky není v transakčním popisu výslovně doložené a zůstává otevřenou otázkou. Nový ACK status se kvůli tomu nezavádí.
+`duplicate_delivery` **není** literál application ACK (R37-O1 D2). Je to pouze `ingest_receipts.status` opakovaného doručení se shodným immutable hashem; ACK.`status` = `ingest_message_keys.outcome`.
 
-Zařízení smaže zprávu z fronty až tehdy, když má uložený výsledek každá její položka. Jedna položka ve stavu `duplicate_delivery` ostatní položky nepotvrzuje. U ESP má položka fronty vlastní `msg_key`. U zprávy s více položkami pod jedním `msg_key` odpověď vypíše každý `item_index` a jeho stav. Stav `accepted` znamená uložený výsledek této položky, ne to, že z každé položky vznikl odečet. `probable_duplicate`, `needs_review`, `uncertain` a `id_collision` se do `duplicate` neskládají. Bez kompletního ACK zařízení po timeoutu pošle znovu stejný `msg_key` a stejné údaje `rx`.
+**Pořadí sestavení ACK** (unikátní `msg_key`, po COMMIT všech TX2 doručení) — [R37-O1](decisions.md):
+
+1. receipt `content_mismatch` → ACK `content_mismatch`;
+2. duplicitní `msg_key` v envelope → ACK `invalid` pro každý unikátní `msg_key`;
+3. R20 + shodný immutable → ACK = `keys.outcome`;
+4. terminální receipt bez R20 → ACK = `receipt.status`;
+5. neukončené TX2 → neodesílat ACK.
+
+Normalizace může uložit interní příjem se stavem `crc_error`. Mapování `crc_error` na ACK literál zůstává otevřené; R37-O1 ho nerozhoduje.
+
+Zařízení smaže položku fronty až po uložení terminálního application ACK pro její `msg_key`. Při `esp_queue_v1` je R20 `item_index` 0; ACK se váže na `msg_key`, ne na TX1 index. U zdroje s více položkami pod jedním `msg_key` (mimo ESP frontu) odpověď může vypisovat `item_index`; u ESP S3 platí jeden ACK na unikátní `msg_key`. `probable_duplicate`, `needs_review`, `uncertain` a `id_collision` se do `duplicate` neskládají. Bez kompletního ACK zařízení po timeoutu pošle znovu stejný `msg_key` a stejné údaje `rx`.
 
 ### Doručení až po COMMIT
 
 1. Collector má persistentní sezení (`clean_start = false`, QoS 1) a ruční PUBACK. Podpora ručního PUBACK v paho-mqtt 2.x (`manual_ack`) se ověří v PoC. MQTT klient a collector v repozitáři ještě nejsou; jde o návrh chování nad existujícími `accept` / `evaluate_item`.
-2. PUBACK brokeru i aplikační ACK zařízení se odešlou až po COMMIT TX2.
+2. **MQTT PUBACK** ≠ **application ACK** (R37-O1 D7). PUBACK potvrzuje transportní QoS 1 doručení brokeru: nejdřív po COMMIT TX1, smí až po všech TX2. Application ACK potvrzuje výsledek položky fronty a smí se odeslat **až po terminálním COMMIT všech TX2** položek daného doručení. PUBACK nevyjadřuje úspěch položky.
 3. Dva odlišné pády se nesmí slévat:
-   - **Pád mezi TX1 a TX2** (payload a položky jsou potvrzené, receipt ještě ne): položka zůstává v DB. Stejnou TX1 trojici `(payload_id, payload_partition_month, item_index)` dokončí `evaluate_item` (první běh nebo short-circuit). Výběr položek bez receiptu dělá knihovna `sjv_ingest.recovery` a one-shot CLI `python -m sjv_ingest.recovery` (hot-path: aktuální a předchozí UTC měsíc). Periodický worker, host timer ani historický backfill **zatím nejsou** zapojené; spouštění a rozsah backfillu zůstávají otevřené. Shoda bajtů nebo `msg_key` sama o sobě TX1 identitu nenahrazuje.
-   - **Pád po COMMIT TX2 před ACK** (receipt už je): broker nebo zařízení doručí MQTT zprávu znovu. Nové přijetí jde znovu přes `accept` a může založit **nový** `payload_id`. To už není stejná TX1 položka a není to úloha `sjv_ingest.recovery`. `evaluate_item` na nové trojici podléhá R20: při shodném prokázaném klíči vznikne nový receipt se `receipt_status = duplicate_delivery`, `delivery_count` se zvýší a `outcome` / `original_receipt_*` zůstanou z prvního doručení.
+   - **Pád mezi TX1 a TX2** (payload a položky jsou potvrzené, receipt ještě ne): položka zůstává v DB. Stejnou TX1 trojici `(payload_id, payload_partition_month, item_index)` dokončí `evaluate_item` (první běh nebo short-circuit). Výběr položek bez receiptu dělá knihovna `sjv_ingest.recovery` a one-shot CLI `python -m sjv_ingest.recovery` (hot-path: aktuální a předchozí UTC měsíc). Periodický worker, host timer ani historický backfill **zatím nejsou** zapojené; spouštění a rozsah backfillu zůstávají otevřené. Shoda bajtů nebo `msg_key` sama o sobě TX1 identitu nenahrazuje. Application ACK se neodesílá, dokud nejsou všechny položky doručení hotové.
+   - **Pád po COMMIT TX2 před application ACK** (receipt už je): bez PUBACK broker znovu doručí, nebo ESP po timeoutu znovu publikuje. Nové přijetí jde znovu přes `accept` a může založit **nový** `payload_id`. To už není stejná TX1 položka a není to úloha `sjv_ingest.recovery`. `evaluate_item` na nové trojici podléhá R20 + R37-O1: shodný immutable → receipt `duplicate_delivery`, ACK = `keys.outcome`; jiný immutable → receipt a ACK `content_mismatch`, keys beze změny.
 4. Později lze přidat více collectorů přes `$share/collectors/...`. Idempotence TX1 i R20 je v DB, ne v paměti collectoru.
 
 ## HTTPS ingest
@@ -429,9 +444,9 @@ Platí, i když konkrétní datagram, topic nebo JSON ACRIOS ještě nejsou zná
 
 Příjem má dvě samostatně potvrzené transakce.
 
-První vloží původní bajty do `ingest_payloads` a každý řádek `ingest_payload_items` a potvrdí je společně, dřív než se rozhoduje identita, deduplikace nebo dekódování. Bajty obálky a bajty položky zůstávají oddělené. Když formát nejde určit bez dalšího vyhodnocení, `content_kind` je `opaque`. Neznámý druh položky se uloží a transakci nezruší. V této transakci nevznikne příjem položky, klíč zprávy, telegram, deduplikační klíč, fronta ani fragment. `proof_basis` zůstává prázdná, dokud její ověření neschválí samostatné rozhodnutí. Boolean `identifier_proven` se uloží jako vstupní údaj položky a při načtení se vrátí. `proof_basis` z něj nevznikne a klíč zprávy se nezaloží.
+První vloží původní bajty do `ingest_payloads` a každý řádek `ingest_payload_items` a potvrdí je společně, dřív než se rozhoduje identita, deduplikace nebo dekódování. Bajty obálky a bajty položky zůstávají oddělené. Když formát nejde určit bez dalšího vyhodnocení, `content_kind` je `opaque`. Neznámý druh položky se uloží a transakci nezruší. V této transakci nevznikne příjem položky, klíč zprávy, telegram, deduplikační klíč, fronta ani fragment. Boolean `identifier_proven` se uloží jako vstupní údaj položky a při načtení se vrátí; důkaz identity to není. `proof_basis` z něj nevznikne. Pro vlastní ESP na MQTT schválilo R37 bázi `esp_queue_v1` a R37-O4 produkční cestu: obecná `accept()` vždy ukládá `proof_basis` NULL; produkční ESP MQTT používá `trusted_esp_accept`, která v téže TX1 ověří P1–P7 včetně P4 (aktivní vazba D↔V, nebo první registrace volné `V` přes `sjv_esp_instance_register_free`; neshoda `A`≠`B` ⇒ `proof_basis` NULL) a uloží položky s **konečným** `proof_basis ∈ {esp_queue_v1, NULL}`. Durable pending se nezavádí. BEFORE INSERT trigger (`SECURITY INVOKER`) při `esp_queue_v1` kontroluje mqtt transport/namespace, kanonický `msg_key` a volá `sjv_esp_p4_assert` (DEFINER row-locky §6; collector nedostane `UPDATE` na `device_external_ids`). Trigger neprokazuje MQTT autentizaci ani P2 ACL. Současný `accept` bázi nenastavuje; trusted cesta, DEFINER funkce a trigger jsou budoucí implementace.
 
-Druhá transakce (`evaluate_item`) vyhodnotí **jednu** uloženou TX1 položku a atomicky uloží její konečný receipt a případný stav `ingest_message_keys`. TX1 identita položky je `(payload_id, payload_partition_month, item_index)`. R20 identita prokázané zprávy je `(ingest_source_id, msg_key_namespace, msg_key, item_index)`. Rollback TX2 už potvrzený payload ani položky nesmaže. ACK, včetně PUBACK, se odešle až po COMMIT TX2.
+Druhá transakce (`evaluate_item`) vyhodnotí **jednu** uloženou TX1 položku a atomicky uloží její konečný receipt a případný stav `ingest_message_keys`. TX1 identita položky je `(payload_id, payload_partition_month, item_index)`. R20 identita prokázané zprávy je `(ingest_source_id, msg_key_namespace, msg_key, item_index)`. Rollback TX2 už potvrzený payload ani položky nesmaže. Application ACK až po COMMIT **všech** TX2 položek doručení (R37-O1 D7). MQTT PUBACK je oddělený (po TX1, smí po TX2).
 
 `load_envelope` skládá obálku z uloženého payloadu a položek a nic nezapisuje. Obnova konkrétní nedokončené TX1 položky vždy končí voláním stejného `evaluate_item` nad **stejnou** TX1 trojicí. Finder položek bez receiptu je `sjv_ingest.recovery` (včetně one-shot CLI); periodická orchestrace po restartu collectoru / host timer **zatím není**. Opakované MQTT doručení po ztraceném ACK nepoužívá tuto cestu: znovu volá `accept` a dostane nový `payload_id`.
 
@@ -461,29 +476,35 @@ BEGIN  — transakce 2 (evaluate_item jedné položky i)
   → neexistuje:
       load_envelope + validace jen položky i
       INSERT ingest_receipts (provisional status accepted|invalid)
-      když je použitelný msg_key + namespace:
-        UPSERT ingest_message_keys (R20)
-          first_delivery: status zůstane accepted|invalid,
-            keys.receipt_* = tento receipt, delivery_count = 1
-          jinak: UPDATE receipt.status = duplicate_delivery,
-            delivery_count += 1, outcome a original_receipt_* zůstanou z prvního doručení
-      bez klíče: first_delivery = true, bez ingest_message_keys
+      R20 klíč (UPSERT ingest_message_keys) jen když je důkaz schválený:
+        budoucí ESP MQTT: proof_basis = esp_queue_v1 (R37) a R20 item_index = 0;
+          first_delivery (včetně terminálního invalid, R37-O1 D6):
+            status accepted|invalid, keys.outcome = tento výsledek, delivery_count = 1
+          existující klíč + shodný esp_queue_immutable_v1:
+            receipt.status = duplicate_delivery; delivery_count += 1;
+            outcome a receipt_* beze změny (ACK = outcome, D2)
+          existující klíč + jiný immutable:
+            receipt.status = content_mismatch; keys beze změny (ACK = content_mismatch, D1)
+        současný evaluate_item: otevírá klíč z neprázdného msg_key+namespace
+          (bez brány proof_basis / immutable; R37 a R37-O1 ještě neimplementováno)
+      bez důkazu (včetně S3 duplicitního msg_key v dávce): first_delivery = true,
+        bez ingest_message_keys; S3 → receipt invalid, ACK invalid na unikátní msg_key (D4)
       Současný evaluate_item do raw_telegrams / device_events / device_telemetry
         nezapisuje; to je pozdější krok mimo tento evaluator.
       COMMIT
-ACK až po COMMIT TX2. Odpověď má jeden záznam na položku:
-  aplikační výsledek bere outcome (+ original_receipt_*),
-  historický stav doručení této TX1 položky je receipt_status.
+Application ACK až po COMMIT všech TX2 položek doručení (R37-O1):
+  sestavení dle pořadí content_mismatch → S3 invalid → keys.outcome → receipt.status;
+  historický stav tohoto doručení je receipt_status (duplicate_delivery jen tam).
 ```
 
 Rozlišení opakování:
 
 - **Opakované evaluate stejné TX1 položky** (stejný `payload_id` + měsíc + `item_index`): nejvýše jeden receipt; short-circuit vrátí stejný `EvaluationResult` a nezvýší `delivery_count`. Volající může být ruční zásah, test, nebo `sjv_ingest.recovery` / `python -m sjv_ingest.recovery`, které nedokončené položky dohledají a předají do `evaluate_item`.
-- **Nové transportní doručení** (znovu `accept`, typicky po ztraceném ACK): nový `payload_id`, i když bajty nebo `msg_key` sedí. Při shodném R20 klíči nový receipt se `receipt_status = duplicate_delivery`; `delivery_count` se zvýší; `outcome` a `original_receipt_*` zůstanou z prvního doručení. To není TX1 recovery stejné uložené položky.
+- **Nové transportní doručení** (znovu `accept`, typicky po ztraceném application ACK): nový `payload_id`, i když bajty nebo `msg_key` sedí. Při `esp_queue_v1` a shodném immutable: receipt `duplicate_delivery`, `delivery_count++`, `outcome` beze změny, ACK = `outcome`. Při jiném immutable: receipt `content_mismatch`, keys beze změny, ACK = `content_mismatch`. To není TX1 recovery stejné uložené položky.
 
 Pozdější kroky dekódování (`telegram_dedup_keys`, `decode_queue`, `raw_telegrams`) zůstávají popsané v sekcích o telegramu a workerovi. Řádek `decode_queue` vkládá role přijímajícího procesu jen když výsledek telegramové deduplikace je `pending`. U MQTT je to `sjv_collector`, u HTTPS `sjv_api`. Obě role mají na frontu jen `INSERT`. `sjv_worker` řádek nevkládá. Bere ho `FOR UPDATE SKIP LOCKED`, zapíše zámek a počet pokusů a po vyčerpání pokusů ho smaže.
 
-Zařízení smí frontu smazat až po ACK, ve kterém má uložený výsledek každá položka. `duplicate_delivery` platí jen pro položku, jejíž R20 klíč už patřil dřívějšímu doručení. Stejný `content_hash` bez prokázaného identifikátoru tímto krokem `duplicate_delivery` nezaloží.
+Zařízení smí frontu smazat až po application ACK, ve kterém má uložený výsledek každá unikátní `msg_key` dávky. Receipt `duplicate_delivery` sám o sobě ACK literál není; ESP dostane `keys.outcome`. Stejný `content_hash` bez prokázaného identifikátoru `duplicate_delivery` nezaloží.
 
 ### Proč je to bezpečné při souběhu
 

@@ -1,6 +1,6 @@
 # Rozhodnutí
 
-Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Dne 16. 11. 2026 přibylo rozhodnutí R31 o výměnách a metrologické historii. Téhož dne se uzavřely jeho tři otevřené body: metrologické lhůty a upozornění, význam `failed` a shoda `location`. R1–R30 zůstávají schválené a beze změny. Dne 17. 11. 2026 přibylo rozhodnutí R32 o doručení s prokázaným `message_ref` po `timed_out`. R1–R31 se nemění. Dne 20. 11. 2026 přibylo rozhodnutí R33 o PostgreSQL 19 a o zahájení ostrého sběru 1. 1. 2027. Znění rozhodnutí 1–32 a revizí R1–R32 se nemění. Téhož dne přibylo rozhodnutí R34 o dokončení ingest schématu a 26. 11. 2026 R36 o obecné telemetrii a bateriovém monitoringu. Znění R1–R35 se nemění. Schválení dokumentace neznamená souhlas s nasazením.
+Stav: dokumentace po technické revizi (kolo 3) z 9. 11. 2026, doplněná 10. 11. 2026 o univerzální datovou vrstvu a ACRIOS (rozhodnutí 15–19), druhé kolo kontroly příjmu (20–24), třetí kolo (25–30) a upřesnění formulace 20 a 26 ve čtvrtém kole. Dne 16. 11. 2026 přibylo rozhodnutí R31 o výměnách a metrologické historii. Téhož dne se uzavřely jeho tři otevřené body: metrologické lhůty a upozornění, význam `failed` a shoda `location`. R1–R30 zůstávají schválené a beze změny. Dne 17. 11. 2026 přibylo rozhodnutí R32 o doručení s prokázaným `message_ref` po `timed_out`. R1–R31 se nemění. Dne 20. 11. 2026 přibylo rozhodnutí R33 o PostgreSQL 19 a o zahájení ostrého sběru 1. 1. 2027. Znění rozhodnutí 1–32 a revizí R1–R32 se nemění. Téhož dne přibylo rozhodnutí R34 o dokončení ingest schématu a 26. 11. 2026 R36 o obecné telemetrii a bateriovém monitoringu. Znění R1–R35 se nemění. Dne 28. 11. 2026 přibylo schválené kontraktní rozhodnutí R37 o důkazu identity položky fronty vlastního ESP32 (`esp_queue_v1`). Znění R1–R36 se nemění. Téhož dne bylo schváleno doplnění **R37-O1** (D1, D2, D4, D6, D7) o application ACK, `content_mismatch` a oddělení MQTT PUBACK. Znění R20, R29, R35 a R37 se nemění; O1 je uzavírá v rozsahu ACK/receipt projekce. Téhož dne bylo schváleno doplnění **R37-O4** (varianta B) o trusted ESP MQTT příjem, DB pojistku P4 a SECURITY DEFINER funkce. Znění R20, R29, R35, R37 a R37-O1 se nemění. Schválení R37/O1/O4 neznamená produkční připravenost collectoru, firmwaru, SQL migrací ani evaluatoru. Schválení dokumentace neznamená souhlas s nasazením.
 
 ## Potvrzená rozhodnutí
 
@@ -215,12 +215,156 @@ Znění R1–R35 se nemění. Jde o dokumentační návrh; schválení R36 samo 
 4. Aplikační ACK se publikuje až po databázovém COMMIT. Zařízení odstraní vzorek z lokální fronty až po uložení odpovídajícího výsledku ACK. Heartbeat zůstává samostatný, QoS 0, s intervalem 60 sekund.
 5. Alarmy baterie vyhodnocuje centrálně VPS po uložení telemetrie. `device_events` je určen pro významné změny a alarmy (`battery_low`, `battery_critical`, `power_source_changed`, `charging_changed`, `battery_sensor_fault`), nikoli pro každý vzorek. Konkrétní prahy vyžadují rozhodnutí podle chemie a zapojení, včetně hystereze a potlačení opakovaných notifikací.
 
+## Doplnění 28. 11. 2026: důkaz identity položky fronty ESP32
+
+**R37 – Důkaz identity položky fronty vlastního ESP32 (`esp_queue_v1`)**
+
+R37 plní požadavek R35 bodu 6 na samostatné schválení významu `proof_basis` pro vlastní ESP na MQTT. Znění R20, R29 a R35 se nemění. R37 je kontrakt; neimplementuje collector, firmware ani úpravu `evaluate_item`. Schválení R37 neznamená produkční připravenost.
+
+### 1. Identita položky ESP fronty
+
+1. `msg_key` identifikuje jednu položku persistentní fronty ESP, nikoli fyzické měřidlo (`meter_key`).
+2. Kanonický formát: `<instance_id>-<boot_counter>-<seq>`, kde `instance_id` je právě 16 znaků `0-9a-f` (lowercase, 64 bitů), `boot_counter` a `seq` jsou desítkové zápisy uint32 bez zbytečných úvodních nul (výjimka: samotné `0`).
+3. `instance_id` je náhodná 64bitová hodnota v NVS (nová po erase NVS/flash). `boot_counter` je monotónní uint32 v NVS. `seq` je uint32 v RAM od nuly v každém bootu.
+4. Při opakovaném odeslání MUST zůstat stejné `msg_key`, uložené `rx.*` a původní wM-Bus bajty; `tx.*` a `age_ms` se MAY měnit.
+5. Ethernet a LTE jsou dvě cesty ke stejnému MQTT; `msg_key_namespace` zůstává `mqtt` (R29). HTTPS není failover a `esp_queue_v1` na něj R37 nepřesouvá.
+
+### 2. R20 a `item_index`
+
+1. Tvar R20 PK `(ingest_source_id, msg_key_namespace, msg_key, item_index)` zůstává (rozhodnutí 20).
+2. Pro `proof_basis = esp_queue_v1` MUST být složka R20 `item_index` vždy **0**. Unikátnost položky fronty nese `msg_key`.
+3. TX1 `ingest_payload_items.item_index` zůstává pořadím položek v přijaté obálce (0…n−1) dle R35.
+4. Změna pořadí položek při retry MUST NOT měnit R20 identitu `esp_queue_v1`.
+5. Opakovaný stejný `msg_key` v jedné obálce: TX1 se MUST uložit; collector MUST nastavit `proof_basis = NULL` u **všech** položek této obálky (žádné částečné `esp_queue_v1`).
+
+### 3. `proof_basis` a podmínky P1–P7
+
+1. `proof_basis` NIKDY není autoritativní hodnota z těla zprávy ESP. Nastavuje ji pouze důvěryhodný collector (nebo ekvivalentní důvěryhodná serverová cesta) po ověření.
+2. Schválená hodnota báze pro toto rozhodnutí: `esp_queue_v1`.
+3. `identifier_proven` samo o sobě NENÍ důkaz a MUST NOT otevírat vznik `ingest_message_keys`.
+4. Neznámé fyzické měřidlo MUST NOT bránit uznání `esp_queue_v1` ani R20 deduplikaci položky fronty. `unknown_meter` zůstává pozdější telegramovou větví.
+5. Collector smí nastavit `esp_queue_v1` jen když současně platí:
+   - **P1** transport `mqtt` a `device_id` / `ingest_source_id` z autentizace;
+   - **P2** topic ACL shodný s autentizovaným zařízením;
+   - **P3** kanonický `msg_key` (§1);
+   - **P4** uplinková kanonická `instance_id = V` je vázána na autentizované `devices.id = D` přes aktivní `device_external_ids(kind = esp_instance, value = V)` patřící právě `D`, nebo právě úspěšnou první registraci volné `V` u `D` bez dosavadní aktivní instance (viz §6). Existence jiné aktivní instance `A ≠ V` u `D` P4 nesplní. Konflikt s cizí aktivní hodnotou ⇒ bez báze;
+   - **P5** `msg_key_namespace = mqtt`;
+   - **P6** `rx.instance` a `rx.boot` přítomné a shodné s `instance_id` / `boot_counter` v `msg_key`;
+   - **P7** každá položka má vlastní `msg_key`; duplicita v dávce ⇒ §2 bod 5.
+6. Budoucí `evaluate_item` MUST zakládat / upsertovat `ingest_message_keys` pro ESP MQTT jen při uložené `proof_basis = esp_queue_v1` (a platných klíčových polích), nikoli z pouhého neprázdného textu `msg_key`. Současný kód tuto bránu ještě nemá; R37 ji předepisuje jako kontrakt implementace.
+
+### 4. Immutable hash `esp_queue_immutable_v1`
+
+1. Pro porovnání retry při existujícím R20 klíči se spočte SHA-256 nad pevnou posloupností length-prefixed chunků (`u32be(len) || bytes`), prefix ASCII `esp_queue_immutable_v1`.
+2. Pořadí a typy chunků: `msg_key` (UTF-8); `msg_key_namespace` (UTF-8 `mqtt`); `original` (raw); `frame_original` (raw nebo prázdný chunk při NULL); `frame_format` (UTF-8 nebo prázdný); `crc_included` (NULL → prázdný chunk; false → `0x00`; true → `0x01`); `rssi` (NULL → prázdný; jinak int32be); `rx_instance_id` (NULL → prázdný; jinak UTF-8 16 lowercase hex); `rx_boot` (NULL → prázdný; jinak **u32be**); `rx_uptime_ms` (NULL → prázdný; jinak **u64be**, záporné nepřípustné pro bázi); `device_rx_unix_ms` (NULL → prázdný; přítomná nula → **u64be(0)**).
+3. MUST NOT zahrnout `tx_*`, `age_ms`, `proof_basis`, `identifier_proven`, `server_received_at` ani TX1 `item_index`.
+4. Otisk se MUST přepočítat z první uložené položky odkazované prvním receiptem (`ingest_message_keys.receipt_*` → `ingest_receipts` → `ingest_payload_items`) a z aktuální položky. Nový DB sloupec není nutný.
+5. Shodný hash ⇒ MAY `duplicate_delivery` (jen `ingest_receipts.status`). Rozdílný hash při stejném R20 klíči ⇒ MUST NOT `duplicate_delivery`; mapování na receipt a application ACK je v **R37-O1** (`content_mismatch`).
+6. Obecný význam `ingest_receipts.content_hash` se nemění.
+
+### 5. Boot counter, NVS a fronta
+
+1. Firmware MUST používat obnovitelný stav NVS: `boot_phase` ∈ {`idle`, `prepared`, `committed`}, `boot_counter`, `boot_next`.
+2. Start: rezervovat `boot_next`, zapsat `prepared`, read-back; teprve pak commitnout `boot_counter` a vrátit `idle`. Výpadek v `prepared` MUST NOT způsobit dvojí inkrementaci.
+3. Přetečení `boot_counter` nebo neopravitelné poškození identity ⇒ nový `instance_id` (ne wrap na 0 ve stejné instance) nebo stav identity unsafe.
+4. Identity unsafe: MUST NOT vytvářet nové položky fronty s novými `msg_key`, dokud není bezpečný commit boot / nová instance.
+5. Staré záznamy LittleFS MUST zachovat původní `msg_key` i po nové `instance_id`. Nová instance se vztahuje jen na nové záchyty.
+6. Pořadí inkrementace `seq` vůči commit záznamu LittleFS (před/po) zůstává implementační volbou firmwaru — O2. Brown-out záruky konkrétního ESP32-S3 NVS — O3.
+
+### 6. Registrace `esp_instance`
+
+1. Vazba je v `device_external_ids` (`kind = esp_instance`), omezení `uq_device_external_ids_active_value` (UNIQUE aktivní `kind+value` → SQLSTATE **23505**) a `ex_device_external_ids_active_kind` (exclusion jedné aktivní `esp_instance` na `device_id` → SQLSTATE **23P01`).
+2. Jednotné pořadí zámků: (1) `SELECT … FROM devices WHERE id = $D FOR UPDATE`; (2) aktivní `esp_instance` řádky tohoto `$D` FOR UPDATE; (3) aktivní řádek s `value = $V` FOR UPDATE; (4) zápis / audit.
+3. `$V` aktivní u cizího device ⇒ MUST NOT měnit cizí `valid_to` ani převzít hodnotu; audit `external_id_conflict` v úspěšné TX; bez `esp_queue_v1`.
+4. Při 23505 / 23P01: bezpečný rollback, opakované načtení od zámku `devices`, nové vyhodnocení stavu.
+5. Collector smí přidělit `proof_basis = esp_queue_v1` pouze tehdy, když současně platí:
+   1. MQTT autentizace určila konkrétní `devices.id = D`;
+   2. uplink obsahuje kanonickou `instance_id = V`;
+   3. existuje aktivní vazba `device_external_ids(kind = 'esp_instance', value = V)` patřící právě zařízení `D`; **nebo** jde o první registraci volné hodnoty `V` u zařízení `D` bez dosavadní aktivní instance a tato registrace byla úspěšně provedena podle tohoto §6 (body 1–4). První registrace není rotace;
+   4. všechny ostatní podmínky P1–P7 (§3) jsou splněny.
+6. **Neshoda A ≠ B:** Pokud zařízení `D` již má aktivní instanci `A` a aktuální uplink obsahuje jinou instanci `B`, pak samotná autentizace zařízení `D` ani existence aktivní vazby `A` neopravňuje collector k přidělení `esp_queue_v1` pro `B`. V takovém případě MUST `proof_basis` zůstat NULL; collector MUST NOT automaticky uzavřít vazbu `A`; MUST NOT automaticky zaregistrovat `B` jako náhradu `A`; změnu instance MUST odmítnout jako prokázanou identitu fronty. Rotace `A` → `B` MAY proběhnout pouze po samostatně definované a ověřené autorizaci. **Automatická rotace** pouze proto, že uplink poslal jinou `instance_id`, **není tímto rozhodnutím schválena.** Pravidla autorizace rotace (automaticky vs admin) zůstávají **otevřená implementační podmínka**; dokud nejsou schválena a implementována, nesmějí se prezentovat jako hotová.
+
+### 7. Mimo rozsah R37
+
+R37 neschvaluje: ACRIOS důkazní bázi, HTTPS `esp_queue_v1`, zápis `raw_telegrams` / odečtů, změnu wire JSON ESP, ani tvrzení, že collector/`evaluate_item` už R37 provádějí. Mapování receipt/ACK při content-mismatch a duplicitním `msg_key` v dávce schvaluje samostatné doplnění **R37-O1** níže (včetně literálu `content_mismatch`). Migrace CHECK a implementace zůstávají až po O1 jako implementační krok; O1 samotné schema nemění.
+
+## Doplnění 28. 11. 2026: R37-O1 – application ACK a kolize `msg_key`
+
+**R37-O1 – Application ACK, `content_mismatch` a oddělení MQTT PUBACK (D1, D2, D4, D6, D7)**
+
+Uzavírá otevřený bod O1 u R37. Znění R20, R29, R35 a R37 (mimo nahrazení odkazu „O1 otevřené“ v §4 bodu 5) se nemění. R37-O1 je kontrakt; neimplementuje collector, migraci CHECK ani úpravu `evaluate_item`.
+
+Schválená rozhodnutí:
+
+| ID | Pravidlo |
+| --- | --- |
+| **D1** | Literál `content_mismatch` je povolený `ingest_receipts.status` a literál application ACK. Při něm se `ingest_message_keys` **nemění**. ACK.`status` = `content_mismatch` má **přednost** před `keys.outcome`. |
+| **D2** | Při shodném `esp_queue_immutable_v1` (S1) je ACK.`status` = `ingest_message_keys.outcome`. `duplicate_delivery` je **pouze** receipt status nového doručení, nikoli náhrada původního výsledku v ACK. |
+| **D4** | Duplicitní `msg_key` v jednom envelope (S3): `proof_basis = NULL` u všech položek (R37). Application ACK má **jeden** výsledek na unikátní `msg_key` se `status = invalid`. Všechny TX1 výskyty zůstávají dohledatelné v DB. |
+| **D6** | Při `proof_basis = esp_queue_v1` a commitnutém terminálním výsledku včetně `invalid` MUST vzniknout / zůstat R20 klíč s `outcome` = první terminální výsledek (idempotentní ACK při retry). |
+| **D7** | MQTT PUBACK ≠ application ACK. Application ACK se odesílá až po terminálním COMMIT **všech** TX2 položek daného doručení. PUBACK nejdřív po COMMIT TX1; smí být odložen až po TX2. PUBACK nevyjadřuje úspěch položky fronty. |
+
+### Pořadí sestavení application ACK (unikátní `msg_key`)
+
+Až když jsou všechny položky doručení terminálně vyhodnocené a jejich TX2 změny commitnuté, pro každý unikátní `msg_key`:
+
+1. Toto doručení má receipt `content_mismatch` → ACK.`status` = `content_mismatch` (D1). Konec.
+2. Envelope obsahuje jakýkoli duplicitní `msg_key` → ACK.`status` = `invalid` pro každý unikátní `msg_key` dávky (D4). Konec.
+3. Existuje R20 a `esp_queue_immutable_v1` sedí → ACK.`status` = `keys.outcome` (D2); receipt smí být `duplicate_delivery`. Konec.
+4. Terminální receipt bez R20 → ACK.`status` = `receipt.status`. Konec.
+5. Jakákoli položka doručení bez terminálního COMMIT (včetně dočasné chyby bez COMMIT) → **neodesílat** application ACK.
+
+Dočasná chyba bez COMMIT nezakládá terminální R20 výsledek ani application ACK; umožňuje recovery stejné TX1 trojice nebo nové doručení.
+
+Wire tvar ACK zůstává položkový:
+
+```json
+{ "v": 1, "results": [ { "msg_key": "<instance>-<boot>-<seq>", "status": "<ack-status>" } ] }
+```
+
+`status` je aplikační výsledek dle pořadí výše. Firmware maže položku fronty podle `msg_key` po uložení terminálního ACK (stávající pravidlo ve firmware-design).
+
+### Kontrakt vs implementace
+
+Současný `evaluate_item` otevírá R20 z neprázdného `msg_key` bez `proof_basis`, neporovnává `esp_queue_immutable_v1` a při konfliktu vždy nastaví `duplicate_delivery`. Collector a MQTT ACK v repozitáři nejsou. R37-O1 předepisuje cílové chování; CHECK enum pro `content_mismatch` a úprava evaluatoru jsou budoucí implementace.
+
+## Doplnění 28. 11. 2026: R37-O4 – trusted ESP MQTT příjem a DB pojistka P4
+
+**R37-O4 (varianta B) – Trusted-only nastavení `esp_queue_v1`, první registrace a BEFORE INSERT pojistka P4**
+
+Uzavírá otevřený bod O4 u R37. Znění R20, R29, R35, R37 a R37-O1 se nemění. R37-O4 je architektonický kontrakt; neimplementuje Python collectoru, SQL migraci, triggery ani DEFINER funkce v repozitáři. Schválení O4 neznamená produkční připravenost.
+
+### Schválená architektura
+
+1. Produkční ESP MQTT příjem MUST používat samostatnou cestu `trusted_esp_accept(authenticated_device_id, envelope)`. Obecná knihovní `accept()` MUST vždy ukládat `proof_basis = NULL` (vhodné pro non-ESP a testy; ESP MQTT s bází MUST jít trusted cestou).
+2. Trusted cesta v **jedné TX1** ověří P1–P7 včetně P4 a uloží položky s **konečným** `proof_basis ∈ {esp_queue_v1, NULL}`. Durable pending stav mezi TX1 a pozdějším nastavením báze se **nezavádí**.
+3. První registrace volné `esp_instance` hodnoty `V` u zařízení `D` bez dosavadní aktivní instance MUST probíhat výhradně přes `sjv_esp_instance_register_free(device_id, value)` (`SECURITY DEFINER`, OWNER `sjv_owner`, pevný `search_path`, plně kvalifikované názvy, `REVOKE ALL … FROM PUBLIC`, `EXECUTE` jen `sjv_collector`). Parametry jsou pouze `device_id` a `value`; volající MUST NOT předávat `kind`, `origin` ani `valid_to`. Funkce hardcoduje `kind = 'esp_instance'`, drží zámky R37 §6 a při 23505 / 23P01 MUST NOT uzavírat cizí ani stávající vazbu. Automatická rotace A→B zůstává zakázaná (R37 §6 bod 6).
+4. `BEFORE INSERT` trigger na `ingest_payload_items` zůstává **`SECURITY INVOKER`**. Při `NEW.proof_basis = 'esp_queue_v1'` MUST ověřit existenci payloadu, `transport = 'mqtt'`, `msg_key_namespace = 'mqtt'`, kanonický `msg_key`, shodu `payload.device_id` s autentizovaným zařízením položky a extrahovanou `instance_id = V`, a povinně zavolat `sjv_esp_p4_assert(device_id, instance_id)`.
+5. `sjv_esp_p4_assert(device_id, instance_id)` je úzká `SECURITY DEFINER` funkce: OWNER `sjv_owner`; pevný `search_path`; plně kvalifikované názvy; `REVOKE ALL … FROM PUBLIC`; `EXECUTE` pouze `sjv_collector`; žádné parametry `kind` / `origin` / `valid_to`; **žádný zápis** do tabulek. Uvnitř: row-locky v pořadí R37 §6 prefixu — (1) `public.devices` řádek `D` `FOR UPDATE`; (2) aktivní `public.device_external_ids` řádky `kind = 'esp_instance'` zařízení `D` `FOR UPDATE` — a ověření, že aktivní instance má přesně hodnotu `V`. Jinak RAISE a INSERT neprojde.
+6. PostgreSQL vyžaduje pro `SELECT … FOR UPDATE` také oprávnění `UPDATE` (alespoň na jednom sloupci zamčené tabulky). `sjv_collector` má na `device_external_ids` jen `SELECT` a **MUST NOT** dostat široké ani sloupcové `UPDATE` na tuto tabulku kvůli zamykání. Zámky P4 proto zajišťuje DEFINER assert (a registrace DEFINER funkce), nikoli INVOKER `FOR UPDATE` collectoru.
+7. Trusted cesta i přímý `INSERT` s `esp_queue_v1` MUST používat stejný prefix pořadí zámků. Přímý INSERT bez platné aktivní vazby D↔V MUST selhat na triggeru / assertu. Holý `SELECT` bez row-locků nestačí proti souběžné změně vazby mezi kontrolou a COMMIT.
+8. Trigger ani databáze samy **neprokazují** MQTT autentizaci identity `D` ani **P2** topic ACL. Tyto kontroly MUST zajistit collector před nastavením `esp_queue_v1`. DB pojistka kryje P4 (a kanonické MQTT/msg_key podmínky triggeru), nikoli P2.
+9. Budoucí `evaluate_item` MUST zakládat R20 pro ESP MQTT jen při uložené `proof_basis = esp_queue_v1` (R37 §3 bod 6; R37-O1 D6). Položka s `proof_basis` NULL MUST NOT otevřít R20 jen z textu `msg_key`.
+
+### Kontrakt vs implementace
+
+Současný `sjv_ingest.accept` ukládá `proof_basis` prázdnou; `trusted_esp_accept`, `sjv_esp_instance_register_free`, `sjv_esp_p4_assert` a BEFORE INSERT trigger v repozitáři **nejsou**. O4 předepisuje cíl; SQL migrace a úprava collectoru / evaluatoru jsou budoucí implementace.
+
+### Otevřené pod O4
+
+- **U3** — hodnota `origin` při první registraci `esp_instance`; enum `device_external_ids.origin` se tímto rozhodnutím **nemění**.
+- R37-O2, R37-O3 a autorizace rotace A→B zůstávají otevřené (viz tabulka níže).
+
 ## Otevřené body
 
 Hodnoty, které nejsou známé, se nedoplňují odhadem.
 
 | Bod | Blokuje |
 | --- | --- |
+| **R37-O2** Pořadí inkrementace `seq` vůči LittleFS commit | firmware spec a testy reuse `seq` |
+| **R37-O3** Brown-out ověření NVS na skutečném ESP32-S3 | důvěra v §5 R37 na HW |
+| **R37-O4 U3** Hodnota `origin` při `sjv_esp_instance_register_free` (enum beze změny) | dokončení SQL textu registrace |
+| Autorizace rotace `esp_instance` (automat vs admin) po změně `instance_id` | R37 §6 bod 6; produkční collector |
 | Kapacita VPS (`<CPU>`, `<RAM>`, disk). Kontejner `sjv-monitoring` má adresu `10.10.10.20` | E1, měření zátěže |
 | Zda DNS účet dovolí druhé veřejné jméno (`MQTT_HOSTNAME` jiné než `SJV_DOMAIN`) a jak se to jméno udržuje | E2, MQTT hostname |
 | Upload domácí linky | odhad RTO před DR testem ve fázi 13 |

@@ -230,7 +230,11 @@ odstraní až po uložení odpovídajícího aplikačního ACK pro každou jeho 
 Aktuální plán firmware používá MQTT/TLS přes Ethernet jako primární uplink
 a přes LTE jako záložní uplink. Přepnutí Ethernet/LTE proto zůstává uvnitř
 MQTT: `instance_id`, `boot_counter`, `seq`, `msg_key` i obsah fronty se
-nemění a doručení zůstává ve stejném `msg_key_namespace = mqtt`.
+nemění a doručení zůstává ve stejném `msg_key_namespace = mqtt`
+(R29; důkaz položky fronty `esp_queue_v1` dle [R37](decisions.md);
+produkční serverová cesta `trusted_esp_accept` a DB pojistka P4 dle
+[R37-O4](decisions.md) — v repozitáři zatím neimplementováno; obecná
+knihovní `accept()` ukládá `proof_basis` NULL).
 
 HTTPS je samostatná budoucí transportní možnost podle
 [data-ingestion.md](data-ingestion.md). Není transparentním failoverem
@@ -238,6 +242,7 @@ aktuálního firmware a není způsobem opakování stejné položky se stejnou
 deduplikační identitou. MQTT a HTTPS mají rozdílný `msg_key_namespace`
 (`mqtt` / `https`). Stejný text `msg_key` při přechodu MQTT → HTTPS proto
 může skončit jako `id_collision`, nikoli jako `duplicate_delivery`.
+R37 nepřesouvá `esp_queue_v1` na HTTPS.
 
 `data-ingestion.md` uvádí pro raw rámce topic:
 
@@ -287,15 +292,21 @@ Server publikuje výsledek do:
 sjv/v1/dev/{device}/ack
 ```
 
-ACK má jeden výsledek pro každou položku dávky. `duplicate_delivery` potvrzuje
-konkrétní opakované doručení; nepotvrzuje automaticky jiné položky téže dávky.
-Přijímač odstraní položku z fronty až poté, co uloží odpovídající výsledek ACK.
+ACK má jeden výsledek pro každou unikátní `msg_key` dávky. Stav
+`duplicate_delivery` je stav **receipt** (`ingest_receipts.status`)
+opakovaného doručení; **není** automaticky literál aplikačního ACK.
+Podle [R37-O1](decisions.md) S1 / D2 ACK při shodném immutable vrací
+původní `keys.outcome`. Přijímač odstraní položku z fronty až poté,
+co uloží odpovídající výsledek ACK.
 
-Aplikační ACK není totéž co MQTT PUBACK. Server jej smí vytvořit a odeslat
-až po COMMITu databázového výsledku. Při ztrátě ACK zařízení znovu pošle
-stejný `msg_key` a stejné `rx`; server použije existující identitu
-`(ingest_source_id, msg_key_namespace, msg_key, item_index)` a nevytvoří druhý
-logický odečet.
+Aplikační ACK není totéž co MQTT PUBACK ([R37-O1](decisions.md) D7).
+Application ACK až po COMMIT všech TX2 položek doručení; PUBACK nejdřív
+po TX1. Při ztrátě ACK zařízení znovu pošle stejný `msg_key` a stejné `rx`;
+při `esp_queue_v1` je R20 `item_index` 0. S1 shodný immutable → receipt
+`duplicate_delivery`, ACK = `keys.outcome`; S2 jiný immutable → receipt
+i ACK `content_mismatch` (keys beze změny); S3 duplicitní `msg_key`
+v dávce → `proof_basis` NULL a ACK `invalid` na unikátní `msg_key`.
+Server tím nevytvoří druhý logický odečet ze stejné položky fronty.
 
 ## 13. Ethernet a LTE failover
 
