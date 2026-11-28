@@ -72,6 +72,62 @@ Chybějící `python3` ukončí krok kontraktu ingestu chybou a text pojmenuje b
 | Retence ingestu staršího než 24 měsíců | `test.sh` nespouští databázový kontejner | Stejný izolovaný běh uvnitř test image, `tests/retention_tests.py`, rolí `sjv_maintenance`. Odklad kvůli `decode_queue` a kvůli `decoded` bez odečtu `raw:<id>`. Stavy `needs_review`, `ambiguous`, `pending`, `failed`, `no_key` a `suspect_replay` samy retenci neblokují. Odkaz na payload, který běh nechá, měsíc odloží. Odkaz odstraněný v tomtéž běhu payload pustí. Položky se odpojí před payloadem. `telegram_dedup_keys` se mažou před `raw_telegrams`. Příjem jiného měsíce a `device_events` zůstávají. `DETACH` a `DROP` jednoho potomka jsou jedna transakce a úspěch v `retention_log` je v ní. Chyba další krok měsíce nespustí a úspěšný záznam tohoto kroku nenechá. Zachytitelná chyba odkladu, kroku i vyhodnocení důvodu uvolní session zámek a další běh ho získá. Cizí zámek téže session odmítnutí mladého měsíce neuvolní. Dva běhy současně retenci neprovádějí. Volání uvnitř otevřené transakce skončí před získáním zámku. `COMMIT` po získání zámku procedura nezachytí; `sjv_retention_release_lock` pak uvolní jen zámek této session. Neplatný měsíc, krok nebo prázdný důvod `failed` nezapíšou. Vlastník funkcí je `sjv_owner`. `sjv_collector`, `sjv_api` a `sjv_readonly` retenci nespouštějí a `CREATE` ve schématu `public` nemá nikdo kromě `sjv_owner`. `ingest_receipts` na payload cizí klíč nemá |
 | TX1 recovery (izolované) | `test.sh` nespouští databázový kontejner | Stejný izolovaný běh uvnitř test image, `tests/recovery_tests.py`: výběr položek bez receiptu, volání existujícího `evaluate_item`, souběh / opakovaný běh, oprávnění `sjv_collector`. Periodický worker, host timer ani historický backfill se netestují — v repozitáři nejsou |
 
+## Izolovaný integrační test databáze
+
+Jednorázový běh `app/backend/tests/isolated-schema-test.sh`. Není součástí `test.sh` a není produkční služba. Sestaví image z `app/backend/Dockerfile.test` (kontext omezuje `app/backend/.dockerignore`), spustí dočasné PostgreSQL 19.0 a veškeré Alembic i Python kontroly provede jen uvnitř toho image.
+
+### Účel
+
+Ověřit na dvou prázdných databázích migrace Alembic, výsledné schéma a oprávnění, příjem ingest obálky včetně raw payloadů, deduplikaci a idempotenci evaluatoru, souběh, TX1 recovery a retenci starších měsíců — bez zásahu do runtime databáze projektu.
+
+### Rozsah kontrol
+
+Pořadí ve skriptu:
+
+1. `tests/test_recovery.py` — unit kontroly TX1 recovery bez databáze (SQL stránkování / keyset, klasifikace chyb, `batch_size`, CLI exit kódy). Běží v test image; hostitelský `python3` slouží jen zámku, tajemstvím a zápisu URL souboru.
+2. `alembic upgrade head`, `alembic check` a odmítnutí `alembic downgrade -1` jako forward-only (head `0004_receipt_status_update`).
+3. `tests/schema_tests.py` — tabulky a partitiony, role a granty (`sjv_collector`, fragmenty, `decode_queue`, `device_events`, `endpoint_credentials` včetně zákazu čtení `secret_enc` pro `sjv_readonly` a jiné ne-owner role), sloupcové `UPDATE (status)` na `ingest_receipts` pro R20.
+4. `tests/ingest_accept_tests.py` — `accept` obálky jako `sjv_collector`, uložení payloadu a položek, prázdná obálka / chybové stavy, deduplikace a idempotence `evaluate_item`, transakční rollback, souběžní evaluátoři.
+5. `tests/retention_tests.py` — retence měsíců starších než 24 měsíců rolí `sjv_maintenance` (odklady, pořadí mazání, zámky, chybové cesty). Detaily kritérií jsou ve sloupci „Jak ověřit“ výše u retence.
+6. `tests/recovery_tests.py` — výběr nedokončených položek, volání `evaluate_item`, souběh recovery s evaluátorem, oprávnění `sjv_collector`, simulace pádu a opakovaný běh. Periodický worker ani host timer v repozitáři nejsou.
+
+Celá sada (body 2–6) běží dvakrát: na databázi `sjv` a na samostatně vytvořené prázdné `sjv_repeat`.
+
+### Izolace
+
+- PostgreSQL `postgres:19.0` s digestem zapsaným ve skriptu; data jen na `--tmpfs`, init role z `postgresql/docker-entrypoint-initdb.d` jen pro čtení.
+- Dvě prázdné databáze (`sjv`, pak `sjv_repeat` s `OWNER sjv_owner` a stejnými granty CONNECT/USAGE jako produkční model).
+- Docker síť s `--internal` a labely běhu; kontejnery (PostgreSQL i ephemeral Python) jsou jen na této síti, bez publikovaného portu na hostitele.
+- Žádný Compose stack, `init.sh`, `/docker-data`, runtime `.env` ani `SJV_DATABASE_URL` z prostředí hostitele (skript je odmítne). Checkout pod `/docker-data` odmítne.
+- Testovací image `Dockerfile.test`: build přes `uv sync --frozen` z `uv.lock`, runtime bez `uv`/`pip`, běh jako uid `10001` (`sjvtest`). `.dockerignore` vynechá `.venv/`, bytecode, `.git/` a `*.md`.
+- Hesla se generují do `sjv-alembic-itest.*/secret-*` (mode 600). URL se předává bind-mountem souboru `url-*` do kontejneru (dočasně 644 pro uid 10001, po běhu zpět 600); heslo není v `docker run -e` ani v `Config.Env` testovacího kontejneru. PostgreSQL dostane `--env-file` jen z tohoto dočasného `env.file`.
+
+Vyžaduje lokální Docker daemon (unix/fd endpoint; vzdálený `DOCKER_HOST` / kontext skript odmítne) a hostitelský `python3` pro pomocné kroky. Síťový přístup hostitele k balíčkům je potřeba jen při `docker build` / `docker pull`.
+
+### Spuštění
+
+Z kořene checkoutu:
+
+```bash
+./app/backend/tests/isolated-schema-test.sh
+```
+
+Úspěch vypíše `Isolated ingest migration passed on two empty databases.` a skončí kódem 0. Selhání kteréhokoli kroku ukončí skript nenulovým kódem; relevantní log z `sjv-alembic-itest.*` se po redakci hesel vypíše na stderr. Souběžné běhy serializuje flock na `/tmp/sjv-isolated-schema-test.lock`.
+
+### Úklid
+
+EXIT handler maže jen objekty označené labely `sjv.isolated-schema-test=1` a `sjv.isolated-schema-test.run=<RUN_ID>` tohoto běhu: ephemeral Python kontejner, PostgreSQL kontejner, `--internal` síť a image Id zaznamenané po úspěšném buildu. Cizí kontejner, síť ani image neodstraní. Při selhání `docker rm` / inspect / daemonu tracking jméno nebo Id nevymaže a nastaví `CLEANUP_FAILED`. Pokud testy samy prošly (`status` 0), ale úklid selhal, skript skončí kódem 1. Tajné soubory pod `TEST_ROOT` se před případným smazáním adresáře zúží na mode 600; při neúspěšném testu se `TEST_ROOT` ponechá kvůli logům.
+
+### Omezení testu
+
+Test neověřuje:
+
+- skutečný rádiový příjem Wireless M-Bus;
+- firmware ESP32 a CC1101;
+- fyzické připojení Ethernet/LTE;
+- reálnou komunikaci MQTT/TLS s ESP32;
+- produkční nasazení a provozní zatížení.
+
 ## Kontrola na serveru po instalaci
 
 1. `sudo ./scripts/check-env.sh` skončí kódem 0.
